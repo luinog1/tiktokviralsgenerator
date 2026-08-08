@@ -28,12 +28,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SlideContent:
-    """Um slide do carrossel: headline curta + corpo + CTA opcional."""
+    """Um slide do carrossel: headline curta + corpo + CTA opcional.
+
+    `role` indica a função do slide dentro do roteiro viral
+    (hook / problem / agitation / value / proof / cta) — usado pelo
+    SlideRenderer para posicionar o texto na imagem.
+    """
 
     headline: str
     body: str = ""
     call_to_action: str = ""
     order: int = 0
+    role: str = "value"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -41,6 +47,7 @@ class SlideContent:
             "body": self.body,
             "call_to_action": self.call_to_action,
             "order": self.order,
+            "role": self.role,
         }
 
 
@@ -125,6 +132,53 @@ def _truncate(text: str, limit: int) -> str:
     return cut + "…"
 
 
+# ---------- roteiro viral (estrutura de 3 atos) ----------
+#
+# Estrutura clássica de script viral de TikTok:
+#   Ato 1 — HOOK (0-3s): para o scroll.
+#   Ato 2 — DESENVOLVIMENTO: problema → agitação → valor → prova.
+#   Ato 3 — CTA: fecha com uma ação clara.
+#
+# Cada slide do carrossel recebe um desses papéis. O SlideRenderer usa o papel
+# para decidir onde posicionar o texto na imagem (hook fica embaixo e sozinho,
+# slides de valor ficam em dois blocos, etc.).
+
+VIRAL_ROLES = ("hook", "problem", "agitation", "value", "proof", "cta")
+
+
+def viral_script_roles(slides_count: int) -> list[str]:
+    """Distribui os papéis do roteiro viral ao longo de N slides."""
+    n = max(1, slides_count)
+    if n == 1:
+        return ["hook"]
+    if n == 2:
+        return ["hook", "cta"]
+    if n == 3:
+        return ["hook", "value", "cta"]
+    if n == 4:
+        return ["hook", "problem", "value", "cta"]
+    if n == 5:
+        return ["hook", "problem", "value", "value", "cta"]
+    # n >= 6 — estrutura completa, com o miolo em slides de valor
+    return ["hook", "problem", "agitation"] + ["value"] * (n - 5) + ["proof", "cta"]
+
+
+def _normalize_role(value: str) -> str:
+    role = str(value or "").strip().lower()
+    return role if role in VIRAL_ROLES else ""
+
+
+# CTA padrão por estilo — usado só no slide de fecho (role="cta").
+_STYLE_CTA = {
+    "sticker": "salva esse post pra não esquecer 🤍",
+    "quote": "salva pra reler depois 🤍",
+    "list": "salva esse post 🔖",
+    "tutorial": "comenta qual passo você vai aplicar 👇",
+    "story": "segue para mais conteúdos 💜",
+}
+
+
+
 # ---------- implementação mock (determinística) ----------
 
 
@@ -166,6 +220,8 @@ class MockTextComposer:
             # Sem conteúdo útil — preenche com placeholder
             chunks = ["Conteúdo a ser editado."]
 
+        roles = viral_script_roles(target)
+
         if len(chunks) >= target:
             # Agrupar chunks por slide
             per_slide = max(1, len(chunks) // target)
@@ -176,14 +232,14 @@ class MockTextComposer:
                 else:
                     chunk_list = chunks[start : start + per_slide]
                 slide_body = " ".join(chunk_list).strip()
-                slides.append(self._build_slide(slide_body, i, style))
+                slides.append(self._build_slide(slide_body, i, style, roles[i]))
         else:
             # Menos chunks que slides — repetir em rotação para preencher
             for i in range(target):
                 chunk = chunks[i % len(chunks)]
                 # Variar ligeiramente para não ficar idêntico
                 suffix = f" (parte {i + 1}/{target})" if i >= len(chunks) else ""
-                slides.append(self._build_slide(chunk + suffix, i, style))
+                slides.append(self._build_slide(chunk + suffix, i, style, roles[i]))
 
         caption = self._build_caption(body_text, style)
         return ComposedCarousel(
@@ -194,29 +250,27 @@ class MockTextComposer:
         )
 
     @staticmethod
-    def _build_slide(body: str, order: int, style: str) -> SlideContent:
+    def _build_slide(body: str, order: int, style: str, role: str = "value") -> SlideContent:
         body = body.strip()
         if not body:
             body = "Continue para o próximo slide."
-        # Headline = primeira frase curta
-        first_sentence = body.split(".")[0].strip()
-        headline = _truncate(first_sentence or body, 70)
-        cta = ""
-        if style == "quote":
-            cta = ""
-        elif style == "list":
-            cta = "Salva esse post 🔖"
-        elif style == "tutorial":
-            cta = "Comenta qual passo você vai aplicar 👇"
-        elif style == "story":
-            cta = "Segue para mais conteúdos 💜"
+        # Headline = primeira frase; body = o que sobra. Repetir a mesma frase
+        # nos dois campos deixava o slide com o texto duplicado.
+        sentences = _split_sentences(body)
+        if len(sentences) > 1:
+            headline = _truncate(sentences[0], 90)
+            rest = _truncate(" ".join(sentences[1:]), 280)
         else:
-            cta = "Comenta abaixo 👇"
+            headline = _truncate(body, 90)
+            rest = ""
+        # CTA só no slide de fecho — repetir em todos polui o carrossel.
+        cta = _STYLE_CTA.get(style, "comenta abaixo 👇") if role == "cta" else ""
         return SlideContent(
             headline=headline,
-            body=_truncate(body, 280),
+            body=rest,
             call_to_action=cta,
             order=order,
+            role=role,
         )
 
     @staticmethod
@@ -230,16 +284,53 @@ class MockTextComposer:
 # ---------- implementação LLM (Groq-compatible, OpenAI-style) ----------
 
 
-_LLM_SYSTEM_PROMPT = (
-    "Você é um editor de carrossel para redes sociais. "
-    "Receba o texto bruto gerado por outra ferramenta e divida-o em {n} slides "
-    "curtos e impactantes. Cada slide deve ter: headline (máx 70 caracteres), "
-    "body (máx 280 caracteres) e call_to_action (máx 80 caracteres, opcional). "
-    "Estilo visual: {style}. "
-    "Retorne APENAS JSON no formato: "
-    '{{"slides":[{{"headline":"","body":"","call_to_action":""}}],'
-    '"hashtags":[],"caption":""}}.'
+# Estrutura de roteiro viral de TikTok (hook → desenvolvimento → CTA).
+# O texto colado do goviral.ai já vem pronto em prosa; o papel do LLM aqui é
+# REORDENAR e ENCURTAR esse texto na sequência que retém atenção, não inventar
+# conteúdo novo.
+_VIRAL_GUIDE = """Você é roteirista de carrosséis virais para TikTok (photo post).
+
+Recebe um texto bruto já escrito e o reorganiza em {n} slides seguindo a
+estrutura de roteiro viral em 3 atos:
+
+ATO 1 — HOOK (slide 1): para o scroll em 1 segundo. Use um destes tipos:
+  - pergunta chocante ("ainda tá cometendo esse erro?")
+  - promessa forte ("o que 99% ignora")
+  - contrarian ("para de postar todo dia, faz isso")
+  - storytelling ("testei 50 formatos, esse é o melhor")
+ATO 2 — DESENVOLVIMENTO: problema (a dor) → agitação (a consequência) →
+  valor (a entrega concreta, um slide por ideia) → prova (número, resultado).
+ATO 3 — CTA (último slide): uma ação clara e só uma.
+
+Cada slide recebe um "role" nesta ordem exata: {roles}
+
+REGRAS DE ESCRITA (formato sticker do TikTok):
+- Escreva como fala: frases curtas, "você", contrações, tom de conversa.
+- Tudo em minúsculas, sem ponto final no fim das frases.
+- 1 ideia por slide. Nunca misture assuntos.
+- headline: máx 60 caracteres. É a frase que vai grande na imagem.
+- body: máx 180 caracteres, 1 ou 2 frases. Pode ser vazio no slide de hook.
+- call_to_action: SÓ no último slide (role="cta"). Vazio nos demais.
+- Use números específicos quando o texto original tiver.
+- Idioma da saída: {language}.
+- Não invente fatos que não estejam no texto original.
+
+Retorne APENAS JSON válido, sem markdown, neste formato:
+"""
+
+_VIRAL_SCHEMA = (
+    '{"slides":[{"role":"hook","headline":"","body":"","call_to_action":""}],'
+    '"hashtags":["",""],"caption":""}'
 )
+
+
+def _build_viral_prompt(slides_count: int, language: str, roles: list[str]) -> str:
+    return _VIRAL_GUIDE.format(
+        n=slides_count,
+        language=language or "pt-BR",
+        roles=" → ".join(roles),
+    ) + _VIRAL_SCHEMA
+
 
 
 class LLMTextComposer:
@@ -266,6 +357,9 @@ class LLMTextComposer:
         if not cleaned:
             return ComposedCarousel(provider=self.name)
 
+        language = str((extra or {}).get("language") or "pt-BR")
+        roles = viral_script_roles(slides_count)
+
         # Tentativa 1: sem response_format (compatível com QUALQUER modelo Groq,
         # incluindo qwen, gemma, etc. que podem não suportar JSON mode).
         # O _parse_json_loose já extrai JSON mesmo se o modelo cercar com texto.
@@ -275,9 +369,7 @@ class LLMTextComposer:
                 "messages": [
                     {
                         "role": "system",
-                        "content": _LLM_SYSTEM_PROMPT.format(
-                            n=slides_count, style=style
-                        ),
+                        "content": _build_viral_prompt(slides_count, language, roles),
                     },
                     {"role": "user", "content": cleaned},
                 ],
@@ -336,12 +428,20 @@ class LLMTextComposer:
             body = _truncate(str(s.get("body") or "").strip(), 280)
             if not headline and not body:
                 continue
+            # O papel vem do modelo, mas a posição manda: se o modelo devolver
+            # um papel inválido (ou nenhum), usamos o da estrutura canônica.
+            order = len(slides)
+            role = _normalize_role(s.get("role")) or (
+                roles[order] if order < len(roles) else "value"
+            )
+            cta = _truncate(str(s.get("call_to_action") or "").strip(), 80)
             slides.append(
                 SlideContent(
                     headline=headline,
                     body=body,
-                    call_to_action=_truncate(str(s.get("call_to_action") or "").strip(), 80),
-                    order=i,
+                    call_to_action=cta if role == "cta" else "",
+                    order=order,
+                    role=role,
                 )
             )
 
@@ -349,6 +449,11 @@ class LLMTextComposer:
             return MockTextComposer().compose(
                 cleaned, style=style, slides_count=slides_count, extra=extra
             )
+
+        # Garantir que o carrossel sempre feche com um CTA visível.
+        last = slides[-1]
+        if last.role == "cta" and not last.call_to_action:
+            last.call_to_action = _STYLE_CTA.get(style, "comenta abaixo 👇")
 
         hashtags_raw = parsed.get("hashtags") or []
         hashtags = [str(h).lstrip("#").strip() for h in hashtags_raw if str(h).strip()][:10]
@@ -415,4 +520,6 @@ __all__ = [
     "MockTextComposer",
     "LLMTextComposer",
     "build_text_composer",
+    "VIRAL_ROLES",
+    "viral_script_roles",
 ]

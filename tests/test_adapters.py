@@ -10,6 +10,7 @@ from app.adapters import (
     MockTextComposer,
 )
 from app.adapters.pinterest_client import PinterestImage
+from app.adapters.text_composer import viral_script_roles
 from app.config import Settings
 
 
@@ -65,6 +66,78 @@ def test_mock_composer_strips_hashtags_from_body():
     for slide in carousel.slides:
         assert "#foco" not in slide.body
         assert "#habitos" not in slide.body
+
+
+# ---------- Roteiro viral ----------
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 4, 5, 6, 9, 12])
+def test_viral_roles_have_exact_length(n):
+    roles = viral_script_roles(n)
+    assert len(roles) == n
+
+
+@pytest.mark.parametrize("n", [3, 6, 9, 12])
+def test_viral_roles_open_with_hook_and_close_with_cta(n):
+    roles = viral_script_roles(n)
+    assert roles[0] == "hook"
+    assert roles[-1] == "cta"
+
+
+def test_viral_roles_full_structure_for_six_slides():
+    assert viral_script_roles(6) == [
+        "hook", "problem", "agitation", "value", "proof", "cta",
+    ]
+
+
+def test_mock_composer_assigns_viral_roles_in_order():
+    composer = MockTextComposer()
+    text = (
+        "Você posta todo dia e não cresce. O problema não é o algoritmo. "
+        "É que seu primeiro segundo não prende ninguém. "
+        "Comece pelo conflito, não pelo contexto. "
+        "Testei em 30 vídeos e o tempo de exibição subiu 450%. "
+        "Salva esse post para aplicar hoje."
+    )
+    carousel = composer.compose(text, style="sticker", slides_count=6)
+    roles = [s.role for s in carousel.slides]
+    assert roles == ["hook", "problem", "agitation", "value", "proof", "cta"]
+
+
+def test_mock_composer_puts_cta_only_on_last_slide():
+    """CTA repetido em todo slide polui o carrossel — só o fecho leva."""
+    composer = MockTextComposer()
+    carousel = composer.compose(
+        "Primeira ideia aqui. Segunda ideia aqui. Terceira ideia aqui. "
+        "Quarta ideia. Quinta ideia. Sexta ideia final.",
+        style="sticker",
+        slides_count=6,
+    )
+    assert carousel.slides[-1].call_to_action
+    assert all(not s.call_to_action for s in carousel.slides[:-1])
+
+
+def test_mock_composer_does_not_duplicate_headline_in_body():
+    """Headline e body iguais fazem o slide mostrar a mesma frase duas vezes."""
+    composer = MockTextComposer()
+    carousel = composer.compose(
+        "Primeira frase do slide. Segunda frase com o detalhe. "
+        "Terceira frase encerrando o assunto.",
+        style="sticker",
+        slides_count=3,
+    )
+    for slide in carousel.slides:
+        assert slide.body != slide.headline
+        if slide.body:
+            assert not slide.body.startswith(slide.headline)
+
+
+def test_slide_content_roundtrips_role_through_dict():
+    """O papel precisa sobreviver ao store/edição, senão o layout se perde."""
+    composer = MockTextComposer()
+    carousel = composer.compose("Texto de teste com tamanho suficiente.", slides_count=3)
+    for slide in carousel.slides:
+        assert slide.to_dict()["role"] == slide.role
 
 
 # ---------- Pinterest ----------

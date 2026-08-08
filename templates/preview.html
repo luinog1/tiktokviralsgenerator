@@ -7,8 +7,8 @@
     <h1>Prévia do carrossel</h1>
     <p>
       {{ slides|length }} slide(s) · estilo <strong>{{ style }}</strong> ·
-      edite os textos e escolha a imagem de cada slide. As imagens são buscadas
-      na API oficial do Pinterest.
+      ordenados no roteiro viral <strong>hook → problema → valor → CTA</strong>.
+      Edite os textos e escolha a imagem de cada slide.
     </p>
   </header>
 
@@ -36,6 +36,9 @@
       <article class="slide-card" data-slide-index="{{ i }}">
         <header class="slide-card-head">
           <span class="slide-number">#{{ i + 1 }}</span>
+          {% if slide.role %}
+            <span class="role-badge role-{{ slide.role }}">{{ role_labels.get(slide.role, slide.role) }}</span>
+          {% endif %}
           {% if project.ranking %}
             {% set rk = project.ranking | selectattr('image_id', 'equalto', image_for_slide[i].image_id if image_for_slide[i] else '') | first %}
             {% if rk %}
@@ -45,14 +48,14 @@
         </header>
 
         <!-- Prévia visual do slide -->
-        <div class="slide-visual" style="background-image: url('{{ image_for_slide[i].image_url if image_for_slide[i] else '' }}');">
-          <div class="slide-overlay"></div>
-          <div class="slide-text-stack">
+        <div class="slide-visual{% if style == 'sticker' %} slide-visual-sticker{% endif %}" style="background-image: url('{{ image_for_slide[i].image_url if image_for_slide[i] else '' }}');">
+          {% if style != 'sticker' %}<div class="slide-overlay"></div>{% endif %}
+          <div class="slide-text-stack" data-role="{{ slide.role or 'value' }}">
             <h3 class="slide-headline">{{ form.headlines[i].data or slide.headline }}</h3>
-            <p class="slide-body-snippet">{{ form.bodies[i].data or slide.body | truncate(120) }}</p>
-            {% if form.ctas[i].data or slide.call_to_action %}
-              <p class="slide-cta-snippet">{{ form.ctas[i].data or slide.call_to_action }}</p>
-            {% endif %}
+            {# Sempre no DOM (o editor ao vivo escreve aqui); CSS :empty esconde
+               a caixa branca enquanto não houver texto. #}
+            <p class="slide-body-snippet">{{ (form.bodies[i].data or slide.body) | truncate(120) }}</p>
+            <p class="slide-cta-snippet">{{ form.ctas[i].data or slide.call_to_action }}</p>
           </div>
         </div>
 
@@ -168,10 +171,9 @@
           b.addEventListener("input", () => bodyDisplay.textContent = b.value.slice(0, 120));
         }
         if (c && ctaDisplay) {
-          c.addEventListener("input", () => {
-            ctaDisplay.textContent = c.value;
-            ctaDisplay.style.display = c.value ? "block" : "none";
-          });
+          // Não mexer em style.display: a regra CSS :empty já esconde a
+          // caixa branca quando o campo fica vazio.
+          c.addEventListener("input", () => ctaDisplay.textContent = c.value);
         }
       }
     });

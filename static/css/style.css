@@ -560,6 +560,92 @@ a:hover { text-decoration: underline; }
   text-shadow: 0 1px 2px rgba(0,0,0,0.6);
 }
 
+/* --- Estilo sticker (TikTok photo post) ---
+   Espelha o que o SlideRenderer desenha no PNG: caixas brancas por linha,
+   texto preto, foto sem escurecimento. `box-decoration-break` é o que faz
+   cada linha quebrada ganhar sua própria caixa arredondada. */
+.slide-visual-sticker {
+  align-items: stretch;
+  justify-content: center;
+  padding: 24px 10%;
+}
+
+.slide-visual-sticker .slide-text-stack {
+  color: #111;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+}
+
+.slide-visual-sticker .slide-headline,
+.slide-visual-sticker .slide-body-snippet,
+.slide-visual-sticker .slide-cta-snippet {
+  display: inline;
+  margin: 0;
+  color: #111;
+  text-shadow: none;
+  background: #fff;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  padding: 2px 8px;
+  border-radius: 7px;
+  line-height: 1.55;
+  overflow: visible;
+  -webkit-line-clamp: none;
+}
+
+.slide-visual-sticker .slide-headline {
+  font-size: 0.95rem;
+  font-weight: 800;
+}
+
+.slide-visual-sticker .slide-body-snippet {
+  font-size: 0.8rem;
+  font-weight: 500;
+  opacity: 1;
+}
+
+.slide-visual-sticker .slide-cta-snippet {
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+/* Campo vazio não pode virar uma caixa branca solta sobre a foto. */
+.slide-headline:empty,
+.slide-body-snippet:empty,
+.slide-cta-snippet:empty {
+  display: none;
+}
+
+/* Posição do bloco por papel no roteiro — espelha o PNG exportado:
+   hook fecha embaixo, CTA no centro, o resto começa no topo. */
+.slide-visual-sticker .slide-text-stack { justify-content: flex-start; }
+.slide-visual-sticker .slide-text-stack[data-role="hook"] { justify-content: flex-end; }
+.slide-visual-sticker .slide-text-stack[data-role="cta"] { justify-content: center; }
+
+/* Badge do papel no roteiro viral */
+.role-badge {
+  margin-left: auto;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-muted, #667);
+  white-space: nowrap;
+}
+
+.role-badge.role-hook { background: #ffe66d; color: #4a3c00; }
+.role-badge.role-problem { background: #ffd3d3; color: #7a2020; }
+.role-badge.role-agitation { background: #ffc9a8; color: #7a3a10; }
+.role-badge.role-proof { background: #c9f7d8; color: #14532d; }
+.role-badge.role-cta { background: #d9d2ff; color: #362a7a; }
+
 /* Edit fields */
 .slide-edit-fields {
   padding: 14px;

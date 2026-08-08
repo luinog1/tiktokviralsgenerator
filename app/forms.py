@@ -18,6 +18,7 @@ from wtforms.validators import DataRequired, Length, NumberRange, Optional
 
 
 STYLE_CHOICES = [
+    ("sticker", "Sticker TikTok — caixas brancas sobre a foto (recomendado)"),
     ("quote", "Citação — texto centralizado, aspas decorativas"),
     ("list", "Lista — bullets à esquerda, headline no topo"),
     ("tutorial", "Tutorial — passo a passo com CTA em caixa"),
@@ -159,5 +160,7 @@ class SlideEditForm(FlaskForm):
                 "call_to_action": cta or orig.get("call_to_action", ""),
                 "order": i,
                 "image_id": image_id or orig.get("image_id", ""),
+                # O papel no roteiro viral não é editável — preservar o original.
+                "role": orig.get("role", "value"),
             })
         return result

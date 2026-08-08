@@ -5,7 +5,10 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Dependências do sistema — Pillow precisa de libjpeg/zlib
+# Dependências do sistema — Pillow precisa de libjpeg/zlib.
+# fonts-liberation/fonts-dejavu são OBRIGATÓRIAS: a imagem slim não traz
+# nenhuma fonte TrueType e o Pillow cairia na fonte bitmap padrão, que ignora
+# o tamanho pedido e renderiza os slides com texto minúsculo.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libjpeg-dev \
@@ -13,6 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfreetype6-dev \
     liblcms2-dev \
     libwebp-dev \
+    fonts-liberation \
+    fonts-dejavu-core \
     curl \
     && rm -rf /var/lib/apt/lists/*
 

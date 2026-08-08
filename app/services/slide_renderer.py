@@ -1,8 +1,9 @@
 """SlideRenderer — compõe o carrossel visual no estilo TikTok photo.
 
-Cada slide = imagem de fundo + overlay de gradiente + texto (headline + body + CTA).
-Layouts suportados: 'quote' (texto centralizado), 'list' (texto à esquerda),
-'tutorial' (headline no topo, body central, CTA no rodapé), 'story' (overlay forte).
+Estilo principal ('sticker'): texto preto em caixas brancas arredondadas, uma
+por linha, sobre a foto sem escurecer — o formato de legenda nativo do TikTok.
+Estilos legados: 'quote', 'list', 'tutorial', 'story' (texto branco sobre
+gradiente escuro).
 """
 
 from __future__ import annotations
@@ -10,9 +11,11 @@ from __future__ import annotations
 import io
 import logging
 import math
+import os
 import re
 import textwrap
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Literal
 
 import requests
@@ -23,7 +26,7 @@ from app.adapters.text_composer import SlideContent
 
 logger = logging.getLogger(__name__)
 
-SlideStyle = Literal["quote", "list", "tutorial", "story"]
+SlideStyle = Literal["sticker", "quote", "list", "tutorial", "story"]
 
 
 @dataclass
@@ -49,6 +52,13 @@ class SlideRenderer:
 
     # Cores por estilo — paletas sociais, alto contraste para legibilidade
     _PALETTES: dict[str, dict[str, tuple[int, int, int]]] = {
+        "sticker": {
+            # Sticker não escurece a foto: o contraste vem da caixa branca.
+            "text": (17, 17, 17),
+            "accent": (255, 255, 255),
+            "overlay_top": (0, 0, 0, 0),
+            "overlay_bottom": (0, 0, 0, 0),
+        },
         "quote": {
             "text": (255, 255, 255),
             "accent": (255, 230, 109),  # amarelo
@@ -79,6 +89,7 @@ class SlideRenderer:
         self._settings = settings
         self._w = settings.slide_width
         self._h = settings.slide_height
+        self._bold_path, self._regular_path = _resolve_font_paths()
         self._fonts = self._load_fonts()
 
     # ---------- API pública ----------
@@ -153,17 +164,20 @@ class SlideRenderer:
             # Gradiente padrão caso não haja imagem
             self._draw_gradient(draw, self._w, self._h, palette)
 
-        # 2. Overlay para legibilidade
-        overlay = Image.new("RGBA", (self._w, self._h), (0, 0, 0, 0))
-        overlay_draw = ImageDraw.Draw(overlay)
-        # Gradient overlay: topo + base
-        self._draw_alpha_gradient(
-            overlay_draw, self._w, self._h,
-            top_color=palette["overlay_top"],
-            bottom_color=palette["overlay_bottom"],
-        )
-        canvas = Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB")
-        draw = ImageDraw.Draw(canvas)
+        # 2. Overlay para legibilidade.
+        # No estilo sticker a foto fica limpa: o contraste vem das caixas
+        # brancas, então pular o escurecimento.
+        if style != "sticker":
+            overlay = Image.new("RGBA", (self._w, self._h), (0, 0, 0, 0))
+            overlay_draw = ImageDraw.Draw(overlay)
+            # Gradient overlay: topo + base
+            self._draw_alpha_gradient(
+                overlay_draw, self._w, self._h,
+                top_color=palette["overlay_top"],
+                bottom_color=palette["overlay_bottom"],
+            )
+            canvas = Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB")
+            draw = ImageDraw.Draw(canvas)
 
         # 3. Texto
         fonts = self._fonts
@@ -175,6 +189,13 @@ class SlideRenderer:
         cta = _safe_text(slide.call_to_action or "")
 
         # Layout por estilo
+        if style == "sticker":
+            # Sticker desenha suas próprias caixas e não usa numeração nem
+            # rodapé de atribuição — a atribuição fica na prévia e no Markdown.
+            self._draw_sticker_layout(draw, headline, body, cta, slide.role)
+            buffer = io.BytesIO()
+            canvas.save(buffer, format="PNG", optimize=True)
+            return buffer.getvalue()
         if style == "list":
             self._draw_list_layout(draw, headline, body, cta, fonts, text_color, accent_color)
         elif style == "tutorial":
@@ -209,6 +230,134 @@ class SlideRenderer:
         return buffer.getvalue()
 
     # ---------- layouts ----------
+
+    # Posição vertical do bloco de texto, por papel no roteiro viral.
+    # O hook fica baixo e sozinho (a foto respira em cima); os slides de
+    # desenvolvimento usam dois blocos separados, começando no terço superior.
+    _STICKER_ANCHORS: dict[str, float] = {
+        "hook": 0.60,
+        "problem": 0.13,
+        "agitation": 0.15,
+        "value": 0.18,
+        "proof": 0.16,
+        "cta": 0.38,
+    }
+
+    def _draw_sticker_layout(self, draw, headline, body, cta, role: str = "value") -> None:
+        """Estilo TikTok: cada linha vira uma caixa branca arredondada.
+
+        headline e body são blocos separados, com respiro entre eles — é assim
+        que o texto aparece nos photo posts nativos do TikTok.
+        """
+        max_width = int(self._w * 0.80)
+        gap = int(self._h * 0.045)
+
+        headline_font, headline_lines = self._fit_sticker_font(
+            draw, headline, max_width=max_width, base=68, min_size=40, max_lines=4
+        )
+        body_font, body_lines = self._fit_sticker_font(
+            draw, body, max_width=max_width, base=54, min_size=32, max_lines=5, bold=False
+        )
+        cta_font, cta_lines = self._fit_sticker_font(
+            draw, cta, max_width=max_width, base=52, min_size=32, max_lines=2
+        )
+
+        blocks = [
+            (headline_lines, headline_font),
+            (body_lines, body_font),
+            (cta_lines, cta_font),
+        ]
+        blocks = [(lines, font) for lines, font in blocks if lines]
+        if not blocks:
+            return
+
+        total = sum(self._sticker_block_height(l, f) for l, f in blocks)
+        total += gap * (len(blocks) - 1)
+
+        anchor = self._STICKER_ANCHORS.get(role, 0.18)
+        if role == "hook":
+            # Ancorado pela base: o hook fecha perto do rodapé.
+            top = int(self._h * 0.86) - total
+        elif role == "cta":
+            top = (self._h - total) // 2
+        else:
+            top = int(self._h * anchor)
+
+        # Nunca deixar o texto sangrar para fora do canvas.
+        margin = int(self._h * 0.06)
+        top = max(margin, min(top, self._h - total - margin))
+
+        y = top
+        for lines, font in blocks:
+            y = self._draw_sticker_block(draw, lines, font, y) + gap
+
+    def _fit_sticker_font(
+        self,
+        draw,
+        text: str,
+        *,
+        max_width: int,
+        base: int,
+        min_size: int,
+        max_lines: int,
+        bold: bool = True,
+    ):
+        """Reduz o corpo da fonte até o texto caber em `max_lines` linhas."""
+        if not text.strip():
+            return None, []
+        path = self._bold_path if bold else self._regular_path
+        scale = self._w / 1080
+        size = max(10, int(base * scale))
+        floor = max(8, int(min_size * scale))
+        font = _font(path, size)
+        lines = _wrap(text, font, max_width, draw)
+        while len(lines) > max_lines and size > floor:
+            size -= 2
+            font = _font(path, size)
+            lines = _wrap(text, font, max_width, draw)
+        return font, lines[:max_lines]
+
+    def _sticker_line_height(self, font) -> int:
+        try:
+            ascent, descent = font.getmetrics()
+            return ascent + descent
+        except AttributeError:  # bitmap default font
+            return int(getattr(font, "size", 30) * 1.2)
+
+    def _sticker_padding(self, font) -> tuple[int, int, int]:
+        size = getattr(font, "size", 30)
+        pad_x = max(8, int(size * 0.34))
+        pad_y = max(3, int(size * 0.13))
+        radius = max(6, int(size * 0.24))
+        return pad_x, pad_y, radius
+
+    def _sticker_block_height(self, lines, font) -> int:
+        if not lines:
+            return 0
+        _, pad_y, _ = self._sticker_padding(font)
+        box_h = self._sticker_line_height(font) + pad_y * 2
+        # -2px por linha: as caixas se encostam, sem fresta entre elas.
+        return box_h * len(lines) - 2 * (len(lines) - 1)
+
+    def _draw_sticker_block(self, draw, lines, font, top: int) -> int:
+        """Desenha as caixas brancas centralizadas. Devolve o y do rodapé."""
+        pad_x, pad_y, radius = self._sticker_padding(font)
+        line_h = self._sticker_line_height(font)
+        box_h = line_h + pad_y * 2
+        cx = self._w // 2
+        y = top
+        for line in lines:
+            text_w = _text_width(draw, line, font)
+            box_w = int(text_w) + pad_x * 2
+            x0 = cx - box_w // 2
+            draw.rounded_rectangle(
+                [x0, y, x0 + box_w, y + box_h],
+                radius=radius,
+                fill=(255, 255, 255),
+            )
+            draw.text((x0 + pad_x, y + pad_y), line, font=font, fill=(17, 17, 17))
+            y += box_h - 2
+        return y + 2
 
     def _draw_quote_layout(self, draw, headline, body, cta, fonts, text_color, accent):
         from PIL import ImageDraw
@@ -334,44 +483,23 @@ class SlideRenderer:
     # ---------- utilidades ----------
 
     def _load_fonts(self) -> dict[str, Any]:
-        from PIL import ImageFont
-        font_paths = [
-            ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "bold"),
-            ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "regular"),
-            ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf", "italic"),
-        ]
-        # Tentar fontes mais pesadas se disponíveis
-        try_paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-            "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-        ]
-        bold_path = next((p for p in try_paths if _file_exists(p)), None)
+        bold_path, regular_path = self._bold_path, self._regular_path
+        # Tamanhos proporcionais à largura do canvas (base 1080px) para que
+        # SLIDE_WIDTH/SLIDE_HEIGHT customizados não quebrem o layout.
+        scale = self._w / 1080
 
-        regular_paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-        ]
-        regular_path = next((p for p in regular_paths if _file_exists(p)), None)
-
-        def _try(path: str | None, size: int):
-            if not path:
-                return ImageFont.load_default()
-            try:
-                return ImageFont.truetype(path, size)
-            except Exception:
-                return ImageFont.load_default()
+        def _px(size: int) -> int:
+            return max(10, int(round(size * scale)))
 
         return {
-            "headline_big": _try(bold_path, 78),
-            "headline": _try(bold_path, 58),
-            "body": _try(regular_path, 38),
-            "cta": _try(bold_path, 36),
-            "tag": _try(bold_path, 26),
-            "number": _try(bold_path, 56),
-            "quote_mark": _try(bold_path, 140),
-            "meta": _try(regular_path, 22),
+            "headline_big": _font(bold_path, _px(78)),
+            "headline": _font(bold_path, _px(58)),
+            "body": _font(regular_path, _px(38)),
+            "cta": _font(bold_path, _px(36)),
+            "tag": _font(bold_path, _px(26)),
+            "number": _font(bold_path, _px(56)),
+            "quote_mark": _font(bold_path, _px(140)),
+            "meta": _font(regular_path, _px(22)),
         }
 
     def _line_height(self, font) -> int:
@@ -470,27 +598,134 @@ class SlideRenderer:
 # ---------- helpers de módulo ----------
 
 
+# Ordem de preferência de fontes. A primeira que existir no sistema vence.
+# `static/fonts/` vem primeiro: basta soltar um .ttf lá (ex.: Poppins) para
+# trocar a tipografia de todos os slides, sem mexer no código.
+_BUNDLED_FONT_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "static",
+    "fonts",
+)
+
+_BOLD_CANDIDATES = (
+    os.path.join(_BUNDLED_FONT_DIR, "sticker-bold.ttf"),
+    # Linux (Docker/Render) — instaladas via apt no Dockerfile
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+    # Windows (dev local)
+    "C:/Windows/Fonts/segoeuib.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+    # macOS
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/Library/Fonts/Arial Bold.ttf",
+)
+
+_REGULAR_CANDIDATES = (
+    os.path.join(_BUNDLED_FONT_DIR, "sticker-regular.ttf"),
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    "C:/Windows/Fonts/segoeui.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/Library/Fonts/Arial.ttf",
+)
+
+
+def _resolve_font_paths() -> tuple[str | None, str | None]:
+    """Descobre as fontes disponíveis. SLIDE_FONT_BOLD/REGULAR têm prioridade."""
+    bold = os.environ.get("SLIDE_FONT_BOLD", "").strip() or None
+    regular = os.environ.get("SLIDE_FONT_REGULAR", "").strip() or None
+    if not bold or not _file_exists(bold):
+        bold = next((p for p in _BOLD_CANDIDATES if _file_exists(p)), None)
+    if not regular or not _file_exists(regular):
+        regular = next((p for p in _REGULAR_CANDIDATES if _file_exists(p)), None)
+    if bold is None and regular is None:
+        # load_default() é bitmap e ignora o tamanho — os slides sairiam com
+        # texto minúsculo. Avisar alto para não virar "bug silencioso".
+        logger.warning(
+            "Nenhuma fonte TrueType encontrada — os slides vão usar a fonte "
+            "bitmap padrão do Pillow. Instale fonts-liberation/fonts-dejavu "
+            "ou aponte SLIDE_FONT_BOLD para um .ttf."
+        )
+    return bold or regular, regular or bold
+
+
+@lru_cache(maxsize=256)
+def _font(path: str | None, size: int):
+    """Carrega (com cache) uma fonte TrueType no tamanho pedido."""
+    from PIL import ImageFont
+
+    if path:
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            logger.warning("Falha ao carregar fonte %s — usando padrão.", path)
+    return ImageFont.load_default()
+
+
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+# As fontes do sistema (Liberation, DejaVu, Segoe UI) não têm glifos de emoji
+# colorido — o Pillow desenharia um retângulo vazio (tofu) no lugar. Remover
+# antes de renderizar. O emoji continua intacto na legenda e no Markdown.
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F000-\U0001FAFF"  # pictogramas, emoticons, símbolos suplementares
+    "\U00002190-\U000021FF"  # setas
+    "\U00002300-\U000027BF"  # técnicos, dingbats
+    "\U00002B00-\U00002BFF"  # setas/símbolos diversos
+    "\U0000FE00-\U0000FE0F"  # seletores de variação
+    "\U0001F1E6-\U0001F1FF"  # bandeiras
+    "\U000024C2-\U0001F251"
+    "\U0000200D"             # zero-width joiner
+    "]+",
+    flags=re.UNICODE,
+)
+
+
 def _safe_text(value: str) -> str:
-    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", str(value))
+    text = _CONTROL_RE.sub("", str(value))
+    text = _EMOJI_RE.sub("", text)
+    # A remoção pode deixar espaços duplos ou sobrando nas pontas.
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
+def _text_width(draw, text: str, font) -> float:
+    """Largura de avanço do texto — usada para dimensionar a caixa branca."""
+    try:
+        return draw.textlength(text, font=font)
+    except (AttributeError, TypeError):
+        try:
+            bbox = draw.textbbox((0, 0), text, font=font)
+            return bbox[2] - bbox[0]
+        except Exception:
+            return len(text) * getattr(font, "size", 30) * 0.5
 
 
 def _wrap(text: str, font, max_width: int, draw) -> list[str]:
     if not text:
         return []
-    # textwrap para quebrar por palavras; depois medir para caber
     words = text.split()
     if not words:
         return []
     lines: list[str] = []
     current = ""
     for word in words:
+        # Palavra sozinha maior que a linha (URL, hashtag longa): quebrar no
+        # meio, senão a caixa branca sairia mais larga que o slide.
+        if _text_width(draw, word, font) > max_width:
+            if current:
+                lines.append(current)
+                current = ""
+            lines.extend(_break_long_word(word, font, max_width, draw))
+            current = lines.pop() if lines else ""
+            continue
         candidate = f"{current} {word}".strip()
-        try:
-            bbox = draw.textbbox((0, 0), candidate, font=font)
-            w = bbox[2] - bbox[0]
-        except Exception:
-            w = len(candidate) * (getattr(font, "size", 30) * 0.5)
-        if w > max_width and current:
+        if _text_width(draw, candidate, font) > max_width and current:
             lines.append(current)
             current = word
         else:
@@ -498,6 +733,21 @@ def _wrap(text: str, font, max_width: int, draw) -> list[str]:
     if current:
         lines.append(current)
     return lines
+
+
+def _break_long_word(word: str, font, max_width: int, draw) -> list[str]:
+    """Fatia uma palavra indivisível em pedaços que caibam na largura."""
+    pieces: list[str] = []
+    chunk = ""
+    for char in word:
+        if chunk and _text_width(draw, chunk + char, font) > max_width:
+            pieces.append(chunk)
+            chunk = char
+        else:
+            chunk += char
+    if chunk:
+        pieces.append(chunk)
+    return pieces
 
 
 def _file_exists(path: str) -> bool:

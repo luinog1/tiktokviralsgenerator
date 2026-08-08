@@ -17,6 +17,7 @@ from .text_composer import (
     SlideContent,
     TextComposer,
     build_text_composer,
+    viral_script_roles,
 )
 from .pinterest_client import (
     PinterestClient,
@@ -40,6 +41,7 @@ __all__ = [
     "MockTextComposer",
     "LLMTextComposer",
     "build_text_composer",
+    "viral_script_roles",
     # Pinterest
     "PinterestClient",
     "MockPinterestClient",

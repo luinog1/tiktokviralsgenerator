@@ -30,6 +30,16 @@ from app.services.slide_renderer import SlideRenderer
 bp = Blueprint("preview", __name__)
 logger = logging.getLogger(__name__)
 
+# Rótulos legíveis dos papéis do roteiro viral, exibidos na prévia.
+ROLE_LABELS = {
+    "hook": "1 · Hook",
+    "problem": "2 · Problema",
+    "agitation": "3 · Agitação",
+    "value": "Valor",
+    "proof": "Prova",
+    "cta": "Fecho · CTA",
+}
+
 
 def _get_service() -> GenerationService:
     settings = current_app.config["SETTINGS"]
@@ -77,6 +87,7 @@ def preview(project_id: str):
         image_for_slide=image_for_slide,
         style=style,
         form=form,
+        role_labels=ROLE_LABELS,
     )
 
 
@@ -145,6 +156,7 @@ def _build_slides_and_images(slides_data, images):
             body=s.get("body", ""),
             call_to_action=s.get("call_to_action", ""),
             order=i,
+            role=s.get("role", "value"),
         )
         for i, s in enumerate(slides_data)
     ]
