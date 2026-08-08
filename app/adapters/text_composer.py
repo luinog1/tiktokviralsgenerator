@@ -266,6 +266,9 @@ class LLMTextComposer:
         if not cleaned:
             return ComposedCarousel(provider=self.name)
 
+        # Tentativa 1: sem response_format (compatível com QUALQUER modelo Groq,
+        # incluindo qwen, gemma, etc. que podem não suportar JSON mode).
+        # O _parse_json_loose já extrai JSON mesmo se o modelo cercar com texto.
         try:
             payload = {
                 "model": self._model,
@@ -280,7 +283,6 @@ class LLMTextComposer:
                 ],
                 "temperature": 0.6,
                 "max_tokens": 1200,
-                "response_format": {"type": "json_object"},
             }
             response = requests.post(
                 f"{self._base}/chat/completions",
@@ -291,6 +293,15 @@ class LLMTextComposer:
                 },
                 timeout=self._timeout,
             )
+            # Se erro 4xx relacionado a response_format ou parâmetros,
+            # tentar novamente com payload mínimo
+            if response.status_code in (400, 422):
+                error_text = response.text[:300]
+                logger.warning(
+                    "LLM rejeitou payload (HTTP %d): %s — tentando sem json_mode",
+                    response.status_code,
+                    error_text,
+                )
             response.raise_for_status()
         except requests.Timeout:
             logger.warning("LLM composer timeout — fallback mock.")

@@ -1,0 +1,68 @@
+# Render Blueprint — ViralPost Studio
+# https://render.com/docs/blueprint-spec
+#
+# Como usar:
+# 1. Garanta que este arquivo, o Dockerfile e todo o código do projeto
+#    estão na RAIZ do repositório GitHub (não dentro de uma subpasta).
+# 2. No Render: New → Blueprint → selecione o repositório.
+# 3. O Render vai ler este arquivo e criar o serviço automaticamente.
+#
+# IMPORTANTE: Variáveis marcadas com `sync: false` NÃO são sincronizadas
+# com o repo — você DEVE preenchê-las no painel Environment do Render.
+# Variáveis com `value:` são defaults aplicados pelo Blueprint.
+
+services:
+  - type: web
+    name: viralpost-studio
+    runtime: docker
+    plan: free
+    # Render descobre o Dockerfile automaticamente se estiver na raiz.
+    # Se você tiver os arquivos dentro de uma subpasta no repo, descomente
+    # a linha abaixo apontando para o caminho correto:
+    # rootDir: .
+    dockerfilePath: ./Dockerfile
+    # Porta que o container expõe (definida no Dockerfile)
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # --- Aplicação ---
+      - key: FLASK_ENV
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: SECRET_KEY
+        generateValue: true  # Render gera um secret seguro automaticamente
+
+      # --- LLM (OpenAI-compatible: Groq, OpenAI, Ollama) ---
+      # IMPORTANTE: mude para "openai_compatible" no painel Environment
+      # quando tiver preenchido LLM_API_KEY e LLM_API_BASE_URL.
+      # Default mock = sem chamada ao LLM, divisão determinística do texto.
+      - key: LLM_PROVIDER
+        sync: false  # ← defina no painel como "openai_compatible"
+      - key: LLM_API_BASE_URL
+        sync: false  # ← ex: https://api.groq.com/openai/v1
+      - key: LLM_API_KEY
+        sync: false  # ← ex: gsk_xxxxxxxxxxxxx
+      - key: LLM_MODEL
+        sync: false  # ex: qwen/qwen3.6-27b, llama-3.3-70b-versatile, etc.
+      - key: RANKING_ENABLED
+        value: "true"
+
+      # --- Pinterest ---
+      - key: PINTEREST_ACCESS_TOKEN
+        sync: false  # ← defina no painel
+      - key: PINTEREST_API_BASE_URL
+        value: https://api.pinterest.com/v5
+
+      # --- HTTP / Sessão ---
+      - key: SESSION_TTL_MINUTES
+        value: "60"
+      - key: REQUEST_TIMEOUT_SECONDS
+        value: "30"
+
+      # --- Composição de imagem ---
+      - key: SLIDE_WIDTH
+        value: "1080"
+      - key: SLIDE_HEIGHT
+        value: "1350"

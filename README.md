@@ -84,7 +84,7 @@ python run.py
 | `LLM_PROVIDER` | `mock` | `mock` ou `openai_compatible` |
 | `LLM_API_BASE_URL` | (vazio) | Endpoint OpenAI-compatible (ex.: `https://api.groq.com/openai/v1`) |
 | `LLM_API_KEY` | (vazio) | Token do LLM (ex.: `gsk_...` para Groq) |
-| `LLM_MODEL` | (vazio) | Nome do modelo (ex.: `llama-3.1-8b-instant`) |
+| `LLM_MODEL` | (vazio) | Nome do modelo. Ex.: `qwen/qwen3.6-27b`, `llama-3.3-70b-versatile`, `gpt-4o-mini` |
 | `RANKING_ENABLED` | `true` | Liga/desliga ranking de imagens (reusa LLM) |
 | `REQUEST_TIMEOUT_SECONDS` | `20` | Timeout HTTP |
 | `SESSION_TTL_MINUTES` | `60` | TTL dos projetos em memória |
@@ -226,7 +226,7 @@ Cada estilo produz um layout distinto no PNG renderizado:
 
 ## 🛣️ Próximos passos
 
-1. Configurar `LLM_API_BASE_URL` e `LLM_API_KEY` (ex.: Groq) para ativar o TextComposer com LLM real.
+1. Configurar `LLM_API_BASE_URL` e `LLM_API_KEY` (ex.: Groq) para ativar o TextComposer com LLM real. Modelos Groq suportados: `qwen/qwen3.6-27b`, `llama-3.3-70b-versatile`, `llama-3.1-8b-instant`, `mixtral-8x7b-32768`, `gemma2-9b-it` (consulte https://console.groq.com/docs/models para a lista atual).
 2. Validar escopos do token Pinterest para a busca de Pins.
 3. Adicionar mais estilos visuais (carousel título, antes-e-depois, etc.).
 4. Suporte a fontes externas (Google Fonts) no SlideRenderer.

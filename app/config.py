@@ -68,6 +68,12 @@ class Settings:
         llm_key_raw = _get("LLM_API_KEY") or _get("RANKING_API_KEY")
         llm_model_raw = _get("LLM_MODEL") or _get("RANKING_MODEL")
 
+        # Auto-detecção amigável: se o usuário definiu LLM_API_KEY e
+        # LLM_API_BASE_URL mas esqueceu LLM_PROVIDER, assumir openai_compatible.
+        # Evita o bug comum de "configurei tudo mas continua em mock".
+        if llm_provider_raw == "mock" and llm_key_raw and llm_base_raw:
+            llm_provider_raw = "openai_compatible"
+
         return cls(
             flask_env=_get("FLASK_ENV", "development"),
             secret_key=_get("SECRET_KEY", "dev-insecure-change-me"),

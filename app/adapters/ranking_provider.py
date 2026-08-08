@@ -154,7 +154,6 @@ class InferenceRankingProvider:
                     ],
                     "temperature": 0.2,
                     "max_tokens": 800,
-                    "response_format": {"type": "json_object"},
                 },
                 headers={
                     "Authorization": f"Bearer {self._key}",
@@ -162,6 +161,13 @@ class InferenceRankingProvider:
                 },
                 timeout=self._timeout,
             )
+            # Log explícito se 4xx — ajuda a diagnosticar modelo inválido
+            if response.status_code >= 400:
+                logger.warning(
+                    "Ranking endpoint HTTP %d: %s",
+                    response.status_code,
+                    response.text[:300],
+                )
             response.raise_for_status()
         except requests.Timeout:
             logger.warning("Ranking endpoint timeout — fallback mock.")

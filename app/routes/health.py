@@ -1,4 +1,4 @@
-"""Health check — não expõe segredos."""
+"""Health check — não expõe segredos, mas mostra diagnóstico útil."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ def health():
     settings = current_app.config["SETTINGS"]
     payload = {
         "status": "ok",
-        "version": "0.3.0",
+        "version": "0.3.1",
         "flask_env": settings.flask_env,
         "providers": {
             "composer": settings.llm_provider,
@@ -23,6 +23,16 @@ def health():
         "carousel": {
             "slide_width": settings.slide_width,
             "slide_height": settings.slide_height,
+        },
+        # Diagnóstico LLM — booleanos, NUNCA valores secretos
+        "llm_diagnostic": {
+            "llm_provider_env": settings.llm_provider,
+            "llm_api_base_url_set": bool(settings.llm_api_base_url),
+            "llm_api_key_set": bool(settings.llm_api_key),
+            "llm_model_set": bool(settings.llm_model),
+            "llm_model_value": settings.llm_model or "(empty)",
+            "llm_fully_configured": settings.llm_configured,
+            "ranking_enabled_env": settings.ranking_enabled,
         },
     }
     if current_app.config.get("DEBUG"):

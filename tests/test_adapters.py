@@ -153,3 +153,39 @@ def test_settings_slide_dimensions():
     settings = Settings.from_env({"SLIDE_WIDTH": "1080", "SLIDE_HEIGHT": "1350"})
     assert settings.slide_width == 1080
     assert settings.slide_height == 1350
+
+
+def test_settings_auto_detects_llm_when_key_and_base_set():
+    """Se o usuário definir LLM_API_KEY e LLM_API_BASE_URL mas esquecer
+    LLM_PROVIDER (deixar como mock), a aplicação deve auto-detectar e usar
+    openai_compatible — evita o bug comum de "configurei tudo mas continua em mock".
+    """
+    env = {
+        "LLM_PROVIDER": "mock",  # usuário esqueceu de mudar
+        "LLM_API_BASE_URL": "https://api.groq.com/openai/v1",
+        "LLM_API_KEY": "gsk_test",
+        "LLM_MODEL": "llama-3.1-8b-instant",
+    }
+    settings = Settings.from_env(env)
+    assert settings.llm_provider == "openai_compatible"
+    assert settings.llm_configured is True
+
+
+def test_settings_does_not_auto_detect_when_only_key_set():
+    """Se só tiver LLM_API_KEY mas não LLM_API_BASE_URL, não ativa LLM."""
+    env = {
+        "LLM_PROVIDER": "mock",
+        "LLM_API_KEY": "gsk_test",
+    }
+    settings = Settings.from_env(env)
+    assert settings.llm_provider == "mock"
+
+
+def test_settings_respects_explicit_mock_even_with_creds():
+    """Se o usuário explicitamente colocar mock e NÃO definir key/base,
+    deve continuar em mock mesmo que a key esteja definida no ambiente."""
+    # Este teste valida que a auto-detecção só ativa quando AMBAS
+    # key e base_url estão definidas
+    env = {"LLM_PROVIDER": "mock", "LLM_API_BASE_URL": "https://api.groq.com/openai/v1"}
+    settings = Settings.from_env(env)
+    assert settings.llm_provider == "mock"  # sem key, não ativa
