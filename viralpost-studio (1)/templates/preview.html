@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+{% block title %}Carrossel — {{ project.briefing.theme|truncate(40) }}{% endblock %}
+
+{% block content %}
+<section class="preview-section">
+  <header class="section-head">
+    <h1>Prévia do carrossel</h1>
+    <p>
+      {{ slides|length }} slide(s) · estilo <strong>{{ style }}</strong> ·
+      edite os textos e escolha a imagem de cada slide. As imagens são buscadas
+      na API oficial do Pinterest.
+    </p>
+  </header>
+
+  <!-- Ações de exportação no topo -->
+  <div class="export-bar">
+    <form method="POST" action="{{ url_for('preview.export', project_id=project.project_id) }}" class="export-form">
+      {{ form.csrf_token }}
+      <button type="submit" name="format" value="zip" class="btn btn-primary btn-lg">Baixar carrossel (ZIP)</button>
+      <button type="submit" name="format" value="png" class="btn btn-secondary">Slide 1 (PNG)</button>
+      <button type="submit" name="format" value="md" class="btn btn-ghost">Markdown</button>
+    </form>
+    <div class="copy-block">
+      <button type="button" class="btn btn-ghost" id="js-copy-caption">Copiar legenda</button>
+      <button type="button" class="btn btn-ghost" id="js-copy-hashtags">Copiar hashtags</button>
+    </div>
+  </div>
+
+  <form method="POST" action="{{ url_for('preview.edit', project_id=project.project_id) }}" class="edit-form">
+    {{ form.csrf_token }}
+    {{ form.project_id() }}
+
+    <div class="slides-grid">
+      {% for slide in slides %}
+      {% set i = loop.index0 %}
+      <article class="slide-card" data-slide-index="{{ i }}">
+        <header class="slide-card-head">
+          <span class="slide-number">#{{ i + 1 }}</span>
+          {% if project.ranking %}
+            {% set rk = project.ranking | selectattr('image_id', 'equalto', image_for_slide[i].image_id if image_for_slide[i] else '') | first %}
+            {% if rk %}
+              <span class="rank-badge" title="{{ rk.reason }}">★ {{ '%.2f'|format(rk.score) }}</span>
+            {% endif %}
+          {% endif %}
+        </header>
+
+        <!-- Prévia visual do slide -->
+        <div class="slide-visual" style="background-image: url('{{ image_for_slide[i].image_url if image_for_slide[i] else '' }}');">
+          <div class="slide-overlay"></div>
+          <div class="slide-text-stack">
+            <h3 class="slide-headline">{{ form.headlines[i].data or slide.headline }}</h3>
+            <p class="slide-body-snippet">{{ form.bodies[i].data or slide.body | truncate(120) }}</p>
+            {% if form.ctas[i].data or slide.call_to_action %}
+              <p class="slide-cta-snippet">{{ form.ctas[i].data or slide.call_to_action }}</p>
+            {% endif %}
+          </div>
+        </div>
+
+        <!-- Campos editáveis -->
+        <div class="slide-edit-fields">
+          <input type="hidden" name="{{ form.selected_image_ids[i].name }}" value="{{ form.selected_image_ids[i].data }}" class="js-slide-image-id" data-slide="{{ i }}" />
+
+          <label>Headline</label>
+          {{ form.headlines[i](class_="input", placeholder="Título curto do slide") }}
+
+          <label>Texto</label>
+          {{ form.bodies[i](class_="input textarea", rows=3, placeholder="Conteúdo do slide") }}
+
+          <label>CTA</label>
+          {{ form.ctas[i](class_="input", placeholder="Chamada para ação (opcional)") }}
+
+          <!-- Mini-galeria para escolher imagem deste slide -->
+          <label>Imagem</label>
+          <div class="mini-gallery" data-slide="{{ i }}">
+            {% for img in images %}
+            <button type="button"
+                    class="mini-thumb{% if (form.selected_image_ids[i].data or '') == img.image_id %} selected{% endif %}"
+                    data-image-id="{{ img.image_id }}"
+                    data-image-url="{{ img.image_url }}"
+                    title="{{ img.title | truncate(50) }}">
+              <img src="{{ img.image_url }}" alt="{{ img.title }}" loading="lazy" />
+            </button>
+            {% endfor %}
+          </div>
+          {% if image_for_slide[i] %}
+            <p class="small muted">
+              Fonte:
+              <a href="{{ image_for_slide[i].source_url }}" target="_blank" rel="noopener">
+                {{ image_for_slide[i].attribution_text or 'Pinterest' }}
+              </a>
+            </p>
+          {% endif %}
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary btn-lg">Salvar edição</button>
+      <a href="{{ url_for('create.create') }}" class="btn btn-ghost">Novo briefing</a>
+    </div>
+  </form>
+
+  <!-- Hashtags e legenda -->
+  {% if project.carousel.hashtags or project.carousel.caption %}
+  <div class="meta-block">
+    {% if project.carousel.caption %}
+      <h3>Legenda</h3>
+      <p class="caption-text">{{ project.carousel.caption }}</p>
+    {% endif %}
+    {% if project.carousel.hashtags %}
+      <h3>Hashtags</h3>
+      <p class="hashtags-text">
+        {% for h in project.carousel.hashtags %}<span class="hashtag">#{{ h }}</span> {% endfor %}
+      </p>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <p class="muted small">
+    ⚠️ Imagens do Pinterest podem não ter licença comercial — verifique os termos
+    antes de publicar. A atribuição é preservada no Markdown exportado.
+  </p>
+</section>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    // Mini-galeria por slide
+    document.querySelectorAll(".mini-gallery").forEach((gallery) => {
+      const slideIndex = gallery.dataset.slide;
+      const hidden = document.querySelector(`.js-slide-image-id[data-slide="${slideIndex}"]`);
+      const card = gallery.closest(".slide-card");
+      const visual = card ? card.querySelector(".slide-visual") : null;
+      const headlineEl = card ? card.querySelector(".slide-headline") : null;
+      const bodyEl = card ? card.querySelector(".slide-body-snippet") : null;
+      const ctaEl = card ? card.querySelector(".slide-cta-snippet") : null;
+      const headlineInput = card ? card.querySelector('input[name$="-headlines"]') : null;
+
+      gallery.querySelectorAll(".mini-thumb").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          gallery.querySelectorAll(".mini-thumb").forEach((b) => b.classList.remove("selected"));
+          btn.classList.add("selected");
+          if (hidden) hidden.value = btn.dataset.imageId;
+          if (visual && btn.dataset.imageUrl) {
+            visual.style.backgroundImage = `url("${btn.dataset.imageUrl}")`;
+          }
+        });
+      });
+    });
+
+    // Edição ao vivo no preview visual
+    document.querySelectorAll(".slide-card").forEach((card) => {
+      const inputs = card.querySelectorAll('input[type="text"], textarea');
+      const headlineDisplay = card.querySelector(".slide-headline");
+      const bodyDisplay = card.querySelector(".slide-body-snippet");
+      const ctaDisplay = card.querySelector(".slide-cta-snippet");
+
+      // Mapear campos pela ordem: headline, body, cta
+      const fields = card.querySelectorAll(".slide-edit-fields input.input, .slide-edit-fields textarea.input");
+      if (fields.length >= 3) {
+        const [h, b, c] = fields;
+        if (h && headlineDisplay) {
+          h.addEventListener("input", () => headlineDisplay.textContent = h.value);
+        }
+        if (b && bodyDisplay) {
+          b.addEventListener("input", () => bodyDisplay.textContent = b.value.slice(0, 120));
+        }
+        if (c && ctaDisplay) {
+          c.addEventListener("input", () => {
+            ctaDisplay.textContent = c.value;
+            ctaDisplay.style.display = c.value ? "block" : "none";
+          });
+        }
+      }
+    });
+
+    // Copy buttons
+    const flash = (msg, type) => {
+      const div = document.createElement("div");
+      div.className = `flash flash-${type}`;
+      div.textContent = msg;
+      document.querySelector(".preview-section").prepend(div);
+      setTimeout(() => div.remove(), 1800);
+    };
+    const copy = (text) => {
+      navigator.clipboard.writeText(text).then(() => flash("Copiado!", "success"))
+        .catch(() => flash("Não foi possível copiar.", "error"));
+    };
+
+    document.getElementById("js-copy-caption")?.addEventListener("click", () => {
+      const el = document.querySelector(".caption-text");
+      copy(el ? el.textContent.trim() : "");
+    });
+    document.getElementById("js-copy-hashtags")?.addEventListener("click", () => {
+      const tags = document.querySelectorAll(".hashtag");
+      const text = Array.from(tags).map(t => t.textContent.trim()).join(" ");
+      copy(text);
+    });
+  });
+</script>
+{% endblock %}

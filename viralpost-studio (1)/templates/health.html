@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Health — ViralPost Studio{% endblock %}
+
+{% block content %}
+<section class="health-section">
+  <h1>Status do serviço</h1>
+  <p>Informações não sensíveis. Tokens nunca aparecem aqui.</p>
+
+  <table class="health-table">
+    <tbody>
+      <tr><th>Ambiente Flask</th><td>{{ settings.flask_env }}</td></tr>
+      <tr><th>Compositor (LLM)</th><td><code>{{ settings.llm_provider }}</code></td></tr>
+      <tr><th>Pinterest</th><td><code>{{ 'configured' if settings.pinterest_configured else 'mock' }}</code></td></tr>
+      <tr><th>Ranking</th><td>
+        <code>{{ settings.llm_provider if settings.ranking_enabled else 'disabled' }}</code>
+      </td></tr>
+      <tr><th>goviral.ai</th><td><code>external (login Discord manual)</code></td></tr>
+      <tr><th>Timeout HTTP</th><td>{{ settings.request_timeout_seconds }}s</td></tr>
+      <tr><th>TTL da sessão</th><td>{{ settings.session_ttl_minutes }} min</td></tr>
+      <tr><th>Slide size</th><td>{{ settings.slide_width }} × {{ settings.slide_height }} px</td></tr>
+    </tbody>
+  </table>
+
+  <p class="muted">
+    Veja também <a href="{{ url_for('health.health') }}">/health (JSON)</a>.
+  </p>
+</section>
+{% endblock %}

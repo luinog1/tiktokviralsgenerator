@@ -1,0 +1,25 @@
+services:
+  viralpost:
+    build: .
+    image: viralpost-studio:0.2
+    container_name: viralpost-studio
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    environment:
+      - FLASK_ENV=production
+      - DEBUG=false
+    volumes:
+      # Para desenvolvimento — não afeta produção
+      - ./app:/app/app:ro
+      - ./templates:/app/templates:ro
+      - ./static:/app/static:ro
+      - ./run.py:/app/run.py:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

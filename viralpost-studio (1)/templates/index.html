@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}ViralPost Studio — Transforme texto em carrossel visual{% endblock %}
+
+{% block content %}
+<section class="hero">
+  <div class="hero-text">
+    <p class="eyebrow">MVP · v0.3 · Carrossel TikTok-style</p>
+    <h1>Cole o texto do goviral.ai e gere um carrossel pronto para publicar.</h1>
+    <p class="lead">
+      Você acessa o <a href="{{ goviral_url }}" target="_blank" rel="noopener">goviral.ai</a>
+      manualmente (login Discord), copia o texto pronto e cola aqui.
+      O ViralPost organiza esse texto em slides sobre imagens do Pinterest
+      e exporta um carrossel visual no estilo TikTok photo post.
+    </p>
+    <div class="hero-actions">
+      <a class="btn btn-primary btn-lg" href="{{ url_for('create.create') }}">Criar carrossel</a>
+      <a class="btn btn-ghost" href="{{ goviral_url }}" target="_blank" rel="noopener">Abrir goviral.ai ↗</a>
+    </div>
+  </div>
+  <div class="hero-card" aria-hidden="true">
+    <div class="mock-post">
+      <div class="mock-img"></div>
+      <div class="mock-headline"></div>
+      <div class="mock-line w-90"></div>
+      <div class="mock-line w-75"></div>
+      <div class="mock-line w-85"></div>
+      <div class="mock-cta"></div>
+    </div>
+  </div>
+</section>
+
+<section class="cards" id="como-funciona">
+  <article class="card">
+    <h3>1 · Cole o texto</h3>
+    <p>Acesse o goviral.ai (login Discord), gere o texto e cole no formulário do ViralPost.</p>
+  </article>
+  <article class="card">
+    <h3>2 · Estruture em slides</h3>
+    <p>O LLM (ou mock determinístico) divide o texto em N slides com headline, corpo e CTA.</p>
+  </article>
+  <article class="card">
+    <h3>3 · Busque imagens</h3>
+    <p>A API oficial do Pinterest retorna imagens relacionadas ao tema. Ranking opcional ordena.</p>
+  </article>
+  <article class="card">
+    <h3>4 · Exporte o carrossel</h3>
+    <p>Baixe um ZIP com todos os slides PNG + Markdown, ou um slide único, ou o MD isolado.</p>
+  </article>
+</section>
+
+<section class="status-panel">
+  <h2>Status das integrações</h2>
+  <ul class="status-list">
+    <li>
+      <span class="dot" data-state="{{ 'mock' if composer_provider == 'mock' else 'real' }}"></span>
+      <span>Compositor de slides (LLM)</span>
+      <code>{{ composer_provider }}</code>
+    </li>
+    <li>
+      <span class="dot" data-state="{{ 'mock' if pinterest_provider == 'mock' else 'real' }}"></span>
+      <span>Pinterest API</span>
+      <code>{{ pinterest_provider }}</code>
+    </li>
+    <li>
+      <span class="dot" data-state="{{ 'mock' if ranking_provider == 'mock' else 'real' }}"></span>
+      <span>Ranking de imagens</span>
+      <code>{{ ranking_provider }}</code>
+    </li>
+    <li>
+      <span class="dot" data-state="external"></span>
+      <span>goviral.ai (texto bruto)</span>
+      <code>manual</code>
+    </li>
+  </ul>
+  {% if recent %}
+  <div class="recent-list">
+    <h3>Carrosséis recentes</h3>
+    <ul>
+      {% for r in recent %}
+      <li>
+        <a href="{{ url_for('preview.preview', project_id=r.project_id) }}">
+          {{ r.theme or 'Sem tema' }} · {{ r.style }} · {{ r.slides_count }} slides
+        </a>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

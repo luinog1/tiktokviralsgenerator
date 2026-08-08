@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% block title %}Criar carrossel — ViralPost Studio{% endblock %}
+
+{% block content %}
+<section class="create-section">
+  <header class="section-head">
+    <h1>Briefing do carrossel</h1>
+    <p>
+      Acesse o <a href="{{ goviral_url }}" target="_blank" rel="noopener">goviral.ai</a>
+      (login Discord), gere o texto e cole abaixo. O ViralPost estrutura em slides e
+      busca imagens no Pinterest.
+    </p>
+  </header>
+
+  <form method="POST" action="{{ url_for('generate.generate') }}" class="briefing-form" novalidate>
+    {{ form.csrf_token }}
+
+    <div class="field">
+      <label for="raw_text">{{ form.raw_text.label.text }}</label>
+      <div class="textarea-meta">
+        <span id="char-counter">0</span> / 6000 caracteres
+        <a href="{{ goviral_url }}" target="_blank" rel="noopener" class="small muted" style="margin-left: auto;">
+          Abrir goviral.ai ↗
+        </a>
+      </div>
+      {{ form.raw_text(id="raw_text", class_="input textarea textarea-lg") }}
+      {% if form.raw_text.errors %}
+        <ul class="errors">
+          {% for err in form.raw_text.errors %}<li>{{ err }}</li>{% endfor %}
+        </ul>
+      {% endif %}
+    </div>
+
+    <div class="field">
+      <label for="theme">{{ form.theme.label.text }}</label>
+      {{ form.theme(id="theme", class_="input") }}
+      {% if form.theme.errors %}
+        <ul class="errors">
+          {% for err in form.theme.errors %}<li>{{ err }}</li>{% endfor %}
+        </ul>
+      {% endif %}
+    </div>
+
+    <div class="grid-3">
+      <div class="field">
+        <label for="style">{{ form.style.label.text }}</label>
+        {{ form.style(id="style", class_="input") }}
+        {% if form.style.errors %}<ul class="errors">{% for err in form.style.errors %}<li>{{ err }}</li>{% endfor %}</ul>{% endif %}
+      </div>
+      <div class="field">
+        <label for="slides_count">{{ form.slides_count.label.text }}</label>
+        {{ form.slides_count(id="slides_count", class_="input") }}
+        {% if form.slides_count.errors %}<ul class="errors">{% for err in form.slides_count.errors %}<li>{{ err }}</li>{% endfor %}</ul>{% endif %}
+      </div>
+      <div class="field">
+        <label for="language">{{ form.language.label.text }}</label>
+        {{ form.language(id="language", class_="input") }}
+        {% if form.language.errors %}<ul class="errors">{% for err in form.language.errors %}<li>{{ err }}</li>{% endfor %}</ul>{% endif %}
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="niche">{{ form.niche.label.text }}</label>
+      {{ form.niche(id="niche", class_="input") }}
+    </div>
+
+    <fieldset class="keywords">
+      <legend>Palavras-chave (para busca de imagens)</legend>
+      <div class="keywords-list" id="keywords-list">
+        {% for entry in form.keywords %}
+          <div class="keyword-row">
+            {{ entry(class_="input", placeholder="palavra-chave") }}
+            <button type="button" class="btn btn-ghost btn-sm js-remove-keyword" aria-label="Remover">✕</button>
+          </div>
+        {% endfor %}
+      </div>
+      <button type="button" class="btn btn-ghost btn-sm" id="js-add-keyword">+ Adicionar palavra</button>
+    </fieldset>
+
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary btn-lg">Gerar carrossel</button>
+      <a href="{{ url_for('main.index') }}" class="btn btn-ghost">Cancelar</a>
+      {% if ranking_enabled %}
+      <span class="badge">Ranking: ativo</span>
+      {% else %}
+      <span class="badge badge-muted">Ranking: desativado</span>
+      {% endif %}
+    </div>
+  </form>
+</section>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    // Char counter
+    const ta = document.getElementById("raw_text");
+    const counter = document.getElementById("char-counter");
+    if (ta && counter) {
+      const update = () => counter.textContent = String(ta.value.length);
+      ta.addEventListener("input", update);
+      update();
+    }
+
+    // Keywords dinâmicos
+    const list = document.getElementById("keywords-list");
+    const addBtn = document.getElementById("js-add-keyword");
+    if (!list || !addBtn) return;
+
+    addBtn.addEventListener("click", () => {
+      if (list.children.length >= 8) return;
+      const first = list.querySelector(".keyword-row");
+      if (!first) return;
+      const clone = first.cloneNode(true);
+      const input = clone.querySelector("input");
+      if (input) {
+        input.value = "";
+        const idx = list.children.length;
+        input.name = input.name.replace(/-\d+$/, `-${idx}`);
+        input.id = input.id.replace(/-\d+$/, `-${idx}`);
+      }
+      list.appendChild(clone);
+    });
+
+    list.addEventListener("click", (ev) => {
+      const btn = ev.target.closest(".js-remove-keyword");
+      if (!btn) return;
+      const row = btn.closest(".keyword-row");
+      if (list.children.length > 1) row.remove();
+    });
+  });
+</script>
+{% endblock %}
