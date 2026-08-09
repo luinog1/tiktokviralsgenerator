@@ -118,6 +118,60 @@ class VisionRankingProvider:
         # o VLM olha até 8 fotos numa chamada e leva dezenas de segundos.
         self._timeout = settings.vision_timeout_seconds
 
+    def _post(
+        self, candidates: list[PinterestImage], content: list[dict[str, Any]]
+    ) -> requests.Response | None:
+        """Uma chamada ao endpoint. None = HTTP de erro já logado.
+
+        `chat_template_kwargs.enable_thinking=false` é o jeito documentado de
+        desligar o raciocínio na série Qwen3 servida por vLLM (o caso da
+        ModelScope API-Inference). Sem isso, uma variante Thinking gasta o
+        orçamento inteiro de tokens raciocinando e o JSON nunca começa —
+        `finish_reason=length` com uma resposta que é só cadeia de pensamento.
+
+        Gateway que rejeita o parâmetro devolve 400; nesse caso a chamada é
+        repetida sem ele, para não quebrar quem já funcionava. O 400 volta na
+        hora, então a repetição não ameaça o timeout do worker.
+        """
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": content},
+            ],
+            "temperature": 0.1,
+            "chat_template_kwargs": {"enable_thinking": False},
+            # Orçamento por imagem, não fixo: um veredicto ocupa ~60 tokens e 8
+            # imagens estouravam os 900 que havia aqui.
+            "max_tokens": 700 + 220 * len(candidates),
+        }
+        headers = {
+            "Authorization": f"Bearer {self._key}",
+            "Content-Type": "application/json",
+        }
+        url = f"{self._base}/chat/completions"
+
+        response = requests.post(url, json=payload, headers=headers, timeout=self._timeout)
+        if response.status_code == 400:
+            logger.info(
+                "Vision endpoint recusou chat_template_kwargs (HTTP 400) — "
+                "repetindo sem o parâmetro."
+            )
+            payload.pop("chat_template_kwargs")
+            response = requests.post(
+                url, json=payload, headers=headers, timeout=self._timeout
+            )
+        if response.status_code >= 400:
+            # 404 aqui é quase sempre model id errado (no ModelScope o ID
+            # precisa do prefixo da org: "Qwen/Qwen3-VL-...").
+            logger.warning(
+                "Vision endpoint HTTP %d: %s",
+                response.status_code,
+                response.text[:300],
+            )
+            return None
+        return response
+
     def rank(
         self, briefing: dict[str, Any], images: list[PinterestImage]
     ) -> list[VisionVerdict]:
@@ -150,36 +204,7 @@ class VisionRankingProvider:
             })
 
         try:
-            response = requests.post(
-                f"{self._base}/chat/completions",
-                json={
-                    "model": self._model,
-                    "messages": [
-                        {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user", "content": content},
-                    ],
-                    "temperature": 0.1,
-                    # Orçamento por imagem, não fixo: um veredicto ocupa ~60
-                    # tokens e 8 imagens estouravam os 900 que havia aqui. Nos
-                    # modelos "thinking" o raciocínio vem no mesmo orçamento e
-                    # a resposta era cortada antes do JSON começar.
-                    "max_tokens": 700 + 220 * len(candidates),
-                },
-                headers={
-                    "Authorization": f"Bearer {self._key}",
-                    "Content-Type": "application/json",
-                },
-                timeout=self._timeout,
-            )
-            if response.status_code >= 400:
-                # 404 aqui é quase sempre model id errado (no ModelScope o ID
-                # precisa do prefixo da org: "Qwen/Qwen3-VL-...").
-                logger.warning(
-                    "Vision endpoint HTTP %d: %s",
-                    response.status_code,
-                    response.text[:300],
-                )
-            response.raise_for_status()
+            response = self._post(candidates, content)
         except requests.Timeout:
             logger.warning(
                 "Vision endpoint não respondeu em %ds — seguindo sem visão.",
@@ -190,6 +215,8 @@ class VisionRankingProvider:
             logger.warning(
                 "Vision endpoint falhou (%s) — seguindo sem visão.", type(exc).__name__
             )
+            return []
+        if response is None:
             return []
 
         try:
@@ -213,9 +240,10 @@ class VisionRankingProvider:
             )
             if finish_reason == "length":
                 logger.warning(
-                    "A resposta de visão foi cortada no limite de tokens. Se "
-                    "VISION_MODEL for uma variante Thinking, troque pela "
-                    "Instruct — o raciocínio consome o orçamento inteiro."
+                    "A resposta de visão foi cortada no limite de tokens: o "
+                    "raciocínio consumiu o orçamento antes do JSON começar. O "
+                    "pedido já manda enable_thinking=false; se o provider "
+                    "ignorou, troque VISION_MODEL pela variante Instruct."
                 )
             return []
 

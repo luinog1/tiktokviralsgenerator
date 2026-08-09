@@ -215,6 +215,59 @@ def test_truncated_reason_with_braces_does_not_break_the_salvage(monkeypatch):
     assert verdicts[0].reason == 'chave } e aspas " no meio'
 
 
+def test_asks_the_provider_to_skip_the_reasoning(monkeypatch):
+    """Numa variante Thinking o raciocínio come o orçamento e o JSON nem começa.
+
+    `chat_template_kwargs.enable_thinking=false` é o parâmetro documentado do
+    vLLM (o servidor da ModelScope API-Inference) para a série Qwen3.
+    """
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["json"] = kwargs["json"]
+        return _reply('{"results":[]}')
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    VisionRankingProvider(_settings()).rank({}, _photos(1))
+
+    assert captured["json"]["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_retries_without_the_thinking_flag_when_the_gateway_rejects_it(monkeypatch):
+    """Gateway que não conhece o parâmetro devolve 400 — não pode virar fallback.
+
+    O 400 volta na hora, então repetir sem o campo não ameaça o timeout do
+    worker, e quem já funcionava continua funcionando.
+    """
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(kwargs["json"])
+        if "chat_template_kwargs" in kwargs["json"]:
+            return _Resp({"error": "unknown field"}, status=400)
+        return _reply('{"results":[{"image_id":"ph0","score":0.7,"anchor":"top"}]}')
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    verdicts = VisionRankingProvider(_settings()).rank({}, _photos(1))
+
+    assert len(calls) == 2
+    assert "chat_template_kwargs" not in calls[1]
+    assert [v.image_id for v in verdicts] == ["ph0"]
+
+
+def test_truncated_reply_without_json_names_the_cause(monkeypatch, caplog):
+    """`finish_reason=length` com só raciocínio: o log tem de dizer o porquê."""
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp({"choices": [{
+        "message": {"content": "The user wants me to evaluate 8 images for a "
+                               "TikTok carousel. The criteria are: 1. score"},
+        "finish_reason": "length",
+    }]}))
+    with caplog.at_level("WARNING"):
+        assert VisionRankingProvider(_settings()).rank({}, _photos(1)) == []
+    assert "finish_reason=length" in caplog.text
+    assert "Instruct" in caplog.text
+
+
 def test_token_budget_grows_with_the_number_of_images(monkeypatch):
     """8 imagens não cabiam nos 900 tokens fixos — a resposta vinha cortada."""
     captured = {}

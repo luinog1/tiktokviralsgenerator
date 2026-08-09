@@ -582,13 +582,19 @@ a:hover { text-decoration: underline; }
 }
 
 /* --- Estilo sticker (TikTok photo post) ---
-   Espelha o que o SlideRenderer desenha no PNG: UMA caixa branca por bloco
-   (headline, texto, CTA), texto preto, foto sem escurecimento. O padding lateral
-   de 6% é a margem da foto: a linha corre até perto dela antes de quebrar. */
+   Espelha o que o SlideRenderer desenha no PNG: uma caixa branca arredondada
+   POR LINHA, do tamanho da própria linha, texto preto, foto sem escurecimento.
+   O padding lateral de 6% é a margem da foto: a linha corre até perto dela
+   antes de quebrar.
+
+   `container-type` faz o corpo da fonte ser medido em `cqw` (fração da largura
+   do slide), como no PNG — com um `rem` fixo o mesmo texto quebrava em mais
+   linhas na prévia do que no arquivo exportado, e a caixa saía estreita. */
 .slide-visual-sticker {
   align-items: stretch;
   justify-content: center;
   padding: 24px 6%;
+  container-type: inline-size;
 }
 
 .slide-visual-sticker .slide-text-stack {
@@ -601,40 +607,56 @@ a:hover { text-decoration: underline; }
   justify-content: center;
 }
 
-/* A caixa branca é do CONTÊINER, não do texto: uma etiqueta por bloco, com o
-   texto quebrando dentro dela. Pintar o fundo no inline com
-   `box-decoration-break: clone` dava uma caixa por LINHA — retângulos soltos de
-   larguras diferentes, que é justamente o que o photo post nativo não faz.
-   `width: fit-content` encolhe a caixa até a linha mais longa.
+/* O contêiner NÃO pinta nada: ele só define a largura em que o texto quebra e
+   a área que o arraste move. Quem pinta é o inline lá embaixo, linha a linha.
 
    O corpo da fonte fica AQUI (e não no texto) para o padding em `em` crescer
-   junto com o resize — é o que espelha o `_sticker_padding` do PNG, onde a
-   folga é fração do tamanho da fonte. `--box-scale` é o resize do editor. */
+   junto com o resize. `--box-scale` é o resize do editor.
+
+   `cqw` mede 1% do **content box** do contêiner (já sem o padding de 6%), que é
+   a mesma largura útil em que o PNG quebra a linha: `_STICKER_TEXT_WIDTH_RATIO`
+   × 1080 = 950px para uma fonte de 64px. Daí 64/950 = 6.74cqw — é o que faz a
+   prévia quebrar nas MESMAS palavras que o arquivo exportado. */
 .slide-visual-sticker .slide-text-box {
-  width: fit-content;
+  width: max-content;
   max-width: 100%;
   margin: 0;
-  background: #fff;
+  /* Fallback para navegador sem container queries: o `calc` com `cqw` é erro de
+     parse ali e a declaração inteira cai, deixando esta valer. */
   font-size: calc(1.02rem * var(--box-scale, 1));
-  padding: 0.15em 0.30em;
-  border-radius: 0.22em;
+  font-size: calc(6.74cqw * var(--box-scale, 1));
 }
 
 /* Um tamanho só para todas as caixas — o photo post do TikTok não muda o corpo
-   da legenda entre "título" e "texto". */
+   da legenda entre "título" e "texto".
+
+   A caixa branca é pintada AQUI, no elemento inline, e não no contêiner: com
+   `box-decoration-break: clone` o navegador repete fundo, padding e cantos
+   arredondados em CADA linha, e cada caixa fica do tamanho da sua linha. Pintar
+   o fundo no contêiner dava a largura da linha MAIS LONGA a todas as outras, e
+   nas linhas curtas sobrava um vão branco de cada lado — a "margem sobrando"
+   que o photo post nativo não tem.
+
+   `line-height` (1.196) é MENOR que a altura da caixa (content area de 1.3em +
+   2x 0.09em de padding = 1.48em), então as caixas de linhas vizinhas se
+   sobrepõem e a pilha lê como uma mancha branca contínua. São os mesmos
+   números de `_STICKER_LINE_PITCH_RATIO` e `_STICKER_PAD_*_RATIO` no PNG. */
 .slide-visual-sticker .slide-headline,
 .slide-visual-sticker .slide-body-snippet,
 .slide-visual-sticker .slide-cta-snippet {
-  display: block;
+  display: inline;
   margin: 0;
   color: #111;
   font-size: inherit;
   text-shadow: none;
-  background: none;
+  background: #fff;
+  padding: 0.09em 0.45em;
+  border-radius: 0.22em;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
   overflow: visible;
   -webkit-line-clamp: none;
-  /* Mesmo passo entre linhas do PNG (~1.19x o corpo da fonte). */
-  line-height: 1.19;
+  line-height: 1.196;
   /* Mesma família e mesmos pesos do PNG: 600 na headline/CTA, 500 no corpo. */
   font-family: var(--font-sticker);
   font-weight: 600;
@@ -674,6 +696,16 @@ a:hover { text-decoration: underline; }
 .slide-visual-sticker .slide-text-box {
   cursor: grab;
   touch-action: none;
+  /* O contêiner é transparente e pode ser mais largo que as caixas brancas
+     (linha curta = caixa curta). Só a etiqueta branca pega o arraste; o evento
+     sobe para o contêiner, que é quem escuta. */
+  pointer-events: none;
+}
+
+.slide-visual-sticker .slide-headline,
+.slide-visual-sticker .slide-body-snippet,
+.slide-visual-sticker .slide-cta-snippet {
+  pointer-events: auto;
 }
 
 .slide-visual-sticker .slide-text-box.dragging {
@@ -683,8 +715,15 @@ a:hover { text-decoration: underline; }
 
 .slide-visual-sticker .slide-text-box.positioned {
   position: absolute;
-  /* left/top vêm inline, do arraste. 88% = a largura útil dentro do
-     padding de 6% do .slide-visual-sticker, para o texto quebrar igual. */
+  /* left/top vêm inline, do arraste. 88% = a largura útil dentro do padding de
+     6% do .slide-visual-sticker, para o texto quebrar igual.
+
+     `width: max-content` (herdado da regra acima) em vez de `fit-content` é o
+     que impede o texto de ser reformatado ao ARRASTAR: o espaço disponível de
+     um elemento absoluto é `largura do contêiner - left`, então com
+     `fit-content` a caixa ia estreitando conforme se arrastava para a direita e
+     o texto quebrava em mais linhas no meio do gesto. `max-content` não olha o
+     espaço disponível, e o teto de 88% vale igual nos dois estados. */
   max-width: 88%;
   transform: translate(-50%, -50%);
   margin: 0;

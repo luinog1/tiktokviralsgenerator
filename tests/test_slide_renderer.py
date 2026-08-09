@@ -372,11 +372,11 @@ def test_box_scale_changes_the_rendered_box(renderer):
     assert (right_big - left_big) > (right_plain - left_plain)
 
 
-# ---------- Caixa única por bloco ----------
+# ---------- Uma caixa por linha, colada na linha ----------
 
 
 def _white_row_runs(img, x_step: int = 4) -> list[tuple[int, int]]:
-    """Faixas verticais contínuas de branco — uma por caixa desenhada."""
+    """Faixas verticais contínuas de branco — uma por BLOCO desenhado."""
     runs, start = [], None
     for y in range(img.height):
         white = any(
@@ -393,12 +393,62 @@ def _white_row_runs(img, x_step: int = 4) -> list[tuple[int, int]]:
     return runs
 
 
-def test_multiline_text_stays_in_a_single_box(renderer):
-    """Uma frase longa é UMA etiqueta, não um retângulo por linha.
+def _line_box_widths(renderer, text: str, key: str = "headline"):
+    """Largura da caixa branca de CADA linha (+ linhas, fonte e draw) no PNG.
 
-    O photo post nativo do TikTok quebra o texto dentro da mesma caixa branca.
-    Desenhar uma caixa por linha dava bordas serrilhadas, com cada linha num
-    retângulo de largura diferente.
+    As caixas de linhas vizinhas se sobrepõem, então uma linha só aparece
+    sozinha na última fatia antes de a próxima começar — é onde a amostra é
+    tirada.
+    """
+    from PIL import ImageDraw
+
+    slide = SlideContent(**{key: text}, role="value")
+    img = _open(
+        renderer.render_single(slide, None, style="sticker").png_bytes
+    ).convert("RGB")
+    draw = ImageDraw.Draw(img)
+    _, lines, font = renderer._fit_sticker_blocks(
+        draw, [(key, text)], max_width=int(1080 * renderer._STICKER_TEXT_WIDTH_RATIO)
+    )[0]
+    pitch = renderer._sticker_line_pitch(font)
+    top = _white_row_runs(img, x_step=1)[0][0]
+
+    widths = []
+    for i in range(len(lines)):
+        y = top + pitch * (i + 1) - 2
+        xs = [x for x in range(img.width) if img.getpixel((x, y)) == (255, 255, 255)]
+        assert xs, f"linha {i} sem caixa branca na altura {y}"
+        widths.append(xs[-1] - xs[0])
+    return widths, lines, font, draw
+
+
+def test_each_line_gets_a_box_of_its_own_width(renderer):
+    """A caixa acompanha a linha — é o que a referência do TikTok mostra.
+
+    Uma caixa só para o bloco inteiro dava a largura da linha MAIS LONGA a
+    todas as outras: nas linhas curtas sobrava um vão branco de cada lado, o
+    "espaço sobrando" que o photo post nativo não tem.
+    """
+    text = "things i wish someone told me before i started posting..."
+    widths, lines, font, draw = _line_box_widths(renderer, text)
+    assert len(lines) > 1, "o texto precisa quebrar para este teste valer"
+
+    for width, line in zip(widths, lines):
+        expected = renderer._sticker_line_width(draw, line, font)
+        # ±6px: a borda arredondada come alguns pixels nas pontas da amostra.
+        assert abs(width - expected) < 6, (
+            f"caixa de {width}px para a linha {line!r} (esperado {expected}px)"
+        )
+
+    # E a linha curta tem mesmo uma caixa menor — o sintoma que o usuário viu.
+    assert min(widths) < max(widths) * 0.9
+
+
+def test_lines_form_one_continuous_white_band(renderer):
+    """As caixas se encostam: nada da foto aparece entre uma linha e outra.
+
+    Caixas por linha com folga entre elas viravam retângulos soltos, com uma
+    listra da foto no meio da frase.
     """
     text = (
         "there were weeks i was posting every single day, trying different "
@@ -416,6 +466,35 @@ def test_multiline_text_stays_in_a_single_box(renderer):
     )[0]
     assert len(lines) > 1, "o texto precisa quebrar para este teste valer"
     assert len(_white_row_runs(img)) == 1
+
+
+def test_no_line_is_covered_by_the_next_box(renderer):
+    """As caixas se sobrepõem — o texto não pode ser desenhado antes delas.
+
+    Desenhando caixa+texto linha a linha, a caixa da linha seguinte cobria o
+    rabo dos "g"/"p" da linha anterior.
+    """
+    text = "paging paging paging longa o suficiente para quebrar em duas linhas"
+    slide = SlideContent(headline=text, role="value")
+    img = _open(renderer.render_single(slide, None, style="sticker").png_bytes).convert("RGB")
+
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(img)
+    _, lines, font = renderer._fit_sticker_blocks(
+        draw, [("headline", text)], max_width=int(1080 * renderer._STICKER_TEXT_WIDTH_RATIO)
+    )[0]
+    assert len(lines) > 1, "o texto precisa quebrar para este teste valer"
+
+    pitch = renderer._sticker_line_pitch(font)
+    top = _white_row_runs(img, x_step=1)[0][0]
+    # A tinta da primeira linha tem de sobreviver até onde os descendentes vão,
+    # ou seja, além do topo da caixa da segunda linha.
+    ink_rows = [
+        y for y in range(top, top + pitch * 2)
+        if any(sum(img.getpixel((x, y))) < 200 for x in range(img.width))
+    ]
+    assert max(ink_rows) > top + pitch, "os descendentes da 1ª linha foram cobertos"
 
 
 def test_each_block_keeps_its_own_box(renderer):
@@ -458,6 +537,34 @@ def test_text_runs_close_to_the_photo_margin(renderer):
     slide = SlideContent(headline=text, role="value")
     _, _, left, right = _white_box_bounds(renderer, slide)
     assert (right - left) > 1080 * 0.75
+
+
+def test_the_box_never_passes_the_useful_width(renderer):
+    """O limite de 88% é da CAIXA, não da tinta.
+
+    Medindo só o texto, a etiqueta saía com 88% + dois paddings (~93% do
+    canvas) e passava da margem da foto — e a prévia, onde o limite é da caixa,
+    quebrava a linha antes do PNG.
+    """
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(Image.new("RGB", (1080, 1350)))
+    max_width = int(1080 * renderer._STICKER_TEXT_WIDTH_RATIO)
+    textos = [
+        "things i wish someone told me before i started posting...",
+        "there were weeks i was posting every single day, trying different "
+        "trends, switching hooks, adding text, all of it and still barely "
+        "getting views.",
+        "ninguém acorda às 5h por disciplina, acorda porque dormiu às 21h",
+    ]
+    for texto in textos:
+        _, lines, font = renderer._fit_sticker_blocks(
+            draw, [("headline", texto)], max_width=max_width
+        )[0]
+        widest = max(renderer._sticker_line_width(draw, line, font) for line in lines)
+        assert widest <= max_width, (
+            f"caixa de {widest}px passa da largura útil ({max_width}px): {texto!r}"
+        )
 
 
 # ---------- Caixa colada no texto ----------

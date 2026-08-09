@@ -63,7 +63,8 @@
         <div class="slide-visual{% if style == 'sticker' %} slide-visual-sticker{% endif %}" style="background-image: url('{{ image_for_slide[i].image_url if image_for_slide[i] else '' }}');">
           {% if style != 'sticker' %}<div class="slide-overlay"></div>{% endif %}
           {# Cada caixa tem seu próprio contêiner: é o que permite arrastar uma
-             de cada vez e o que faz a caixa branca encolher até o texto. #}
+             de cada vez. As caixas brancas são pintadas por LINHA, no texto
+             inline (ver `box-decoration-break` no CSS). #}
           <div class="slide-text-stack{% if style == 'sticker' %} js-box-stack{% endif %}"
                data-role="{{ slide.role or 'value' }}"
                data-position="{{ form.text_positions[i].data or '' }}"
@@ -281,6 +282,23 @@
       stack.querySelectorAll(".slide-text-box").forEach((box) => {
         const key = box.dataset.box;
 
+        // Extensão das caixas BRANCAS, não do contêiner. O contêiner tem a
+        // largura em que o texto quebra (~88% do slide) e é transparente; as
+        // etiquetas brancas acompanham cada linha e são bem mais estreitas.
+        // Clampar pelo contêiner travava o arraste lateral quase no centro,
+        // enquanto o PNG usa a linha mais larga (`_sticker_block_width`).
+        // `getClientRects()` num inline devolve um retângulo POR LINHA.
+        const inkRect = () => {
+          const inline = box.firstElementChild;
+          const rects = inline ? Array.from(inline.getClientRects()) : [];
+          if (!rects.length) return box.getBoundingClientRect();
+          const left = Math.min(...rects.map((r) => r.left));
+          const right = Math.max(...rects.map((r) => r.right));
+          const top = Math.min(...rects.map((r) => r.top));
+          const bottom = Math.max(...rects.map((r) => r.bottom));
+          return { left, right, top, bottom, width: right - left, height: bottom - top };
+        };
+
         const place = (x, y) => {
           box.style.left = `${(x * 100).toFixed(2)}%`;
           box.style.top = `${(y * 100).toFixed(2)}%`;
@@ -298,10 +316,16 @@
         let dragging = false;
         let grabX = 0;
         let grabY = 0;
+        // Meia caixa branca em cada direção, medida no início do arraste.
+        let inkOffsetLeft = 0;
+        let inkOffsetRight = 0;
+        let inkOffsetTop = 0;
+        let inkOffsetBottom = 0;
 
         const start = (event) => {
           const area = visual.getBoundingClientRect();
           const rect = box.getBoundingClientRect();
+          const ink = inkRect();
           // Primeiro arraste: fixar a caixa exatamente onde o CSS a deixou,
           // senão ela salta para o centro ao virar absoluta.
           if (!box.classList.contains("positioned")) {
@@ -311,8 +335,16 @@
             );
           }
           const p = pointOf(event);
+          // O ponto gravado é o centro do CONTÊINER (é o que left/top movem),
+          // mas o agarre é medido a partir de onde o usuário clicou.
           grabX = p.clientX - (rect.left + rect.width / 2);
           grabY = p.clientY - (rect.top + rect.height / 2);
+          // Distância do centro do contêiner até as bordas do branco: é o que
+          // decide o quanto a caixa pode andar sem sair da foto.
+          inkOffsetLeft = rect.left + rect.width / 2 - ink.left;
+          inkOffsetRight = ink.right - (rect.left + rect.width / 2);
+          inkOffsetTop = rect.top + rect.height / 2 - ink.top;
+          inkOffsetBottom = ink.bottom - (rect.top + rect.height / 2);
           dragging = true;
           box.classList.add("dragging");
           event.preventDefault();
@@ -321,13 +353,20 @@
         const move = (event) => {
           if (!dragging) return;
           const area = visual.getBoundingClientRect();
-          const rect = box.getBoundingClientRect();
           const p = pointOf(event);
-          // Margem = meia caixa: nenhuma caixa branca sai da foto.
-          const marginX = rect.width / 2 / area.width;
-          const marginY = rect.height / 2 / area.height;
-          const x = clamp((p.clientX - grabX - area.left) / area.width, marginX, 1 - marginX);
-          const y = clamp((p.clientY - grabY - area.top) / area.height, marginY, 1 - marginY);
+          // Margem = a metade da caixa BRANCA de cada lado, mais a folga que o
+          // PNG guarda da borda (4% em X, 2% em Y). Sem a folga, a etiqueta
+          // encostava na borda na prévia e o PNG a puxava para dentro.
+          const x = clamp(
+            (p.clientX - grabX - area.left) / area.width,
+            0.04 + inkOffsetLeft / area.width,
+            0.96 - inkOffsetRight / area.width
+          );
+          const y = clamp(
+            (p.clientY - grabY - area.top) / area.height,
+            0.02 + inkOffsetTop / area.height,
+            0.98 - inkOffsetBottom / area.height
+          );
           place(x, y);
           positions[key] = `${x.toFixed(4)},${y.toFixed(4)}`;
           hidden.value = serializePairs(positions);
