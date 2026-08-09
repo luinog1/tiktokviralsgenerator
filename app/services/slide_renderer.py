@@ -272,10 +272,12 @@ class SlideRenderer:
         box_positions: dict[str, tuple[float, float]] | None = None,
         box_scales: dict[str, float] | None = None,
     ) -> None:
-        """Estilo TikTok: cada linha vira uma caixa branca arredondada.
+        """Estilo TikTok: cada bloco vira UMA caixa branca arredondada.
 
         headline e body são blocos separados, com respiro entre eles — é assim
-        que o texto aparece nos photo posts nativos do TikTok.
+        que o texto aparece nos photo posts nativos do TikTok. Dentro de cada
+        bloco o texto corre e quebra em várias linhas, mas a caixa continua uma
+        só: a frase é uma etiqueta, não uma pilha de retângulos por linha.
 
         Todos os blocos saem no MESMO corpo de fonte: no photo post nativo a
         legenda não muda de tamanho entre "título" e "texto", e dimensionar cada
@@ -288,8 +290,8 @@ class SlideRenderer:
         `box_positions`/`box_scales` ajustam uma caixa isolada: a que tem
         posição própria é desenhada sozinha, fora do empilhamento.
         """
-        max_width = int(self._w * 0.80)
-        gap = int(self._h * 0.045)
+        max_width = int(self._w * self._STICKER_TEXT_WIDTH_RATIO)
+        gap = int(self._h * self._STICKER_BLOCK_GAP_RATIO)
         box_positions = box_positions or {}
         box_scales = box_scales or {}
 
@@ -356,8 +358,20 @@ class SlideRenderer:
     # Piso do encolhimento automático. Abaixo disso o texto fica ilegível no
     # feed — melhor cortar linha do que continuar reduzindo.
     _STICKER_MIN_SIZE = 38
-    # Teto de linhas por caixa. É o que decide quando o corpo da fonte cai.
-    _STICKER_MAX_LINES = {"headline": 4, "body": 6, "cta": 2}
+    # Largura útil do texto, em fração do canvas: a linha corre até PERTO da
+    # margem da foto e só então quebra. Era 0.80, que quebrava a frase antes de
+    # o espaço acabar e fazia o slide parecer estreito.
+    _STICKER_TEXT_WIDTH_RATIO = 0.88
+    # Passo entre as linhas DENTRO da caixa, em fração do corpo da fonte, somado
+    # à mancha de tinta. 0.08 reproduz o passo de ~1.19x medido no photo post
+    # nativo — o mesmo `line-height` que a prévia usa.
+    _STICKER_LEADING_RATIO = 0.08
+    # Respiro entre caixas (headline → corpo → CTA).
+    _STICKER_BLOCK_GAP_RATIO = 0.045
+    # Fatia da altura do slide que o texto pode ocupar. É o ÚNICO gatilho do
+    # encolhimento: enquanto couber na altura, o texto só ganha mais uma linha —
+    # é assim que o editor do TikTok se comporta quando o texto cresce.
+    _STICKER_MAX_TEXT_RATIO = 0.84
 
     def _fit_sticker_blocks(
         self,
@@ -369,9 +383,15 @@ class SlideRenderer:
     ) -> list[tuple[str, list[str], Any]]:
         """Quebra as caixas num corpo de fonte COMUM, reduzindo todas juntas.
 
-        Devolve [(chave, linhas, fonte)] só das caixas com texto. Uma caixa com
-        escala própria em `scales` é dimensionada a partir do tamanho comum, e
-        não entra na decisão de encolher — o usuário pediu aquele tamanho.
+        Devolve [(chave, linhas, fonte)] só das caixas com texto. O texto corre
+        até perto da margem e, quando não cabe mais, ganha uma linha — nenhuma
+        linha é descartada. A fonte só cai quando os blocos, somados, não
+        caberiam na ALTURA do slide; antes disso o bloco simplesmente cresce
+        para baixo, como no editor do TikTok.
+
+        Uma caixa com escala própria em `scales` é dimensionada a partir do
+        tamanho comum e não entra na decisão de encolher — o usuário pediu
+        aquele tamanho.
         """
         scales = scales or {}
         filled = [(key, text) for key, text in texts if text.strip()]
@@ -381,21 +401,24 @@ class SlideRenderer:
         canvas_scale = self._w / 1080
         size = max(10, int(self._STICKER_BASE_SIZE * canvas_scale))
         floor = max(8, int(self._STICKER_MIN_SIZE * canvas_scale))
+        budget = int(self._h * self._STICKER_MAX_TEXT_RATIO)
+        gap = int(self._h * self._STICKER_BLOCK_GAP_RATIO)
 
         while True:
             result = []
-            overflow = False
             for key, text in filled:
                 bold = key != "body"
                 path = self._bold_path if bold else self._regular_path
                 box_size = max(10, int(round(size * scales.get(key, 1.0))))
                 font = _font(path, box_size)
-                lines = _wrap(text, font, max_width, draw)
-                limit = self._STICKER_MAX_LINES.get(key, 4)
-                if len(lines) > limit and key not in scales:
-                    overflow = True
-                result.append((key, lines[:limit], font))
-            if not overflow or size <= floor:
+                result.append((key, _wrap(text, font, max_width, draw), font))
+            heights = [
+                self._sticker_block_height(draw, lines, font)
+                for key, lines, font in result
+                if key not in scales
+            ]
+            total = sum(heights) + gap * max(0, len(heights) - 1)
+            if total <= budget or size <= floor:
                 return result
             size -= 2
 
@@ -434,13 +457,23 @@ class SlideRenderer:
         radius = max(6, int(size * 0.22))
         return pad_x, pad_y, radius
 
+    def _sticker_leading(self, font) -> int:
+        """Passo extra entre linhas dentro da MESMA caixa.
+
+        Medido no photo post nativo: o passo entre linhas é ~1.19x o corpo da
+        fonte, ou seja, a mancha de tinta mais um fio de respiro.
+        """
+        size = getattr(font, "size", 30)
+        return max(1, int(size * self._STICKER_LEADING_RATIO))
+
     def _sticker_block_height(self, draw, lines, font) -> int:
+        """Altura da caixa ÚNICA que abraça todas as linhas do bloco."""
         if not lines:
             return 0
         _, pad_y, _ = self._sticker_padding(font)
-        box_h = self._sticker_line_height(draw, font) + pad_y * 2
-        # -2px por linha: as caixas se encostam, sem fresta entre elas.
-        return box_h * len(lines) - 2 * (len(lines) - 1)
+        line_h = self._sticker_line_height(draw, font)
+        leading = self._sticker_leading(font)
+        return line_h * len(lines) + leading * (len(lines) - 1) + pad_y * 2
 
     def _sticker_block_width(self, draw, lines, font) -> int:
         """Largura da caixa mais larga do bloco — limita o arraste lateral."""
@@ -451,33 +484,46 @@ class SlideRenderer:
         return int(widest) + pad_x * 2
 
     def _draw_sticker_block(self, draw, lines, font, top: int, cx: int | None = None) -> int:
-        """Desenha as caixas brancas centralizadas em `cx`. Devolve o y do rodapé."""
+        """Desenha UMA caixa branca com todas as linhas dentro.
+
+        Uma caixa por BLOCO, não por linha: no photo post do TikTok a legenda é
+        uma etiqueta só e o texto quebra dentro dela. Uma caixa por linha
+        partia a frase em retângulos soltos, com as bordas serrilhadas de
+        acordo com o comprimento de cada linha.
+
+        Devolve o y do rodapé da caixa.
+        """
+        if not lines:
+            return top
         pad_x, pad_y, radius = self._sticker_padding(font)
         line_h = self._sticker_line_height(draw, font)
+        leading = self._sticker_leading(font)
         ink_offset = self._sticker_ink_offset(draw, font)
-        box_h = line_h + pad_y * 2
         if cx is None:
             cx = self._w // 2
-        y = top
+        # Largura pela tinta, não pelo avanço: o avanço inclui a folga lateral
+        # do último glifo e deixava um vão dentro da caixa.
+        box_w = self._sticker_block_width(draw, lines, font)
+        box_h = self._sticker_block_height(draw, lines, font)
+        x0 = cx - box_w // 2
+        draw.rounded_rectangle(
+            [x0, top, x0 + box_w, top + box_h],
+            radius=radius,
+            fill=(255, 255, 255),
+        )
+        y = top + pad_y
         for line in lines:
-            # Largura pela tinta, não pelo avanço: o avanço inclui a folga
-            # lateral do último glifo e deixava um vão dentro da caixa.
-            ink_w, ink_left = _ink_width(draw, line, font), _ink_left(draw, line, font)
-            box_w = int(ink_w) + pad_x * 2
-            x0 = cx - box_w // 2
-            draw.rounded_rectangle(
-                [x0, y, x0 + box_w, y + box_h],
-                radius=radius,
-                fill=(255, 255, 255),
-            )
+            ink_w = _ink_width(draw, line, font)
+            ink_left = _ink_left(draw, line, font)
+            # Linha centralizada DENTRO da caixa, como no editor do TikTok.
             draw.text(
-                (x0 + pad_x - ink_left, y + pad_y - ink_offset),
+                (cx - int(ink_w) // 2 - ink_left, y - ink_offset),
                 line,
                 font=font,
                 fill=(17, 17, 17),
             )
-            y += box_h - 2
-        return y + 2
+            y += line_h + leading
+        return top + box_h
 
     def _draw_quote_layout(self, draw, headline, body, cta, fonts, text_color, accent):
         from PIL import ImageDraw

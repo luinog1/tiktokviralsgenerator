@@ -48,6 +48,10 @@ Se nenhuma foto de pessoa aparecer em nenhuma das camadas, o slide de hook fica 
 
 ## 🎯 O que mudou na v0.6
 
+- ✅ **Uma caixa por bloco, não por linha** — a caixa branca era desenhada por *linha* (`box-decoration-break: clone` na prévia, um `rounded_rectangle` por linha no PNG). Uma frase de quatro linhas virava quatro retângulos de larguras diferentes, com a borda serrilhada, e a frase parecia partida. Agora a headline é **uma** caixa e o corpo é **outra**: o texto quebra dentro da mesma etiqueta, como no photo post nativo. A independência entre as caixas continua — cada uma arrasta e redimensiona sozinha.
+- ✅ **A linha só quebra perto da margem** — a largura útil subiu de 80% para 88% do canvas, e o teto fixo de linhas por caixa (`4/6/2`) saiu. Ele encolhia a fonte com o slide ainda vazio; o texto agora corre até perto da margem da foto e simplesmente ganha mais uma linha, crescendo para baixo. A fonte só cai quando os blocos somados passariam de 84% da altura do slide — que é o comportamento do editor do TikTok, onde o reajuste é do tamanho da fonte, não do número de caixas.
+- ✅ **Passo entre linhas medido no original** — 1.19× o corpo da fonte, tirado do photo post de referência (antes ~1.45×, herdado do empilhamento de caixas). Prévia e PNG usam o mesmo número, então o que se arrasta na tela é o que sai no arquivo.
+- 🐛 **`Vision não devolveu JSON utilizável` com HTTP 200** — três causas somadas, todas silenciosas. (1) O `max_tokens` era fixo em 900 e a resposta de 8 imagens não cabia: o JSON chegava cortado no meio de um item e o parser descartava o documento inteiro, inclusive as avaliações completas. Agora o orçamento é por imagem e os objetos balanceados são recuperados de uma resposta truncada. (2) Os modelos de raciocínio da ModelScope devolvem o texto em `reasoning_content` e deixam `content` vazio — o parser olhava só para `content`. (3) O aviso não dizia o que tinha voltado; agora loga `finish_reason` e o começo da resposta, e aponta a variante Thinking quando o corte foi por tokens.
 - ✅ **Cada caixa de texto anda sozinha** — antes o arraste movia headline, corpo e CTA juntos, como um bloco só, e não dava para pôr a pergunta no topo da foto e a resposta embaixo (o layout dos photo posts nativos). Agora cada caixa arrasta separada e grava seu próprio centro (`box_positions`). Uma caixa parada continua no empilhamento do papel; duplo clique devolve qualquer uma delas ao padrão.
 - ✅ **Um tamanho de fonte só, para todos os tipos** — headline, corpo e CTA saíam de bases diferentes (68/54/52) e encolhiam cada um por conta própria, então o mesmo texto mudava de tamanho conforme o campo em que fosse colado. Agora todas as caixas partem do mesmo corpo e, se o texto não couber, **todas** reduzem juntas.
 - ✅ **Resize por caixa no editor** — um controle por caixa na prévia (50%–250%), que multiplica o tamanho comum e vai junto para o PNG exportado.
@@ -86,6 +90,18 @@ O ID é **namespaced por organização** no ModelScope. Sem o prefixo, a respost
 Dois cuidados de projeto: as fotos vão na versão **pequena** (~400px, `urls.small`) porque 400px basta para julgar composição e a versão cheia multiplicaria os tokens de visão; e no máximo **8 imagens por chamada**, já que a chamada é síncrona dentro do `POST /generate`. Timeout, JSON ilegível, `image_id` alucinado ou visão desligada — qualquer um desses cai no ranking textual de sempre.
 
 A visão tem **timeout próprio** (`VISION_TIMEOUT_SECONDS`, default `90`), separado do `REQUEST_TIMEOUT_SECONDS` da busca de imagens. Enquanto os dois eram o mesmo número, o valor dimensionado para o Unsplash (20s) cancelava o VLM antes da primeira resposta — o log dizia `não respondeu em 20s` e o carrossel caía no ranking textual sem nada estar configurado errado. Dois timeouts porque as duas chamadas não têm nada a ver uma com a outra: uma é um GET de JSON, a outra é um modelo olhando 8 fotos. O worker do gunicorn roda com `--timeout 180`, que precisa ficar acima do timeout da visão para o fallback ter chance de acontecer — worker morto não faz fallback.
+
+#### Quando o log diz `Vision não devolveu JSON utilizável`
+
+HTTP 200 e nenhum veredicto significa que a chamada funcionou e a **resposta** é que não serviu. O aviso agora carrega o `finish_reason` e o começo do que voltou, que é o suficiente para separar os três casos:
+
+| No log | O que aconteceu | O que fazer |
+|--------|-----------------|-------------|
+| `finish_reason=length` | A resposta foi cortada no limite de tokens. Numa variante **Thinking** o raciocínio consome o orçamento inteiro e o JSON nem começa. | Trocar `VISION_MODEL` pela variante **Instruct**. Se a resposta chegou parcial, os itens completos já são aproveitados sozinhos. |
+| `finish_reason=stop` + prosa | O modelo respondeu em texto ("Claro! A primeira foto…") em vez de JSON. | Um VLM mais fraco no seguimento de instrução — trocar de modelo. |
+| `(resposta vazia)` | Nem `content` nem `reasoning_content` vieram preenchidos. | Verificar cota/limite do provider. |
+
+O orçamento de tokens é calculado por imagem (`700 + 220 × nº de imagens`), não fixo: um veredicto ocupa ~60 tokens e as 8 imagens da chamada não cabiam nos 900 que havia antes. Uma resposta truncada ainda é aproveitada — cada objeto `{...}` completo é lido isoladamente, então perder o último item não custa os outros sete.
 
 Modelos **text-to-image** (Qwen-Image, FLUX, Stable Diffusion) são outra categoria: eles *geram* a foto em vez de qualificar, e substituiriam o Unsplash. Não estão implementados.
 
@@ -304,13 +320,15 @@ Cobertura (190 testes):
 - **Casting** — hook recebe pessoa por visão, por metadado (`alt_description`) e por pool de busca, nessa ordem; parte do corpo ("woman's hands") não conta como retrato; fotos de cenário nunca caem no slide 1; aviso quando não há foto com pessoa; `HOOK_SUBJECT=off` volta à rotação.
 - **Roteiro viral** — distribuição de papéis por nº de slides, ordem `hook…cta`, CTA só no fecho, sem texto duplicado entre headline e body.
 - **SlideRenderer** — resolução de fonte TrueType, auto-ajuste do corpo da fonte, caixas brancas do estilo sticker, ausência de overlay escuro, posição do hook vs. valor, quebra de palavra longa, remoção de emoji.
+- **Caixa única por bloco** — texto de várias linhas gera UMA faixa branca contínua e não uma por linha; headline e corpo continuam sendo duas caixas separadas; a largura da caixa acompanha a linha mais longa e o texto corre até perto da margem.
+- **Quebra de linha por altura** — a fonte só encolhe quando os blocos passariam da altura útil do slide (não por contar linhas), e nenhuma palavra é descartada quando o texto cresce.
 - **Tamanho uniforme** — headline, corpo e CTA saem no mesmo corpo de fonte; texto longo encolhe as três caixas juntas, nunca uma só.
 - **Caixa colada no texto** — a altura da caixa branca acompanha a mancha de tinta (uma linha curta não gera bloco alto), e o `box_scale` aumenta a caixa junto com a fonte.
 - **Reposicionamento** — `pos_x`/`pos_y` vencem a âncora do papel, clamp dentro do canvas, slide sem posição mantém o comportamento antigo, e cada caixa (`box_positions`) move-se sem arrastar as outras.
 - **Pinterest mock** — geração de SVGs sintéticos.
 - **Unsplash** — rotação de páginas entre buscas iguais, reentrada quando a página sorteada passa do fim do acervo, motivo do fallback por status HTTP.
 - **Ranking** — correlação com `raw_text`, fallback sem corpus.
-- **Visão (VLM)** — envia a thumb e não a foto cheia, teto de imagens por chamada equilibrado entre os dois pools, parse de âncora → `pos_*` e de `subject` (com sinônimos: `female`/`girl` → `woman`), `<think>`/cerca markdown na resposta, nota fora de faixa, `image_id` alucinado ou duplicado, gradiente mock sem chamada, timeout e 404 caindo no ranking textual.
+- **Visão (VLM)** — envia a thumb e não a foto cheia, teto de imagens por chamada equilibrado entre os dois pools, orçamento de tokens que cresce com o nº de imagens, parse de âncora → `pos_*` e de `subject` (com sinônimos: `female`/`girl` → `woman`), `<think>`/cerca markdown na resposta, JSON vindo em `reasoning_content` com `content` vazio, `content` devolvido como lista de partes, recuperação dos veredictos inteiros de uma resposta cortada no limite de tokens (inclusive com `}` dentro de string), nota fora de faixa, `image_id` alucinado ou duplicado, gradiente mock sem chamada, timeout e 404 caindo no ranking textual, e resposta inútil registrada no log com `finish_reason` e o conteúdo.
 - **Busca em dois pools** — uma query por papel, cada foto marcada com sua origem, fotos repetidas entre os pools deduplicadas, falha de uma busca não derruba a geração.
 - **Settings** — mock vs LLM configurado, compatibilidade reversa, visão desligada por default e herança das credenciais `LLM_*`, `HOOK_*`/`SCENE_QUERY_HINTS` customizáveis.
 - **Forms** — validação de `raw_text` (mín 20 chars) só no modo automático, mínimo de 2 blocos no modo roteiro, `theme`, `style`, `slides_count`, parse de `text_positions`, `box_positions` e `box_scales` (inclui valores inválidos e escalas fora dos limites), POST legado sem o campo de modo continua válido.
@@ -341,7 +359,7 @@ Cada estilo produz um layout distinto no PNG renderizado:
 
 | Estilo | Layout | Caso de uso |
 |--------|--------|-------------|
-| `sticker` | **(padrão)** Caixas brancas arredondadas por linha, texto preto, foto sem escurecimento. Um tamanho de fonte só para headline/corpo/CTA; cada caixa arrasta e redimensiona sozinha na prévia | Photo post nativo do TikTok |
+| `sticker` | **(padrão)** Uma caixa branca arredondada por bloco (headline, texto, CTA), texto preto, foto sem escurecimento. O texto corre até perto da margem e ganha uma linha dentro da mesma caixa. Um tamanho de fonte só para headline/corpo/CTA; cada caixa arrasta e redimensiona sozinha na prévia | Photo post nativo do TikTok |
 | `quote` | Aspas decorativas + headline centralizada + body + CTA inferior | Frases inspiradoras, quotes |
 | `list` | Headline à esquerda com barra de destaque + bullets + CTA centralizado | Listas de dicas, passos numerados |
 | `tutorial` | Tag "PASSO A PASSO" + headline + body + CTA em caixa colorida | Tutoriais, como-fazer |

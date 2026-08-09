@@ -65,7 +65,8 @@ _SYSTEM_PROMPT = (
     "4. reason: no máximo 90 caracteres, em português.\n\n"
     "Penalize com score baixo: foto com texto/logo embutido, muito escura, "
     "muito poluída no centro, ou sem relação com o tema.\n"
-    'Responda APENAS JSON: {"results":[{"image_id":"","score":0.0,'
+    "NÃO explique o raciocínio. Responda APENAS o JSON, uma entrada por imagem:\n"
+    '{"results":[{"image_id":"","score":0.0,'
     '"anchor":"top","subject":"scene","reason":""}]}'
 )
 
@@ -158,7 +159,11 @@ class VisionRankingProvider:
                         {"role": "user", "content": content},
                     ],
                     "temperature": 0.1,
-                    "max_tokens": 900,
+                    # Orçamento por imagem, não fixo: um veredicto ocupa ~60
+                    # tokens e 8 imagens estouravam os 900 que havia aqui. Nos
+                    # modelos "thinking" o raciocínio vem no mesmo orçamento e
+                    # a resposta era cortada antes do JSON começar.
+                    "max_tokens": 700 + 220 * len(candidates),
                 },
                 headers={
                     "Authorization": f"Bearer {self._key}",
@@ -189,14 +194,29 @@ class VisionRankingProvider:
 
         try:
             data = response.json() or {}
-            raw = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            raw, finish_reason = _message_text(data)
         except (ValueError, KeyError, IndexError) as exc:
             logger.warning("Vision devolveu resposta ilegível (%s).", type(exc).__name__)
             return []
 
         parsed = _parse_json_loose(_strip_reasoning(raw))
         if not parsed:
-            logger.warning("Vision não devolveu JSON utilizável.")
+            # Sem mostrar o que voltou, "não devolveu JSON" é indiagnosticável:
+            # HTTP 200 e nada utilizável quase sempre é resposta cortada no
+            # limite de tokens (raciocínio comeu o orçamento) ou um modelo que
+            # respondeu em prosa.
+            logger.warning(
+                "Vision não devolveu JSON utilizável (finish_reason=%s, %d chars): %s",
+                finish_reason or "?",
+                len(raw),
+                (raw[:300] + "…") if len(raw) > 300 else (raw or "(resposta vazia)"),
+            )
+            if finish_reason == "length":
+                logger.warning(
+                    "A resposta de visão foi cortada no limite de tokens. Se "
+                    "VISION_MODEL for uma variante Thinking, troque pela "
+                    "Instruct — o raciocínio consome o orçamento inteiro."
+                )
             return []
 
         by_id = {img.image_id: img for img in candidates}
@@ -297,9 +317,33 @@ def _normalize_subject(value: Any) -> str:
     return subject if subject in _SUBJECTS else ""
 
 
+def _message_text(data: dict[str, Any]) -> tuple[str, str]:
+    """Texto da resposta + finish_reason, cobrindo os formatos que aparecem.
+
+    `content` costuma ser uma string, mas os modelos de raciocínio da ModelScope
+    devolvem o JSON em `reasoning_content` e deixam `content` vazio — a resposta
+    parecia ilegível quando na verdade estava ali ao lado. Alguns endpoints
+    ainda mandam `content` como lista de partes, no formato do request.
+    """
+    choice = (data.get("choices") or [{}])[0] or {}
+    message = choice.get("message") or {}
+    content = message.get("content")
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    text = str(content or "").strip()
+    if not text:
+        text = str(message.get("reasoning_content") or "").strip()
+    return text, str(choice.get("finish_reason") or "")
+
+
 # Modelos com cadeia de raciocínio (Qwen3-VL "thinking", ERNIE) abrem com um
 # bloco <think>…</think>. O JSON vem depois — remover antes de procurar.
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+# `</think>` sem abertura acontece quando o raciocínio veio em outro campo.
+_THINK_RE = re.compile(r"<think>.*?</think>|<think>|</think>", re.DOTALL | re.IGNORECASE)
 
 
 def _strip_reasoning(content: str) -> str:
@@ -317,13 +361,49 @@ def _parse_json_loose(content: str) -> dict[str, Any] | None:
     try:
         return json.loads(content)
     except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", content, re.DOTALL)
-        if not match:
-            return None
+        pass
+    match = re.search(r"\{.*\}", content, re.DOTALL)
+    if match:
         try:
             return json.loads(match.group(0))
         except json.JSONDecodeError:
-            return None
+            pass
+    return _salvage_results(content)
+
+
+def _salvage_results(content: str) -> dict[str, Any] | None:
+    """Recupera os veredictos inteiros de uma resposta cortada no meio.
+
+    Com 8 imagens a lista é longa, e uma resposta truncada deixa o último item
+    sem fechar. O parser normal desiste do documento inteiro — junto com as 7
+    avaliações que chegaram completas. Aqui cada `{...}` balanceado é lido
+    isolado; aspas e escapes são respeitados para não fechar num `}` que faz
+    parte de um `reason`.
+    """
+    results: list[dict[str, Any]] = []
+    starts: list[int] = []
+    in_string = False
+    escaped = False
+    for i, char in enumerate(content):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "{":
+            starts.append(i)
+        elif char == "}" and starts:
+            try:
+                item = json.loads(content[starts.pop() : i + 1])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict) and "image_id" in item:
+                results.append(item)
+    return {"results": results} if results else None
 
 
 def build_vision_provider(settings: Settings) -> VisionRankingProvider | None:

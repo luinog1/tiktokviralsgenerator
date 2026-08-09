@@ -582,13 +582,13 @@ a:hover { text-decoration: underline; }
 }
 
 /* --- Estilo sticker (TikTok photo post) ---
-   Espelha o que o SlideRenderer desenha no PNG: caixas brancas por linha,
-   texto preto, foto sem escurecimento. `box-decoration-break` é o que faz
-   cada linha quebrada ganhar sua própria caixa arredondada. */
+   Espelha o que o SlideRenderer desenha no PNG: UMA caixa branca por bloco
+   (headline, texto, CTA), texto preto, foto sem escurecimento. O padding lateral
+   de 6% é a margem da foto: a linha corre até perto dela antes de quebrar. */
 .slide-visual-sticker {
   align-items: stretch;
   justify-content: center;
-  padding: 24px 10%;
+  padding: 24px 6%;
 }
 
 .slide-visual-sticker .slide-text-stack {
@@ -601,44 +601,43 @@ a:hover { text-decoration: underline; }
   justify-content: center;
 }
 
-/* Cada caixa é um contêiner que encolhe até o texto — sem isso o filho de um
-   flex vira bloco de largura cheia e a caixa branca sobra dos dois lados. O
-   `display:inline` de dentro é o que dá uma caixa por LINHA quebrada. */
+/* A caixa branca é do CONTÊINER, não do texto: uma etiqueta por bloco, com o
+   texto quebrando dentro dela. Pintar o fundo no inline com
+   `box-decoration-break: clone` dava uma caixa por LINHA — retângulos soltos de
+   larguras diferentes, que é justamente o que o photo post nativo não faz.
+   `width: fit-content` encolhe a caixa até a linha mais longa.
+
+   O corpo da fonte fica AQUI (e não no texto) para o padding em `em` crescer
+   junto com o resize — é o que espelha o `_sticker_padding` do PNG, onde a
+   folga é fração do tamanho da fonte. `--box-scale` é o resize do editor. */
 .slide-visual-sticker .slide-text-box {
   width: fit-content;
   max-width: 100%;
   margin: 0;
-}
-
-.slide-visual-sticker .slide-headline,
-.slide-visual-sticker .slide-body-snippet,
-.slide-visual-sticker .slide-cta-snippet {
-  display: inline;
-  margin: 0;
-  color: #111;
-  text-shadow: none;
   background: #fff;
-  box-decoration-break: clone;
-  -webkit-box-decoration-break: clone;
-  /* Padding curto no eixo Y: a caixa acompanha a linha, não a caixa alta que
-     a métrica da fonte reservaria. Espelha o _sticker_padding do PNG. */
-  padding: 1px 9px;
-  border-radius: 8px;
-  line-height: 1.42;
-  overflow: visible;
-  -webkit-line-clamp: none;
-  /* Mesma família e mesmos pesos do PNG: 600 na headline/CTA, 500 no corpo. */
-  font-family: var(--font-sticker);
-  font-weight: 600;
+  font-size: calc(1.02rem * var(--box-scale, 1));
+  padding: 0.15em 0.30em;
+  border-radius: 0.22em;
 }
 
 /* Um tamanho só para todas as caixas — o photo post do TikTok não muda o corpo
-   da legenda entre "título" e "texto". `--box-scale` é o resize do editor, que
-   o JS grava por caixa. */
+   da legenda entre "título" e "texto". */
 .slide-visual-sticker .slide-headline,
 .slide-visual-sticker .slide-body-snippet,
 .slide-visual-sticker .slide-cta-snippet {
-  font-size: calc(1.02rem * var(--box-scale, 1));
+  display: block;
+  margin: 0;
+  color: #111;
+  font-size: inherit;
+  text-shadow: none;
+  background: none;
+  overflow: visible;
+  -webkit-line-clamp: none;
+  /* Mesmo passo entre linhas do PNG (~1.19x o corpo da fonte). */
+  line-height: 1.19;
+  /* Mesma família e mesmos pesos do PNG: 600 na headline/CTA, 500 no corpo. */
+  font-family: var(--font-sticker);
+  font-weight: 600;
 }
 
 .slide-visual-sticker .slide-body-snippet {
@@ -684,9 +683,9 @@ a:hover { text-decoration: underline; }
 
 .slide-visual-sticker .slide-text-box.positioned {
   position: absolute;
-  /* left/top vêm inline, do arraste. 80% = a largura útil dentro do
-     padding de 10% do .slide-visual-sticker, para o texto quebrar igual. */
-  max-width: 80%;
+  /* left/top vêm inline, do arraste. 88% = a largura útil dentro do
+     padding de 6% do .slide-visual-sticker, para o texto quebrar igual. */
+  max-width: 88%;
   transform: translate(-50%, -50%);
   margin: 0;
   z-index: 2;

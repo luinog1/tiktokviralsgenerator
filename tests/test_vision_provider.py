@@ -159,6 +159,91 @@ def test_strips_thinking_block_and_markdown_fence(monkeypatch):
     assert [v.anchor for v in verdicts] == ["top"]
 
 
+def test_reads_json_from_reasoning_content(monkeypatch):
+    """A ModelScope devolve o texto em `reasoning_content` com `content` vazio.
+
+    Era o caminho do "Vision não devolveu JSON utilizável" com HTTP 200: a
+    resposta estava completa, só não no campo em que o parser olhava.
+    """
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp({"choices": [{
+        "message": {
+            "content": "",
+            "reasoning_content":
+                'Olhando a foto: há espaço no topo.\n'
+                '{"results":[{"image_id":"ph0","score":0.8,"anchor":"top",'
+                '"subject":"woman"}]}',
+        },
+    }]}))
+    verdicts = VisionRankingProvider(_settings()).rank({}, _photos(1))
+    assert [(v.image_id, v.subject) for v in verdicts] == [("ph0", "woman")]
+
+
+def test_reads_content_returned_as_parts(monkeypatch):
+    """Alguns endpoints devolvem `content` como lista, no formato do request."""
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp({"choices": [{
+        "message": {"content": [
+            {"type": "text", "text": '{"results":[{"image_id":"ph0",'},
+            {"type": "text", "text": '"score":0.6,"anchor":"bottom"}]}'},
+        ]},
+    }]}))
+    verdicts = VisionRankingProvider(_settings()).rank({}, _photos(1))
+    assert verdicts[0].position == (0.5, 0.76)
+
+
+def test_salvages_verdicts_from_a_truncated_response(monkeypatch):
+    """Resposta cortada no limite de tokens não pode zerar o que já chegou.
+
+    Com 8 imagens a lista é longa; o item cortado se perde, os completos valem.
+    """
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _reply(
+        '{"results":[{"image_id":"ph0","score":0.9,"anchor":"top","subject":"woman"},'
+        '{"image_id":"ph1","score":0.4,"anchor":"bottom","subject":"scene"},'
+        '{"image_id":"ph2","score":0.7,"anch'
+    ))
+    verdicts = VisionRankingProvider(_settings()).rank({}, _photos(3))
+    assert [v.image_id for v in verdicts] == ["ph0", "ph1"]
+
+
+def test_truncated_reason_with_braces_does_not_break_the_salvage(monkeypatch):
+    """Uma chave dentro de uma string não pode fechar o objeto cedo demais."""
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _reply(
+        '{"results":[{"image_id":"ph0","score":0.5,"anchor":"top",'
+        '"reason":"chave } e aspas \\" no meio"},{"image_id":"ph1","sco'
+    ))
+    verdicts = VisionRankingProvider(_settings()).rank({}, _photos(2))
+    assert [v.image_id for v in verdicts] == ["ph0"]
+    assert verdicts[0].reason == 'chave } e aspas " no meio'
+
+
+def test_token_budget_grows_with_the_number_of_images(monkeypatch):
+    """8 imagens não cabiam nos 900 tokens fixos — a resposta vinha cortada."""
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured.setdefault("max_tokens", []).append(kwargs["json"]["max_tokens"])
+        return _reply('{"results":[]}')
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    provider = VisionRankingProvider(_settings())
+    provider.rank({}, _photos(1))
+    provider.rank({}, _photos(8))
+    one, eight = captured["max_tokens"]
+    assert eight > one
+    assert eight >= 8 * 200
+
+
+def test_unusable_response_is_logged_with_what_came_back(monkeypatch, caplog):
+    """"Não devolveu JSON" sem o conteúdo é indiagnosticável em produção."""
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp({"choices": [{
+        "message": {"content": "Desculpe, não consigo analisar estas imagens."},
+        "finish_reason": "stop",
+    }]}))
+    with caplog.at_level("WARNING"):
+        assert VisionRankingProvider(_settings()).rank({}, _photos(1)) == []
+    assert "Desculpe, não consigo analisar" in caplog.text
+    assert "finish_reason=stop" in caplog.text
+
+
 def test_clamps_out_of_range_scores(monkeypatch):
     monkeypatch.setattr(requests, "post", lambda *a, **k: _reply(
         '{"results":[{"image_id":"ph0","score":7.5,"anchor":"top"},'

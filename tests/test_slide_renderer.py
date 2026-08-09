@@ -12,6 +12,7 @@ from app.config import Settings
 from app.services.slide_renderer import (
     SlideRenderer,
     _break_long_word,
+    _ink_width,
     _resolve_font_paths,
     _safe_text,
     _wrap,
@@ -89,18 +90,44 @@ def test_fonts_respect_requested_size(renderer):
     assert sized[0][2].size >= 20
 
 
-def test_fit_font_shrinks_until_it_fits(renderer):
-    """Texto longo deve reduzir o corpo da fonte em vez de estourar as linhas."""
+def test_fit_font_shrinks_only_when_the_height_runs_out(renderer):
+    """A fonte cai quando o bloco não caberia na ALTURA — não por contar linhas.
+
+    Enquanto sobra altura o texto só ganha mais uma linha, como no editor do
+    TikTok. Um teto fixo de linhas encolhia a fonte com o slide ainda vazio.
+    """
     from PIL import ImageDraw
 
     draw = ImageDraw.Draw(Image.new("RGB", (1080, 1350)))
-    long_text = "uma frase bem comprida que precisa encolher para caber " * 3
-    sized = renderer._fit_sticker_blocks(
-        draw, [("headline", long_text)], max_width=800
-    )
-    _, lines, font = sized[0]
-    assert len(lines) <= renderer._STICKER_MAX_LINES["headline"]
-    assert font.size < int(renderer._STICKER_BASE_SIZE * (renderer._w / 1080))
+    base = int(renderer._STICKER_BASE_SIZE * (renderer._w / 1080))
+
+    # Mais linhas do que o antigo teto de 4, e ainda com altura sobrando:
+    # o corpo da fonte tem de ficar intacto.
+    medium = "uma frase de tamanho realista para um slide de carrossel " * 3
+    _, lines, font = renderer._fit_sticker_blocks(
+        draw, [("headline", medium)], max_width=950
+    )[0]
+    assert len(lines) > 4, "o texto precisa quebrar em várias linhas neste teste"
+    assert font.size == base
+
+    # Texto que passaria da altura útil: aí sim a fonte cai.
+    huge = "uma frase bem comprida que precisa encolher para caber " * 12
+    _, _, font_big = renderer._fit_sticker_blocks(
+        draw, [("headline", huge)], max_width=950
+    )[0]
+    assert font_big.size < base
+
+
+def test_no_line_is_dropped_when_the_text_grows(renderer):
+    """O texto cresce para baixo; nenhuma palavra é descartada no caminho."""
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(Image.new("RGB", (1080, 1350)))
+    text = "cada palavra precisa sobreviver mesmo quando o texto fica comprido " * 3
+    _, lines, _ = renderer._fit_sticker_blocks(
+        draw, [("body", text)], max_width=950
+    )[0]
+    assert " ".join(lines).split() == text.split()
 
 
 def test_every_box_shares_the_same_font_size(renderer):
@@ -131,7 +158,7 @@ def test_overflow_shrinks_all_boxes_together(renderer):
     from PIL import ImageDraw
 
     draw = ImageDraw.Draw(Image.new("RGB", (1080, 1350)))
-    overflowing = "palavra " * 60
+    overflowing = "palavra " * 120
     sized = renderer._fit_sticker_blocks(
         draw,
         [("headline", "curto"), ("body", overflowing)],
@@ -343,6 +370,94 @@ def test_box_scale_changes_the_rendered_box(renderer):
     )
     assert (bottom_big - top_big) > (bottom_plain - top_plain)
     assert (right_big - left_big) > (right_plain - left_plain)
+
+
+# ---------- Caixa única por bloco ----------
+
+
+def _white_row_runs(img, x_step: int = 4) -> list[tuple[int, int]]:
+    """Faixas verticais contínuas de branco — uma por caixa desenhada."""
+    runs, start = [], None
+    for y in range(img.height):
+        white = any(
+            img.getpixel((x, y)) == (255, 255, 255)
+            for x in range(0, img.width, x_step)
+        )
+        if white and start is None:
+            start = y
+        elif not white and start is not None:
+            runs.append((start, y - 1))
+            start = None
+    if start is not None:
+        runs.append((start, img.height - 1))
+    return runs
+
+
+def test_multiline_text_stays_in_a_single_box(renderer):
+    """Uma frase longa é UMA etiqueta, não um retângulo por linha.
+
+    O photo post nativo do TikTok quebra o texto dentro da mesma caixa branca.
+    Desenhar uma caixa por linha dava bordas serrilhadas, com cada linha num
+    retângulo de largura diferente.
+    """
+    text = (
+        "there were weeks i was posting every single day, trying different "
+        "trends, switching hooks, adding text, all of it and still barely "
+        "getting views."
+    )
+    slide = SlideContent(headline=text, role="value")
+    img = _open(renderer.render_single(slide, None, style="sticker").png_bytes).convert("RGB")
+
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(img)
+    _, lines, _ = renderer._fit_sticker_blocks(
+        draw, [("headline", text)], max_width=int(1080 * renderer._STICKER_TEXT_WIDTH_RATIO)
+    )[0]
+    assert len(lines) > 1, "o texto precisa quebrar para este teste valer"
+    assert len(_white_row_runs(img)) == 1
+
+
+def test_each_block_keeps_its_own_box(renderer):
+    """Caixa única por bloco, não uma caixa só para o slide inteiro.
+
+    A independência das caixas é o que permite arrastar e redimensionar cada
+    uma; fundi-las resolveria o serrilhado e quebraria o editor.
+    """
+    slide = SlideContent(
+        headline="uma headline que ocupa mais de uma linha neste slide de teste",
+        body="um corpo de texto separado, também com mais de uma linha para valer",
+        role="value",
+    )
+    img = _open(renderer.render_single(slide, None, style="sticker").png_bytes).convert("RGB")
+    assert len(_white_row_runs(img)) == 2
+
+
+def test_box_width_follows_the_longest_line(renderer):
+    """A caixa abraça a linha mais longa — sem sobra em relação à tinta."""
+    from PIL import ImageDraw
+
+    text = "uma frase comprida o bastante para quebrar em duas linhas aqui"
+    slide = SlideContent(headline=text, role="value")
+    _, _, box_left, box_right = _white_box_bounds(renderer, slide)
+
+    img = _open(renderer.render_single(slide, None, style="sticker").png_bytes).convert("RGB")
+    draw = ImageDraw.Draw(img)
+    _, lines, font = renderer._fit_sticker_blocks(
+        draw, [("headline", text)], max_width=int(1080 * renderer._STICKER_TEXT_WIDTH_RATIO)
+    )[0]
+    widest = max(_ink_width(draw, line, font) for line in lines)
+    pad_x = renderer._sticker_padding(font)[0]
+    # ±8px: a amostragem do _white_box_bounds anda de 4 em 4 px.
+    assert abs((box_right - box_left) - (widest + pad_x * 2)) < 8
+
+
+def test_text_runs_close_to_the_photo_margin(renderer):
+    """A linha só quebra perto da margem — antes ela quebrava cedo demais."""
+    text = "uma frase longa que deveria ocupar a largura útil do slide inteiro"
+    slide = SlideContent(headline=text, role="value")
+    _, _, left, right = _white_box_bounds(renderer, slide)
+    assert (right - left) > 1080 * 0.75
 
 
 # ---------- Caixa colada no texto ----------

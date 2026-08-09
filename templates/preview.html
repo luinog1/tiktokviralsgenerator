@@ -74,10 +74,12 @@
               <h3 class="slide-headline">{{ form.headlines[i].data or slide.headline }}</h3>
             </div>
             {# Sempre no DOM (o editor ao vivo escreve aqui); CSS :empty esconde
-               a caixa branca enquanto não houver texto. #}
+               a caixa branca enquanto não houver texto. Texto inteiro, sem
+               corte: a caixa da prévia só espelha o PNG se quebrar nas mesmas
+               linhas. #}
             <div class="slide-text-box" data-box="body"
                  {% if style == 'sticker' %}title="Arraste esta caixa · duplo clique volta ao padrão"{% endif %}>
-              <p class="slide-body-snippet">{{ (form.bodies[i].data or slide.body) | truncate(120) }}</p>
+              <p class="slide-body-snippet">{{ form.bodies[i].data or slide.body }}</p>
             </div>
             <div class="slide-text-box" data-box="cta"
                  {% if style == 'sticker' %}title="Arraste esta caixa · duplo clique volta ao padrão"{% endif %}>
@@ -214,7 +216,7 @@
           h.addEventListener("input", () => headlineDisplay.textContent = h.value);
         }
         if (b && bodyDisplay) {
-          b.addEventListener("input", () => bodyDisplay.textContent = b.value.slice(0, 120));
+          b.addEventListener("input", () => bodyDisplay.textContent = b.value);
         }
         if (c && ctaDisplay) {
           // Não mexer em style.display: a regra CSS :empty já esconde a
