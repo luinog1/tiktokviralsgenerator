@@ -97,12 +97,54 @@ Depois do primeiro deploy, no painel do serviço → **Environment**:
 | Variável | Valor |
 |----------|-------|
 | `PINTEREST_ACCESS_TOKEN` | (seu token da API v5 do Pinterest) |
+| `UNSPLASH_ACCESS_KEY` | (Access Key do Unsplash — sem isso e sem Pinterest, o carrossel sai com gradientes) |
 | `LLM_PROVIDER` | `mock` (default) ou `openai_compatible` |
 | `LLM_API_BASE_URL` | `https://api.groq.com/openai/v1` (se for usar Groq) |
 | `LLM_API_KEY` | `gsk_xxx...` |
 | `LLM_MODEL` | `llama-3.1-8b-instant` |
 
 Salve → **Manual Deploy** → **Deploy latest commit**.
+
+### Visão (ModelScope) — opcional
+
+O `render.yaml` já declara as quatro variáveis como `sync: false`, então elas
+aparecem no painel esperando valor. Nada de código muda: é só preencher.
+
+| Variável | Valor |
+|----------|-------|
+| `VISION_ENABLED` | `true` |
+| `VISION_API_BASE_URL` | `https://api-inference.modelscope.cn/v1` |
+| `VISION_API_KEY` | `ms-xxxxxxxx` |
+| `VISION_MODEL` | `Qwen/Qwen3-VL-235B-A22B-Instruct` |
+
+Suba também `REQUEST_TIMEOUT_SECONDS` para `60` — a chamada do VLM acontece
+dentro do `POST /generate` e os 30s default costumam estourar.
+
+**O ID do modelo precisa do prefixo da organização.** `Qwen3-VL-235B-A22B-Instruct`
+dá 404; o certo é `Qwen/Qwen3-VL-235B-A22B-Instruct`. Como a visão cai
+silenciosamente no ranking textual quando falha, o 404 não aparece na interface.
+
+Confirme depois do deploy:
+
+```bash
+curl -s https://SEU-SERVICO.onrender.com/health | python -m json.tool
+# providers.vision                     → "configured"  (se vier "off", falta variável)
+# vision_diagnostic.vision_model_value → confira o prefixo "Qwen/"
+```
+
+Se `providers.vision` estiver `configured` mas as fotos não mudarem de
+comportamento, veja os **Logs** do serviço. As mensagens dizem exatamente o que
+falhou:
+
+- `Vision endpoint HTTP 404: ...` → model id errado (falta o prefixo da org)
+- `Vision endpoint HTTP 401` → chave inválida
+- `Vision endpoint não respondeu em 30s` → suba `REQUEST_TIMEOUT_SECONDS`
+- `Vision respondeu, mas nenhum image_id bateu` → o modelo respondeu fora do
+  formato pedido; vale trocar de modelo
+
+> Sem essas variáveis o app **não quebra**: o casting (imagem 1 com pessoa)
+> continua funcionando pelo metadado da foto e pela busca separada por papel.
+> A visão só aumenta a precisão da escolha.
 
 ---
 

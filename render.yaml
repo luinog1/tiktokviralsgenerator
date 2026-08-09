@@ -49,6 +49,42 @@ services:
       - key: RANKING_ENABLED
         value: "true"
 
+      # --- Vision / VLM (opcional) — ranking OLHANDO a foto ---
+      # Liga o casting por visão: o modelo diz o assunto de cada foto
+      # (woman/man/person/scene), e é isso que reserva o slide 1 para uma
+      # pessoa. Desligado aqui, o casting ainda funciona pelo metadado da foto
+      # e pela busca separada — só com menos precisão.
+      #
+      # ModelScope API-Inference (tier gratuito, conta vinculada à Alibaba):
+      #   VISION_API_BASE_URL = https://api-inference.modelscope.cn/v1
+      #   VISION_API_KEY      = ms-xxxxxxxx
+      #   VISION_MODEL        = Qwen/Qwen3-VL-235B-A22B-Instruct
+      #
+      # ATENÇÃO ao ID do modelo: no ModelScope ele é namespaced por organização.
+      # Sem o prefixo "Qwen/" a resposta é 404 e a aplicação cai silenciosamente
+      # no ranking textual. Confira em /health → vision_diagnostic.
+      - key: VISION_ENABLED
+        sync: false  # ← "true" no painel quando a chave estiver preenchida
+      - key: VISION_API_BASE_URL
+        sync: false  # ← ex: https://api-inference.modelscope.cn/v1
+      - key: VISION_API_KEY
+        sync: false  # ← ex: ms-xxxxxxxx
+      - key: VISION_MODEL
+        sync: false  # ← ex: Qwen/Qwen3-VL-235B-A22B-Instruct
+
+      # --- Casting de imagens por papel do slide ---
+      # A imagem 1 (hook) recebe uma foto com pessoa; as demais, cenário.
+      # "off" desliga e volta à rotação simples de imagens.
+      - key: HOOK_SUBJECT
+        value: woman
+      # Ajuste fino das duas buscas de imagem, se quiser outro visual.
+      # Ambas têm default no código — declare aqui só para mudar:
+      #   HOOK_QUERY_HINTS   → termos da busca do slide 1  (default: retrato)
+      #   SCENE_QUERY_HINTS  → termos das demais           (default: estética,
+      #                        viagem, comida)
+      # Idem RANKING_API_BASE_URL / RANKING_API_KEY / RANKING_MODEL, que
+      # herdam de LLM_* quando vazias.
+
       # --- Pinterest ---
       - key: PINTEREST_ACCESS_TOKEN
         sync: false  # ← defina no painel
@@ -64,6 +100,9 @@ services:
       # --- HTTP / Sessão ---
       - key: SESSION_TTL_MINUTES
         value: "60"
+      # 30s basta para o LLM de texto. Com VISION_ENABLED=true a chamada do VLM
+      # acontece dentro do POST /generate e é bem mais lenta — suba para ~60,
+      # senão o timeout derruba a visão e o carrossel sai no ranking textual.
       - key: REQUEST_TIMEOUT_SECONDS
         value: "30"
 
