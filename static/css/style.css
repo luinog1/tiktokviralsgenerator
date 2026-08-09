@@ -625,6 +625,20 @@ a:hover { text-decoration: underline; }
      parse ali e a declaração inteira cai, deixando esta valer. */
   font-size: calc(1.02rem * var(--box-scale, 1));
   font-size: calc(6.74cqw * var(--box-scale, 1));
+  /* O passo entre linhas fica AQUI, no bloco, e não só no inline.
+     A altura de uma linha é a UNIÃO do "strut" do bloco com os inlines dentro
+     dela. Com a line-height só no inline, o strut herdava o 1.5 do `body` e
+     mandava: as linhas nasciam a cada 1.5em enquanto a caixa branca tem 1.48em,
+     então elas paravam de se sobrepor e a pilha aparecia dividida, uma caixa
+     solta por linha.
+
+     A família também precisa estar aqui: strut e inline se alinham pela linha
+     de base, e com fontes de métricas diferentes a união dos dois sai mais alta
+     que qualquer um deles — o passo subia para ~1.30em mesmo com a line-height
+     certa. Com a mesma fonte nos dois, o passo é exatamente 1.196em, o
+     `_STICKER_LINE_PITCH_RATIO` do PNG. */
+  line-height: 1.196;
+  font-family: var(--font-sticker);
 }
 
 /* Um tamanho só para todas as caixas — o photo post do TikTok não muda o corpo
