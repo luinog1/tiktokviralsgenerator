@@ -37,6 +37,12 @@ class SlideContent:
     `pos_x`/`pos_y` são o centro do bloco de texto em fração do canvas (0..1),
     definidos quando o usuário arrasta as caixas na prévia. `None` mantém a
     posição padrão do papel no roteiro.
+
+    `box_positions` e `box_scales` são o ajuste por CAIXA — chaves "headline",
+    "body" e "cta". No photo post do TikTok os blocos não andam juntos: a
+    pergunta fica no topo da foto e a resposta embaixo, cada uma no seu espaço
+    limpo. Uma caixa com posição própria sai do empilhamento e vale por si; as
+    demais continuam seguindo `pos_x`/`pos_y` ou a âncora do papel.
     """
 
     headline: str
@@ -46,6 +52,10 @@ class SlideContent:
     role: str = "value"
     pos_x: float | None = None
     pos_y: float | None = None
+    # {"headline": (0.5, 0.22), ...} — centro daquela caixa em fração do canvas.
+    box_positions: dict[str, tuple[float, float]] = field(default_factory=dict)
+    # {"headline": 1.15, ...} — multiplicador do corpo da fonte daquela caixa.
+    box_scales: dict[str, float] = field(default_factory=dict)
     # Foto escolhida para este slide. Preenchido pelo casting (hook = pessoa,
     # demais = cenário) e depois pela galeria da prévia. Vazio = a prévia cai na
     # rotação `i % len(images)`.
@@ -60,6 +70,10 @@ class SlideContent:
             "role": self.role,
             "pos_x": self.pos_x,
             "pos_y": self.pos_y,
+            "box_positions": {
+                key: [x, y] for key, (x, y) in self.box_positions.items()
+            },
+            "box_scales": dict(self.box_scales),
             "image_id": self.image_id,
         }
 

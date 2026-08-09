@@ -601,6 +601,15 @@ a:hover { text-decoration: underline; }
   justify-content: center;
 }
 
+/* Cada caixa é um contêiner que encolhe até o texto — sem isso o filho de um
+   flex vira bloco de largura cheia e a caixa branca sobra dos dois lados. O
+   `display:inline` de dentro é o que dá uma caixa por LINHA quebrada. */
+.slide-visual-sticker .slide-text-box {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0;
+}
+
 .slide-visual-sticker .slide-headline,
 .slide-visual-sticker .slide-body-snippet,
 .slide-visual-sticker .slide-cta-snippet {
@@ -611,9 +620,11 @@ a:hover { text-decoration: underline; }
   background: #fff;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
-  padding: 2px 8px;
-  border-radius: 7px;
-  line-height: 1.55;
+  /* Padding curto no eixo Y: a caixa acompanha a linha, não a caixa alta que
+     a métrica da fonte reservaria. Espelha o _sticker_padding do PNG. */
+  padding: 1px 9px;
+  border-radius: 8px;
+  line-height: 1.42;
   overflow: visible;
   -webkit-line-clamp: none;
   /* Mesma família e mesmos pesos do PNG: 600 na headline/CTA, 500 no corpo. */
@@ -621,26 +632,31 @@ a:hover { text-decoration: underline; }
   font-weight: 600;
 }
 
-.slide-visual-sticker .slide-headline {
-  font-size: 0.95rem;
-  font-weight: 600;
+/* Um tamanho só para todas as caixas — o photo post do TikTok não muda o corpo
+   da legenda entre "título" e "texto". `--box-scale` é o resize do editor, que
+   o JS grava por caixa. */
+.slide-visual-sticker .slide-headline,
+.slide-visual-sticker .slide-body-snippet,
+.slide-visual-sticker .slide-cta-snippet {
+  font-size: calc(1.02rem * var(--box-scale, 1));
 }
 
 .slide-visual-sticker .slide-body-snippet {
-  font-size: 0.8rem;
   font-weight: 500;
   opacity: 1;
-}
-
-.slide-visual-sticker .slide-cta-snippet {
-  font-size: 0.8rem;
-  font-weight: 600;
 }
 
 /* Campo vazio não pode virar uma caixa branca solta sobre a foto. */
 .slide-headline:empty,
 .slide-body-snippet:empty,
 .slide-cta-snippet:empty {
+  display: none;
+}
+
+/* O texto vazio some, mas o contêiner ainda ocuparia o `gap` do stack — um
+   buraco entre as caixas. `:has` é reavaliado sozinho quando o editor ao vivo
+   esvazia o campo. */
+.slide-text-box:has(> :empty) {
   display: none;
 }
 
@@ -651,29 +667,66 @@ a:hover { text-decoration: underline; }
 .slide-visual-sticker .slide-text-stack[data-role="cta"] { justify-content: center; }
 
 /* --- Reposicionamento manual (arraste) ---
-   Enquanto ninguém arrasta, o bloco segue no fluxo e a âncora do papel manda.
-   No primeiro arraste ele vira absoluto e passa a guardar o próprio centro em
-   fração do canvas — a mesma convenção de pos_x/pos_y no PNG exportado. */
-.slide-visual-sticker .js-draggable-text {
+   Cada CAIXA arrasta sozinha: no photo post do TikTok a pergunta fica no topo
+   da foto e a resposta embaixo, cada uma no seu espaço limpo. Enquanto ninguém
+   arrasta, a caixa segue empilhada e a âncora do papel manda. No primeiro
+   arraste ela vira absoluta e passa a guardar o próprio centro em fração do
+   canvas — a mesma convenção de box_positions no PNG exportado. */
+.slide-visual-sticker .slide-text-box {
   cursor: grab;
   touch-action: none;
 }
 
-.slide-visual-sticker .js-draggable-text.dragging {
+.slide-visual-sticker .slide-text-box.dragging {
   cursor: grabbing;
   user-select: none;
 }
 
-.slide-visual-sticker .slide-text-stack.positioned {
+.slide-visual-sticker .slide-text-box.positioned {
   position: absolute;
   /* left/top vêm inline, do arraste. 80% = a largura útil dentro do
      padding de 10% do .slide-visual-sticker, para o texto quebrar igual. */
-  width: 80%;
+  max-width: 80%;
   transform: translate(-50%, -50%);
   margin: 0;
+  z-index: 2;
 }
 
 .drag-hint { margin: 8px 14px 0; }
+
+/* --- Controle de tamanho por caixa --- */
+.box-size-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px 0;
+}
+
+.box-size-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: var(--text-muted, #667);
+}
+
+.box-size-row > label {
+  flex: 0 0 68px;
+  margin: 0;
+  font-weight: 700;
+}
+
+.box-size-row input[type="range"] {
+  flex: 1;
+  accent-color: var(--primary-strong, #4ECDC4);
+  min-width: 0;
+}
+
+.box-size-value {
+  flex: 0 0 42px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 
 /* Badge do papel no roteiro viral */
 .role-badge {

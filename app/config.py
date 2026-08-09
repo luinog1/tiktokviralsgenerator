@@ -73,6 +73,14 @@ class Settings:
     # HTTP
     request_timeout_seconds: int
 
+    # Timeout exclusivo da chamada de visão. Um VLM olhando 8 fotos leva
+    # dezenas de segundos — muito mais que o Unsplash ou o LLM de texto, que
+    # compartilhavam o `request_timeout_seconds`. Com um valor só para os dois,
+    # o número que servia para a busca de imagens (20s) cancelava a visão antes
+    # da primeira resposta, e o carrossel caía no ranking textual sem que nada
+    # estivesse configurado errado.
+    vision_timeout_seconds: int
+
     # Persistência leve (em memória) — expira em minutos
     session_ttl_minutes: int
 
@@ -133,6 +141,7 @@ class Settings:
             vision_api_key=_get("VISION_API_KEY") or llm_key_raw,
             vision_model=_get("VISION_MODEL"),
             request_timeout_seconds=int(_get("REQUEST_TIMEOUT_SECONDS", "20") or 20),
+            vision_timeout_seconds=int(_get("VISION_TIMEOUT_SECONDS", "90") or 90),
             session_ttl_minutes=int(_get("SESSION_TTL_MINUTES", "60") or 60),
             slide_width=int(_get("SLIDE_WIDTH", "1080") or 1080),
             slide_height=int(_get("SLIDE_HEIGHT", "1350") or 1350),

@@ -60,6 +60,9 @@ def health():
             "vision_api_key_set": bool(settings.vision_api_key),
             "vision_model_value": settings.vision_model or "(empty)",
             "vision_fully_configured": settings.vision_configured,
+            # O timeout efetivo da visão — a segunda causa mais comum de
+            # "configurei tudo e continua caindo no ranking textual".
+            "vision_timeout_seconds": settings.vision_timeout_seconds,
         },
     }
     if current_app.config.get("DEBUG"):

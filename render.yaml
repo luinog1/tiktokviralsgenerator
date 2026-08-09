@@ -100,11 +100,16 @@ services:
       # --- HTTP / Sessão ---
       - key: SESSION_TTL_MINUTES
         value: "60"
-      # 30s basta para o LLM de texto. Com VISION_ENABLED=true a chamada do VLM
-      # acontece dentro do POST /generate e é bem mais lenta — suba para ~60,
-      # senão o timeout derruba a visão e o carrossel sai no ranking textual.
+      # Timeout das chamadas HTTP rápidas: busca de imagens e LLM de texto.
+      # NÃO afeta mais a visão — ela tem o VISION_TIMEOUT_SECONDS abaixo.
       - key: REQUEST_TIMEOUT_SECONDS
         value: "30"
+      # Timeout só da chamada do VLM, que é a parte lenta do POST /generate:
+      # o modelo olha até 8 fotos por requisição. Era isto que faltava — com um
+      # valor único, o número que servia para o Unsplash cancelava a visão em
+      # 20s e o carrossel saía no ranking textual.
+      - key: VISION_TIMEOUT_SECONDS
+        value: "90"
 
       # --- Composição de imagem ---
       - key: SLIDE_WIDTH

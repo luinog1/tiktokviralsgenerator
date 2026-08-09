@@ -117,8 +117,12 @@ aparecem no painel esperando valor. Nada de código muda: é só preencher.
 | `VISION_API_KEY` | `ms-xxxxxxxx` |
 | `VISION_MODEL` | `Qwen/Qwen3-VL-235B-A22B-Instruct` |
 
-Suba também `REQUEST_TIMEOUT_SECONDS` para `60` — a chamada do VLM acontece
-dentro do `POST /generate` e os 30s default costumam estourar.
+A visão tem timeout PRÓPRIO, o `VISION_TIMEOUT_SECONDS` (default `90`) — o VLM
+olha até 8 fotos por chamada e é lento demais para o `REQUEST_TIMEOUT_SECONDS`,
+que existe para a busca de imagens. Enquanto os dois eram o mesmo número, o
+valor que servia ao Unsplash cancelava a visão antes da primeira resposta.
+O worker do gunicorn está em `--timeout 180` (Dockerfile) e precisa continuar
+maior que o timeout da visão, senão o worker morre antes do fallback.
 
 **O ID do modelo precisa do prefixo da organização.** `Qwen3-VL-235B-A22B-Instruct`
 dá 404; o certo é `Qwen/Qwen3-VL-235B-A22B-Instruct`. Como a visão cai
@@ -138,7 +142,9 @@ falhou:
 
 - `Vision endpoint HTTP 404: ...` → model id errado (falta o prefixo da org)
 - `Vision endpoint HTTP 401` → chave inválida
-- `Vision endpoint não respondeu em 30s` → suba `REQUEST_TIMEOUT_SECONDS`
+- `Vision endpoint não respondeu em Ns` → suba `VISION_TIMEOUT_SECONDS` (e
+  confira em `/health` se o valor do blueprint chegou de fato à aplicação: o
+  número da mensagem é o que está em uso, não o que você escreveu no painel)
 - `Vision respondeu, mas nenhum image_id bateu` → o modelo respondeu fora do
   formato pedido; vale trocar de modelo
 

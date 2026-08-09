@@ -63,6 +63,54 @@ def _position_field(slide: dict) -> str:
     return f"{x},{y}"
 
 
+def _box_positions(raw) -> dict[str, tuple[float, float]]:
+    """dict do store → {"headline": (x, y)} para o SlideContent.
+
+    O que foi persistido é JSON, então o par chega como lista. Entradas
+    malformadas (projeto antigo, edição manual) são ignoradas em vez de
+    derrubarem o export inteiro.
+    """
+    result: dict[str, tuple[float, float]] = {}
+    for key, value in (raw or {}).items():
+        try:
+            x, y = float(value[0]), float(value[1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+        result[str(key)] = (x, y)
+    return result
+
+
+def _box_scales(raw) -> dict[str, float]:
+    result: dict[str, float] = {}
+    for key, value in (raw or {}).items():
+        try:
+            result[str(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _box_positions_field(slide: dict) -> str:
+    """{"headline": [x, y]} → "headline:x,y" para o campo hidden da prévia."""
+    parts = []
+    for key, value in (slide.get("box_positions") or {}).items():
+        try:
+            parts.append(f"{key}:{float(value[0])},{float(value[1])}")
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+    return ";".join(parts)
+
+
+def _box_scales_field(slide: dict) -> str:
+    parts = []
+    for key, value in (slide.get("box_scales") or {}).items():
+        try:
+            parts.append(f"{key}:{float(value)}")
+        except (TypeError, ValueError):
+            continue
+    return ";".join(parts)
+
+
 @bp.route("/preview/<project_id>")
 def preview(project_id: str):
     svc = _get_service()
@@ -96,6 +144,8 @@ def preview(project_id: str):
             slide.get("image_id") or (images[i % len(images)]["image_id"] if images else "")
         )
         form.text_positions.append_entry(_position_field(slide))
+        form.box_positions.append_entry(_box_positions_field(slide))
+        form.box_scales.append_entry(_box_scales_field(slide))
 
     return render_template(
         "preview.html",
@@ -144,6 +194,8 @@ def edit(project_id: str):
         form.ctas.append_entry("")
         form.selected_image_ids.append_entry("")
         form.text_positions.append_entry("")
+        form.box_positions.append_entry("")
+        form.box_scales.append_entry("")
 
     if not form.validate_on_submit():
         for field_name, errors in form.errors.items():
@@ -197,6 +249,8 @@ def _build_slides_and_images(slides_data, images):
             role=s.get("role", "value"),
             pos_x=s.get("pos_x"),
             pos_y=s.get("pos_y"),
+            box_positions=_box_positions(s.get("box_positions")),
+            box_scales=_box_scales(s.get("box_scales")),
             image_id=s.get("image_id", ""),
         )
         for i, s in enumerate(slides_data)

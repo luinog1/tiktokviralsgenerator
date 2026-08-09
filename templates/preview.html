@@ -62,28 +62,52 @@
         <!-- Prévia visual do slide -->
         <div class="slide-visual{% if style == 'sticker' %} slide-visual-sticker{% endif %}" style="background-image: url('{{ image_for_slide[i].image_url if image_for_slide[i] else '' }}');">
           {% if style != 'sticker' %}<div class="slide-overlay"></div>{% endif %}
-          <div class="slide-text-stack{% if style == 'sticker' %} js-draggable-text{% endif %}"
+          {# Cada caixa tem seu próprio contêiner: é o que permite arrastar uma
+             de cada vez e o que faz a caixa branca encolher até o texto. #}
+          <div class="slide-text-stack{% if style == 'sticker' %} js-box-stack{% endif %}"
                data-role="{{ slide.role or 'value' }}"
                data-position="{{ form.text_positions[i].data or '' }}"
-               {% if style == 'sticker' %}title="Arraste para reposicionar · duplo clique para voltar ao padrão"{% endif %}>
-            <h3 class="slide-headline">{{ form.headlines[i].data or slide.headline }}</h3>
+               data-box-positions="{{ form.box_positions[i].data or '' }}"
+               data-box-scales="{{ form.box_scales[i].data or '' }}">
+            <div class="slide-text-box" data-box="headline"
+                 {% if style == 'sticker' %}title="Arraste esta caixa · duplo clique volta ao padrão"{% endif %}>
+              <h3 class="slide-headline">{{ form.headlines[i].data or slide.headline }}</h3>
+            </div>
             {# Sempre no DOM (o editor ao vivo escreve aqui); CSS :empty esconde
                a caixa branca enquanto não houver texto. #}
-            <p class="slide-body-snippet">{{ (form.bodies[i].data or slide.body) | truncate(120) }}</p>
-            <p class="slide-cta-snippet">{{ form.ctas[i].data or slide.call_to_action }}</p>
+            <div class="slide-text-box" data-box="body"
+                 {% if style == 'sticker' %}title="Arraste esta caixa · duplo clique volta ao padrão"{% endif %}>
+              <p class="slide-body-snippet">{{ (form.bodies[i].data or slide.body) | truncate(120) }}</p>
+            </div>
+            <div class="slide-text-box" data-box="cta"
+                 {% if style == 'sticker' %}title="Arraste esta caixa · duplo clique volta ao padrão"{% endif %}>
+              <p class="slide-cta-snippet">{{ form.ctas[i].data or slide.call_to_action }}</p>
+            </div>
           </div>
         </div>
 
         {% if style == 'sticker' %}
         <p class="drag-hint small muted">
-          Arraste o texto sobre a foto para reposicionar · duplo clique volta ao padrão
+          Arraste cada caixa separadamente sobre a foto · duplo clique volta ao padrão
         </p>
+        <div class="box-size-controls" data-slide="{{ i }}">
+          {% for key, label in [('headline', 'Headline'), ('body', 'Texto'), ('cta', 'CTA')] %}
+          <div class="box-size-row">
+            <label for="box-scale-{{ i }}-{{ key }}">{{ label }}</label>
+            <input type="range" id="box-scale-{{ i }}-{{ key }}" class="js-box-scale"
+                   data-box="{{ key }}" min="0.5" max="2.5" step="0.05" value="1" />
+            <span class="box-size-value">100%</span>
+          </div>
+          {% endfor %}
+        </div>
         {% endif %}
 
         <!-- Campos editáveis -->
         <div class="slide-edit-fields">
           <input type="hidden" name="{{ form.selected_image_ids[i].name }}" value="{{ form.selected_image_ids[i].data }}" class="js-slide-image-id" data-slide="{{ i }}" />
           <input type="hidden" name="{{ form.text_positions[i].name }}" value="{{ form.text_positions[i].data or '' }}" class="js-slide-text-position" data-slide="{{ i }}" />
+          <input type="hidden" name="{{ form.box_positions[i].name }}" value="{{ form.box_positions[i].data or '' }}" class="js-slide-box-positions" data-slide="{{ i }}" />
+          <input type="hidden" name="{{ form.box_scales[i].name }}" value="{{ form.box_scales[i].data or '' }}" class="js-slide-box-scales" data-slide="{{ i }}" />
 
           <label>Headline</label>
           {{ form.headlines[i](class_="input", placeholder="Título curto do slide") }}
@@ -200,89 +224,135 @@
       }
     });
 
-    // Reposicionamento: arrastar o bloco de texto sobre a foto.
-    // O valor gravado é o CENTRO do bloco em fração do canvas — a mesma
-    // convenção que o SlideRenderer usa no PNG (pos_x / pos_y).
+    // Reposicionamento: arrastar CADA caixa sobre a foto, uma de cada vez.
+    // O valor gravado é o CENTRO da caixa em fração do canvas — a mesma
+    // convenção que o SlideRenderer usa no PNG (box_positions).
     const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
     const pointOf = (event) => (event.touches ? event.touches[0] : event);
 
-    document.querySelectorAll(".js-draggable-text").forEach((stack) => {
+    // "headline:0.5,0.2;cta:0.5,0.8" ⇄ {headline: [0.5, 0.2], ...}
+    const parsePairs = (raw) => {
+      const out = {};
+      (raw || "").split(";").forEach((chunk) => {
+        const [key, value] = chunk.split(":");
+        if (key && value) out[key.trim()] = value.trim();
+      });
+      return out;
+    };
+    const serializePairs = (map) =>
+      Object.entries(map).map(([k, v]) => `${k}:${v}`).join(";");
+
+    document.querySelectorAll(".js-box-stack").forEach((stack) => {
       const visual = stack.closest(".slide-visual");
       const card = stack.closest(".slide-card");
-      const hidden = card ? card.querySelector(".js-slide-text-position") : null;
+      const hidden = card ? card.querySelector(".js-slide-box-positions") : null;
+      const scalesHidden = card ? card.querySelector(".js-slide-box-scales") : null;
       if (!visual || !hidden) return;
 
-      const place = (x, y) => {
-        stack.style.left = `${(x * 100).toFixed(2)}%`;
-        stack.style.top = `${(y * 100).toFixed(2)}%`;
-        stack.classList.add("positioned");
+      const positions = parsePairs(stack.dataset.boxPositions);
+      const scales = parsePairs(stack.dataset.boxScales);
+
+      // --- Tamanho de cada caixa (resize do editor) ---
+      const applyScale = (key, value) => {
+        const box = stack.querySelector(`.slide-text-box[data-box="${key}"]`);
+        if (box) box.style.setProperty("--box-scale", value);
       };
+      card.querySelectorAll(".js-box-scale").forEach((slider) => {
+        const key = slider.dataset.box;
+        const readout = slider.parentElement.querySelector(".box-size-value");
+        const saved = parseFloat(scales[key]);
+        if (!Number.isNaN(saved)) slider.value = saved;
+        const sync = () => {
+          const value = parseFloat(slider.value);
+          applyScale(key, value);
+          if (readout) readout.textContent = `${Math.round(value * 100)}%`;
+          // 1 é o default do renderer — não vale a pena mandar no POST.
+          if (value === 1) delete scales[key];
+          else scales[key] = value.toFixed(2);
+          if (scalesHidden) scalesHidden.value = serializePairs(scales);
+        };
+        slider.addEventListener("input", sync);
+        sync();
+      });
 
-      // Posição já salva no projeto: aplicar antes de qualquer arraste.
-      const saved = (stack.dataset.position || "").split(",");
-      if (saved.length === 2) {
-        const sx = parseFloat(saved[0]);
-        const sy = parseFloat(saved[1]);
-        if (!Number.isNaN(sx) && !Number.isNaN(sy)) place(sx, sy);
-      }
+      // --- Arraste, por caixa ---
+      stack.querySelectorAll(".slide-text-box").forEach((box) => {
+        const key = box.dataset.box;
 
-      let dragging = false;
-      let grabX = 0;
-      let grabY = 0;
+        const place = (x, y) => {
+          box.style.left = `${(x * 100).toFixed(2)}%`;
+          box.style.top = `${(y * 100).toFixed(2)}%`;
+          box.classList.add("positioned");
+        };
 
-      const start = (event) => {
-        const box = visual.getBoundingClientRect();
-        const rect = stack.getBoundingClientRect();
-        // Primeiro arraste: fixar o bloco exatamente onde o CSS o deixou,
-        // senão ele salta para o centro ao virar absoluto.
-        if (!stack.classList.contains("positioned")) {
-          place(
-            (rect.left + rect.width / 2 - box.left) / box.width,
-            (rect.top + rect.height / 2 - box.top) / box.height
-          );
+        // Posição já salva no projeto: aplicar antes de qualquer arraste.
+        const saved = (positions[key] || "").split(",");
+        if (saved.length === 2) {
+          const sx = parseFloat(saved[0]);
+          const sy = parseFloat(saved[1]);
+          if (!Number.isNaN(sx) && !Number.isNaN(sy)) place(sx, sy);
         }
-        const p = pointOf(event);
-        grabX = p.clientX - (rect.left + rect.width / 2);
-        grabY = p.clientY - (rect.top + rect.height / 2);
-        dragging = true;
-        stack.classList.add("dragging");
-        event.preventDefault();
-      };
 
-      const move = (event) => {
-        if (!dragging) return;
-        const box = visual.getBoundingClientRect();
-        const rect = stack.getBoundingClientRect();
-        const p = pointOf(event);
-        // Margem = meio bloco: nenhuma caixa branca sai da foto.
-        const marginX = rect.width / 2 / box.width;
-        const marginY = rect.height / 2 / box.height;
-        const x = clamp((p.clientX - grabX - box.left) / box.width, marginX, 1 - marginX);
-        const y = clamp((p.clientY - grabY - box.top) / box.height, marginY, 1 - marginY);
-        place(x, y);
-        hidden.value = `${x.toFixed(4)},${y.toFixed(4)}`;
-        event.preventDefault();
-      };
+        let dragging = false;
+        let grabX = 0;
+        let grabY = 0;
 
-      const end = () => {
-        if (!dragging) return;
-        dragging = false;
-        stack.classList.remove("dragging");
-      };
+        const start = (event) => {
+          const area = visual.getBoundingClientRect();
+          const rect = box.getBoundingClientRect();
+          // Primeiro arraste: fixar a caixa exatamente onde o CSS a deixou,
+          // senão ela salta para o centro ao virar absoluta.
+          if (!box.classList.contains("positioned")) {
+            place(
+              (rect.left + rect.width / 2 - area.left) / area.width,
+              (rect.top + rect.height / 2 - area.top) / area.height
+            );
+          }
+          const p = pointOf(event);
+          grabX = p.clientX - (rect.left + rect.width / 2);
+          grabY = p.clientY - (rect.top + rect.height / 2);
+          dragging = true;
+          box.classList.add("dragging");
+          event.preventDefault();
+        };
 
-      stack.addEventListener("mousedown", start);
-      stack.addEventListener("touchstart", start, { passive: false });
-      document.addEventListener("mousemove", move);
-      document.addEventListener("touchmove", move, { passive: false });
-      document.addEventListener("mouseup", end);
-      document.addEventListener("touchend", end);
+        const move = (event) => {
+          if (!dragging) return;
+          const area = visual.getBoundingClientRect();
+          const rect = box.getBoundingClientRect();
+          const p = pointOf(event);
+          // Margem = meia caixa: nenhuma caixa branca sai da foto.
+          const marginX = rect.width / 2 / area.width;
+          const marginY = rect.height / 2 / area.height;
+          const x = clamp((p.clientX - grabX - area.left) / area.width, marginX, 1 - marginX);
+          const y = clamp((p.clientY - grabY - area.top) / area.height, marginY, 1 - marginY);
+          place(x, y);
+          positions[key] = `${x.toFixed(4)},${y.toFixed(4)}`;
+          hidden.value = serializePairs(positions);
+          event.preventDefault();
+        };
 
-      // Duplo clique devolve o bloco à âncora do papel no roteiro.
-      stack.addEventListener("dblclick", () => {
-        stack.classList.remove("positioned");
-        stack.style.left = "";
-        stack.style.top = "";
-        hidden.value = "";
+        const end = () => {
+          if (!dragging) return;
+          dragging = false;
+          box.classList.remove("dragging");
+        };
+
+        box.addEventListener("mousedown", start);
+        box.addEventListener("touchstart", start, { passive: false });
+        document.addEventListener("mousemove", move);
+        document.addEventListener("touchmove", move, { passive: false });
+        document.addEventListener("mouseup", end);
+        document.addEventListener("touchend", end);
+
+        // Duplo clique devolve a caixa ao empilhamento padrão do papel.
+        box.addEventListener("dblclick", () => {
+          box.classList.remove("positioned");
+          box.style.left = "";
+          box.style.top = "";
+          delete positions[key];
+          hidden.value = serializePairs(positions);
+        });
       });
     });
 

@@ -159,6 +159,70 @@ def test_slide_edit_form_ignores_invalid_positions(app, raw):
         assert edited[0]["pos_y"] is None
 
 
+def test_slide_edit_form_reads_per_box_positions(app):
+    """Cada caixa arrasta sozinha: "headline:x,y;cta:x,y" vira um dict."""
+    original_slides = [{"headline": "Original", "role": "value"}]
+    with app.test_request_context("/", method="POST", data={
+        "headlines-0": "Original",
+        "box_positions-0": "headline:0.5,0.15;cta:0.4,0.9",
+    }):
+        form = SlideEditForm()
+        edited = form.to_edited_slides(original_slides)
+        assert edited[0]["box_positions"] == {
+            "headline": [0.5, 0.15],
+            "cta": [0.4, 0.9],
+        }
+
+
+def test_slide_edit_form_reads_per_box_scales(app):
+    """O resize do editor chega como "headline:1.4" e é preservado."""
+    original_slides = [{"headline": "Original", "role": "value"}]
+    with app.test_request_context("/", method="POST", data={
+        "headlines-0": "Original",
+        "box_scales-0": "headline:1.4;body:0.8",
+    }):
+        form = SlideEditForm()
+        edited = form.to_edited_slides(original_slides)
+        assert edited[0]["box_scales"] == {"headline": 1.4, "body": 0.8}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "headline",                # sem valor
+        "headline:abc",            # não é número
+        "headline:9",              # acima do teto
+        "headline:0.1",            # abaixo do piso
+        "rodape:1.4",              # chave que a prévia não desenha
+    ],
+)
+def test_slide_edit_form_ignores_invalid_box_scales(app, raw):
+    """O hidden é editável pelo cliente — lixo não pode virar fonte gigante."""
+    original_slides = [{"headline": "Original", "role": "value"}]
+    with app.test_request_context("/", method="POST", data={
+        "headlines-0": "Original",
+        "box_scales-0": raw,
+    }):
+        form = SlideEditForm()
+        edited = form.to_edited_slides(original_slides)
+        assert edited[0]["box_scales"] == {}
+
+
+@pytest.mark.parametrize(
+    "raw", ["headline:2,0.5", "headline:abc,0.2", "rodape:0.5,0.5", "headline:0.5"]
+)
+def test_slide_edit_form_ignores_invalid_box_positions(app, raw):
+    original_slides = [{"headline": "Original", "role": "value"}]
+    with app.test_request_context("/", method="POST", data={
+        "headlines-0": "Original",
+        "box_positions-0": raw,
+    }):
+        form = SlideEditForm()
+        edited = form.to_edited_slides(original_slides)
+        assert edited[0]["box_positions"] == {}
+
+
 # ------------------------------------------- modo roteiro (um bloco por imagem)
 def _script_post(app, **over):
     data = {

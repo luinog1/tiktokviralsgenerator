@@ -40,5 +40,11 @@ EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -fsS http://127.0.0.1:5000/health || exit 1
 
+# --timeout: o default do gunicorn é 30s e mata o worker que passar disso. O
+# POST /generate é síncrono e carrega a chamada de visão dentro dele
+# (VISION_TIMEOUT_SECONDS, default 90s) — com o default o worker morreria antes
+# de a visão responder, e a requisição voltaria como erro em vez de cair no
+# ranking textual. Tem que ser maior que o timeout da visão.
 CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--threads", "4", \
+     "--timeout", "180", \
      "--access-logfile", "-", "--error-logfile", "-", "run:app"]

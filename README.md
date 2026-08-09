@@ -24,7 +24,7 @@ Imagem 2 (problema)  →  "acorda porque dormiu às 21h
 Imagem 3 (CTA)       →  "salva pra começar amanhã"
 ```
 
-A primeira linha de cada bloco vira a **headline** (o texto grande); as linhas seguintes viram o **corpo**. Uma linha só = só headline. O arraste do bloco de texto sobre a foto continua igual — o modo roteiro decide *o quê* e *onde na sequência*, o arraste decide *onde na foto*.
+A primeira linha de cada bloco vira a **headline** (o texto grande); as linhas seguintes viram o **corpo**. Uma linha só = só headline. O arraste das caixas sobre a foto continua igual — o modo roteiro decide *o quê* e *onde na sequência*, o arraste decide *onde na foto*.
 
 Blocos em branco são descartados e o carrossel encolhe: se você abrir 6 campos e preencher 4, saem 4 slides. No modo roteiro o app **não** inventa CTA nem hashtag que você não escreveu — o texto é seu.
 
@@ -46,9 +46,17 @@ Se nenhuma foto de pessoa aparecer em nenhuma das camadas, o slide de hook fica 
 
 ---
 
+## 🎯 O que mudou na v0.6
+
+- ✅ **Cada caixa de texto anda sozinha** — antes o arraste movia headline, corpo e CTA juntos, como um bloco só, e não dava para pôr a pergunta no topo da foto e a resposta embaixo (o layout dos photo posts nativos). Agora cada caixa arrasta separada e grava seu próprio centro (`box_positions`). Uma caixa parada continua no empilhamento do papel; duplo clique devolve qualquer uma delas ao padrão.
+- ✅ **Um tamanho de fonte só, para todos os tipos** — headline, corpo e CTA saíam de bases diferentes (68/54/52) e encolhiam cada um por conta própria, então o mesmo texto mudava de tamanho conforme o campo em que fosse colado. Agora todas as caixas partem do mesmo corpo e, se o texto não couber, **todas** reduzem juntas.
+- ✅ **Resize por caixa no editor** — um controle por caixa na prévia (50%–250%), que multiplica o tamanho comum e vai junto para o PNG exportado.
+- ✅ **Caixas coladas no texto** — a caixa branca era dimensionada pela métrica da fonte (`ascent + descent`), que embute ~35% de espaço morto: sobrava borda em cima e embaixo e o resultado parecia um bloco, não a etiqueta do TikTok. Agora a caixa é medida pela mancha de tinta real do texto. Na prévia, o mesmo bug tinha outra causa: `display:inline` dentro de um flex container é ignorado (o filho é blocado e ocupa a largura toda), então cada caixa ganhou seu próprio contêiner `width: fit-content`.
+- 🐛 **Visão cancelada em 20s mesmo com 60 no blueprint** — a visão dividia o `REQUEST_TIMEOUT_SECONDS` com a busca de imagens. Os 20s do log eram o *default do código*, não o valor do painel: a variável não chegava à aplicação, e mesmo chegando o número certo para o Unsplash é curto demais para um VLM. Agora a visão tem `VISION_TIMEOUT_SECONDS` (default `90`) e o gunicorn roda com `--timeout 180`, senão o worker morria antes do fallback.
+
 ## 🎯 O que mudou na v0.5
 
-- ✅ **Reposicionamento do texto** — no estilo `sticker`, arraste o bloco de texto sobre a foto na prévia. A posição é gravada como fração do canvas (`pos_x`/`pos_y`, o centro do bloco) e o PNG exportado sai igual à prévia. Duplo clique devolve o bloco à âncora do papel no roteiro.
+- ✅ **Reposicionamento do texto** — no estilo `sticker`, arraste o texto sobre a foto na prévia. A posição é gravada como fração do canvas (o centro da caixa) e o PNG exportado sai igual à prévia. Duplo clique volta à âncora do papel no roteiro.
 - ✅ **Qualificação de imagem por visão (opcional)** — com `VISION_ENABLED=true`, um VLM olha as fotos e devolve nota de relevância **e** a região limpa para o texto, que vira `pos_x`/`pos_y` automaticamente. Funciona em qualquer endpoint OpenAI-compatible com `image_url` (ex.: ModelScope API-Inference, que tem tier gratuito). Desligado por padrão; qualquer falha cai no ranking textual.
 - 🐛 **Unsplash repetia as mesmas fotos** — `/search/photos` ordena por relevância de forma estável, então a mesma query devolvia sempre a página 1. Parecia cache do app; era determinismo da API. Agora a página é sorteada dentro das 5 primeiras a cada busca, com reentrada quando a query tem acervo curto.
 
@@ -75,7 +83,9 @@ VISION_MODEL=Qwen/Qwen3-VL-235B-A22B-Instruct   # ou PaddlePaddle/ERNIE-4.5-VL-2
 
 O ID é **namespaced por organização** no ModelScope. Sem o prefixo, a resposta é 404 e a aplicação cai no ranking textual sem quebrar — confira em `/health` → `vision_diagnostic`.
 
-Dois cuidados de projeto: as fotos vão na versão **pequena** (~400px, `urls.small`) porque 400px basta para julgar composição e a versão cheia multiplicaria os tokens de visão; e no máximo **8 imagens por chamada**, já que a chamada é síncrona dentro do `POST /generate`. Timeout, JSON ilegível, `image_id` alucinado ou visão desligada — qualquer um desses cai no ranking textual de sempre. Com `VISION_ENABLED=true`, considere subir o `REQUEST_TIMEOUT_SECONDS` para ~60.
+Dois cuidados de projeto: as fotos vão na versão **pequena** (~400px, `urls.small`) porque 400px basta para julgar composição e a versão cheia multiplicaria os tokens de visão; e no máximo **8 imagens por chamada**, já que a chamada é síncrona dentro do `POST /generate`. Timeout, JSON ilegível, `image_id` alucinado ou visão desligada — qualquer um desses cai no ranking textual de sempre.
+
+A visão tem **timeout próprio** (`VISION_TIMEOUT_SECONDS`, default `90`), separado do `REQUEST_TIMEOUT_SECONDS` da busca de imagens. Enquanto os dois eram o mesmo número, o valor dimensionado para o Unsplash (20s) cancelava o VLM antes da primeira resposta — o log dizia `não respondeu em 20s` e o carrossel caía no ranking textual sem nada estar configurado errado. Dois timeouts porque as duas chamadas não têm nada a ver uma com a outra: uma é um GET de JSON, a outra é um modelo olhando 8 fotos. O worker do gunicorn roda com `--timeout 180`, que precisa ficar acima do timeout da visão para o fallback ter chance de acontecer — worker morto não faz fallback.
 
 Modelos **text-to-image** (Qwen-Image, FLUX, Stable Diffusion) são outra categoria: eles *geram* a foto em vez de qualificar, e substituiriam o Unsplash. Não estão implementados.
 
@@ -132,7 +142,7 @@ Reaproveitar essa sessão no servidor significaria repassar seus cookies, ou sej
 - Ranking opcional de imagens por endpoint LLM (com fallback determinístico).
 - Qualificação por **visão** opcional (VLM): nota olhando a foto + posição automática do texto + assunto da foto (pessoa/cenário) para o casting.
 - Prévia do carrossel com slides editáveis (headline, body, CTA por slide) e o papel de cada slide visível.
-- Reposicionamento do bloco de texto por arraste na prévia (estilo `sticker`), refletido no PNG exportado.
+- Reposicionamento e tamanho de **cada caixa de texto** por arraste/controle na prévia (estilo `sticker`), refletidos no PNG exportado.
 - Galeria miniatura por slide para troca de imagem.
 - Exportação em três formatos:
   - **ZIP** — todos os slides PNG + Markdown anexo.
@@ -177,7 +187,7 @@ python run.py
 4. Preencha tema, estilo (**sticker** recomendado — ou quote/list/tutorial/story) e as palavras-chave da busca de imagens.
 5. Clique em "Gerar carrossel". Com o casting ligado, a imagem 1 recebe uma foto com pessoa e as demais recebem cenário.
 6. Na prévia, cada slide mostra seu papel e de onde veio a foto do hook (visão, metadado ou busca). Edite os textos e troque a imagem pela galeria.
-7. No estilo `sticker`, **arraste o texto** sobre a foto para reposicionar (duplo clique volta ao padrão). Clique em "Salvar edições" para gravar.
+7. No estilo `sticker`, **arraste cada caixa** sobre a foto para reposicionar (duplo clique volta ao padrão) e use o controle de tamanho de cada caixa se quiser texto maior. Clique em "Salvar edições" para gravar.
 8. Exporte: **ZIP** (carrossel completo) ou **PNG** (slide único) ou **Markdown** (texto).
 
 ---
@@ -204,7 +214,8 @@ python run.py
 | `VISION_API_BASE_URL` | (herda `LLM_*`) | Endpoint OpenAI-compatible com suporte a `image_url` |
 | `VISION_API_KEY` | (herda `LLM_*`) | Token do provider de visão |
 | `VISION_MODEL` | (vazio) | ID do VLM. **Sem default** — ex.: `Qwen/Qwen3-VL-235B-A22B-Instruct` |
-| `REQUEST_TIMEOUT_SECONDS` | `20` | Timeout HTTP |
+| `REQUEST_TIMEOUT_SECONDS` | `20` | Timeout HTTP da busca de imagens e do LLM de texto |
+| `VISION_TIMEOUT_SECONDS` | `90` | Timeout só do VLM — separado porque o modelo olha até 8 fotos por chamada |
 | `SESSION_TTL_MINUTES` | `60` | TTL dos projetos em memória |
 | `SLIDE_WIDTH` | `1080` | Largura do slide PNG |
 | `SLIDE_HEIGHT` | `1350` | Altura do slide PNG (4:5 = TikTok/Instagram) |
@@ -293,14 +304,17 @@ Cobertura (190 testes):
 - **Casting** — hook recebe pessoa por visão, por metadado (`alt_description`) e por pool de busca, nessa ordem; parte do corpo ("woman's hands") não conta como retrato; fotos de cenário nunca caem no slide 1; aviso quando não há foto com pessoa; `HOOK_SUBJECT=off` volta à rotação.
 - **Roteiro viral** — distribuição de papéis por nº de slides, ordem `hook…cta`, CTA só no fecho, sem texto duplicado entre headline e body.
 - **SlideRenderer** — resolução de fonte TrueType, auto-ajuste do corpo da fonte, caixas brancas do estilo sticker, ausência de overlay escuro, posição do hook vs. valor, quebra de palavra longa, remoção de emoji.
-- **Reposicionamento** — `pos_x`/`pos_y` vencem a âncora do papel, clamp dentro do canvas, slide sem posição mantém o comportamento antigo.
+- **Tamanho uniforme** — headline, corpo e CTA saem no mesmo corpo de fonte; texto longo encolhe as três caixas juntas, nunca uma só.
+- **Caixa colada no texto** — a altura da caixa branca acompanha a mancha de tinta (uma linha curta não gera bloco alto), e o `box_scale` aumenta a caixa junto com a fonte.
+- **Reposicionamento** — `pos_x`/`pos_y` vencem a âncora do papel, clamp dentro do canvas, slide sem posição mantém o comportamento antigo, e cada caixa (`box_positions`) move-se sem arrastar as outras.
 - **Pinterest mock** — geração de SVGs sintéticos.
 - **Unsplash** — rotação de páginas entre buscas iguais, reentrada quando a página sorteada passa do fim do acervo, motivo do fallback por status HTTP.
 - **Ranking** — correlação com `raw_text`, fallback sem corpus.
 - **Visão (VLM)** — envia a thumb e não a foto cheia, teto de imagens por chamada equilibrado entre os dois pools, parse de âncora → `pos_*` e de `subject` (com sinônimos: `female`/`girl` → `woman`), `<think>`/cerca markdown na resposta, nota fora de faixa, `image_id` alucinado ou duplicado, gradiente mock sem chamada, timeout e 404 caindo no ranking textual.
 - **Busca em dois pools** — uma query por papel, cada foto marcada com sua origem, fotos repetidas entre os pools deduplicadas, falha de uma busca não derruba a geração.
 - **Settings** — mock vs LLM configurado, compatibilidade reversa, visão desligada por default e herança das credenciais `LLM_*`, `HOOK_*`/`SCENE_QUERY_HINTS` customizáveis.
-- **Forms** — validação de `raw_text` (mín 20 chars) só no modo automático, mínimo de 2 blocos no modo roteiro, `theme`, `style`, `slides_count`, parse de `text_positions` (inclui valores inválidos), POST legado sem o campo de modo continua válido.
+- **Forms** — validação de `raw_text` (mín 20 chars) só no modo automático, mínimo de 2 blocos no modo roteiro, `theme`, `style`, `slides_count`, parse de `text_positions`, `box_positions` e `box_scales` (inclui valores inválidos e escalas fora dos limites), POST legado sem o campo de modo continua válido.
+- **Visão** — timeout próprio (não o HTTP da busca de imagens), default com folga acima dele, e fallback silencioso em timeout/404/JSON ilegível.
 - **Rotas** — fluxo completo (`/` → `/create` → `/generate` → `/preview` → `/edit` → `/export` ZIP/PNG/MD), round-trip da posição arrastada até o PNG, ordem dos blocos preservada da submissão à prévia, e `POST /script/split`.
 
 ---
@@ -327,7 +341,7 @@ Cada estilo produz um layout distinto no PNG renderizado:
 
 | Estilo | Layout | Caso de uso |
 |--------|--------|-------------|
-| `sticker` | **(padrão)** Caixas brancas arredondadas por linha, texto preto, foto sem escurecimento. Posição varia pelo papel do slide no roteiro — e pode ser arrastada na prévia | Photo post nativo do TikTok |
+| `sticker` | **(padrão)** Caixas brancas arredondadas por linha, texto preto, foto sem escurecimento. Um tamanho de fonte só para headline/corpo/CTA; cada caixa arrasta e redimensiona sozinha na prévia | Photo post nativo do TikTok |
 | `quote` | Aspas decorativas + headline centralizada + body + CTA inferior | Frases inspiradoras, quotes |
 | `list` | Headline à esquerda com barra de destaque + bullets + CTA centralizado | Listas de dicas, passos numerados |
 | `tutorial` | Tag "PASSO A PASSO" + headline + body + CTA em caixa colorida | Tutoriais, como-fazer |
@@ -394,7 +408,7 @@ Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SL
 - [x] Roteiro colado inteiro é distribuído entre os campos e continua editável.
 - [x] Primeira foto recebe pessoa; as demais, cenário — com aviso quando não dá.
 - [x] Prévia é editável (headline + body + CTA por slide).
-- [x] Posição do texto é ajustável por arraste e o PNG exportado respeita o ajuste.
+- [x] Posição e tamanho de cada caixa são ajustáveis na prévia e o PNG exportado respeita o ajuste.
 - [x] Usuário consegue copiar legenda/hashtags e baixar conteúdo.
 - [x] Origem da imagem aparece na interface e no Markdown exportado.
 - [x] Nenhum segredo aparece no frontend, logs ou repositório.

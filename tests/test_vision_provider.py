@@ -274,6 +274,37 @@ def test_timeout_falls_back(monkeypatch):
     assert VisionRankingProvider(_settings()).rank({}, _photos(1)) == []
 
 
+def test_vision_uses_its_own_timeout_not_the_http_one(monkeypatch):
+    """O VLM olha até 8 fotos por chamada — é a parte lenta do POST /generate.
+
+    Enquanto os dois compartilhavam `REQUEST_TIMEOUT_SECONDS`, o número que
+    servia para o Unsplash (20s) cancelava a visão antes da primeira resposta e
+    o carrossel caía no ranking textual sem nada estar configurado errado.
+    """
+    seen = {}
+
+    def capture(*a, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        return _reply('{"results":[]}')
+
+    monkeypatch.setattr(requests, "post", capture)
+    settings = _settings(REQUEST_TIMEOUT_SECONDS="20", VISION_TIMEOUT_SECONDS="90")
+    VisionRankingProvider(settings).rank({}, _photos(1))
+    assert seen["timeout"] == 90
+
+
+def test_vision_timeout_defaults_above_the_http_timeout():
+    """Sem VISION_TIMEOUT_SECONDS no ambiente, o default não pode ser o antigo.
+
+    O log do Render mostrava "não respondeu em 20s" — que é o DEFAULT do
+    timeout HTTP no código, ou seja, a variável do blueprint não chegava à
+    aplicação. O default da visão precisa dar folga sozinho.
+    """
+    settings = Settings.from_env({})
+    assert settings.vision_timeout_seconds >= 60
+    assert settings.vision_timeout_seconds > settings.request_timeout_seconds
+
+
 def test_http_error_falls_back(monkeypatch):
     """404 no ModelScope é quase sempre model id sem o prefixo da org."""
     monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp(

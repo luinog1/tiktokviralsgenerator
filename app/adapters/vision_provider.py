@@ -113,7 +113,9 @@ class VisionRankingProvider:
         self._base = settings.vision_api_base_url.rstrip("/")
         self._key = settings.vision_api_key
         self._model = settings.vision_model
-        self._timeout = settings.request_timeout_seconds
+        # Timeout próprio, não o `request_timeout_seconds` da busca de imagens:
+        # o VLM olha até 8 fotos numa chamada e leva dezenas de segundos.
+        self._timeout = settings.vision_timeout_seconds
 
     def rank(
         self, briefing: dict[str, Any], images: list[PinterestImage]

@@ -255,6 +255,18 @@ class SlideEditForm(FlaskForm):
         HiddenField(),
         min_entries=0,
     )
+    # Posição de CADA caixa, quando o usuário arrasta uma sozinha. Formato
+    # "headline:x,y;body:x,y;cta:x,y" — só as caixas movidas aparecem.
+    box_positions = FieldList(
+        HiddenField(),
+        min_entries=0,
+    )
+    # Escala de cada caixa, do controle de tamanho na prévia. Mesmo formato,
+    # com um número só: "headline:1.2;body:1".
+    box_scales = FieldList(
+        HiddenField(),
+        min_entries=0,
+    )
 
     def to_edited_slides(self, original_slides: list[dict]) -> list[dict]:
         """Mescla os campos editados com a estrutura original."""
@@ -276,6 +288,12 @@ class SlideEditForm(FlaskForm):
                 self.text_positions[i].data if i < len(self.text_positions.entries) else ""
             )
             pos_x, pos_y = _parse_position(raw_pos)
+            raw_boxes = (
+                self.box_positions[i].data if i < len(self.box_positions.entries) else ""
+            )
+            raw_scales = (
+                self.box_scales[i].data if i < len(self.box_scales.entries) else ""
+            )
             result.append({
                 "headline": headline or orig.get("headline", ""),
                 "body": body or orig.get("body", ""),
@@ -287,6 +305,9 @@ class SlideEditForm(FlaskForm):
                 # Sem arraste, o campo vem vazio e o slide volta à âncora do papel.
                 "pos_x": pos_x,
                 "pos_y": pos_y,
+                # Ajustes por caixa. Vazios = a caixa segue o bloco.
+                "box_positions": _parse_box_positions(raw_boxes),
+                "box_scales": _parse_box_scales(raw_scales),
             })
         return result
 
@@ -300,6 +321,9 @@ __all__ = [
     "MODE_CHOICES",
     "MAX_SCRIPT_BLOCKS",
     "script_field_labels",
+    "BOX_KEYS",
+    "MIN_BOX_SCALE",
+    "MAX_BOX_SCALE",
 ]
 
 
@@ -317,3 +341,45 @@ def _parse_position(raw: str | None) -> tuple[float | None, float | None]:
     if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
         return None, None
     return round(x, 4), round(y, 4)
+
+
+# Caixas que a prévia pode ajustar sozinhas. Qualquer outra chave que chegue no
+# POST é descartada — o hidden é editável pelo cliente.
+BOX_KEYS = ("headline", "body", "cta")
+
+# Limites do controle de tamanho. Abaixo de 0.5 o texto some no feed; acima de
+# 2.5 uma linha sozinha não caberia na largura do slide.
+MIN_BOX_SCALE = 0.5
+MAX_BOX_SCALE = 2.5
+
+
+def _iter_box_entries(raw: str | None):
+    """Fatia "headline:...;body:..." em pares (chave, valor)."""
+    for chunk in str(raw or "").split(";"):
+        key, _, value = chunk.partition(":")
+        key = key.strip().lower()
+        if key in BOX_KEYS and value.strip():
+            yield key, value.strip()
+
+
+def _parse_box_positions(raw: str | None) -> dict[str, list[float]]:
+    """Lê "headline:x,y;cta:x,y" — o arraste de cada caixa isolada."""
+    positions: dict[str, list[float]] = {}
+    for key, value in _iter_box_entries(raw):
+        x, y = _parse_position(value)
+        if x is not None and y is not None:
+            positions[key] = [x, y]
+    return positions
+
+
+def _parse_box_scales(raw: str | None) -> dict[str, float]:
+    """Lê "headline:1.2;body:0.9" — o controle de tamanho de cada caixa."""
+    scales: dict[str, float] = {}
+    for key, value in _iter_box_entries(raw):
+        try:
+            scale = float(value)
+        except ValueError:
+            continue
+        if MIN_BOX_SCALE <= scale <= MAX_BOX_SCALE and scale != 1.0:
+            scales[key] = round(scale, 3)
+    return scales

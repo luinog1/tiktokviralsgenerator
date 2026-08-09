@@ -82,11 +82,11 @@ def test_fonts_respect_requested_size(renderer):
     from PIL import ImageDraw
 
     draw = ImageDraw.Draw(Image.new("RGB", (1080, 1350)))
-    font, lines = renderer._fit_sticker_font(
-        draw, "texto de teste", max_width=800, base=40, min_size=20, max_lines=3
+    sized = renderer._fit_sticker_blocks(
+        draw, [("headline", "texto de teste")], max_width=800
     )
-    assert lines == ["texto de teste"]
-    assert font.size >= 20
+    assert [lines for _, lines, _ in sized] == [["texto de teste"]]
+    assert sized[0][2].size >= 20
 
 
 def test_fit_font_shrinks_until_it_fits(renderer):
@@ -95,11 +95,71 @@ def test_fit_font_shrinks_until_it_fits(renderer):
 
     draw = ImageDraw.Draw(Image.new("RGB", (1080, 1350)))
     long_text = "uma frase bem comprida que precisa encolher para caber " * 3
-    font, lines = renderer._fit_sticker_font(
-        draw, long_text, max_width=800, base=68, min_size=30, max_lines=4
+    sized = renderer._fit_sticker_blocks(
+        draw, [("headline", long_text)], max_width=800
     )
-    assert len(lines) <= 4
-    assert font.size < int(68 * (renderer._w / 1080))
+    _, lines, font = sized[0]
+    assert len(lines) <= renderer._STICKER_MAX_LINES["headline"]
+    assert font.size < int(renderer._STICKER_BASE_SIZE * (renderer._w / 1080))
+
+
+def test_every_box_shares_the_same_font_size(renderer):
+    """No photo post do TikTok a legenda tem UM tamanho.
+
+    Antes cada bloco era dimensionado por conta própria (68/54/52 e pisos
+    diferentes), então o corpo do slide saía menor que a headline e o mesmo
+    texto mudava de tamanho conforme o campo em que fosse colado.
+    """
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(Image.new("RGB", (1080, 1350)))
+    sized = renderer._fit_sticker_blocks(
+        draw,
+        [
+            ("headline", "if your views are down, don't panic."),
+            ("body", "growth isn't linear. don't let one bad day make you forget."),
+            ("cta", "salva esse post"),
+        ],
+        max_width=800,
+    )
+    sizes = {font.size for _, _, font in sized}
+    assert len(sizes) == 1, f"tamanhos divergentes entre as caixas: {sizes}"
+
+
+def test_overflow_shrinks_all_boxes_together(renderer):
+    """Se uma caixa estoura, TODAS reduzem — senão a igualdade se quebra."""
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(Image.new("RGB", (1080, 1350)))
+    overflowing = "palavra " * 60
+    sized = renderer._fit_sticker_blocks(
+        draw,
+        [("headline", "curto"), ("body", overflowing)],
+        max_width=800,
+    )
+    sizes = {font.size for _, _, font in sized}
+    assert len(sizes) == 1
+    assert sizes.pop() < int(renderer._STICKER_BASE_SIZE * (renderer._w / 1080))
+
+
+def test_box_scale_multiplies_only_that_box(renderer):
+    """O resize do editor vale para a caixa pedida, não para o slide todo."""
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(Image.new("RGB", (1080, 1350)))
+    texts = [("headline", "uma frase"), ("body", "outra frase")]
+    plain = dict(
+        (key, font.size)
+        for key, _, font in renderer._fit_sticker_blocks(draw, texts, max_width=800)
+    )
+    scaled = dict(
+        (key, font.size)
+        for key, _, font in renderer._fit_sticker_blocks(
+            draw, texts, max_width=800, scales={"headline": 1.5}
+        )
+    )
+    assert scaled["headline"] > plain["headline"]
+    assert scaled["body"] == plain["body"]
 
 
 # ---------- Estilo sticker ----------
@@ -221,6 +281,105 @@ def test_slide_without_position_keeps_role_anchor(renderer):
     hook_top, _, _, _ = _white_box_bounds(renderer, SlideContent(headline=text, role="hook"))
     value_top, _, _, _ = _white_box_bounds(renderer, SlideContent(headline=text, role="value"))
     assert hook_top > value_top
+
+
+# ---------- Caixas independentes ----------
+
+
+def test_box_position_moves_only_that_box(renderer):
+    """Cada caixa arrasta sozinha — era o que o stack único impedia.
+
+    Com a headline fixada no topo e o corpo no rodapé, as caixas brancas
+    precisam ocupar as duas pontas do slide, não um bloco só no meio.
+    """
+    slide = SlideContent(
+        headline="pergunta no topo",
+        body="resposta embaixo",
+        role="value",
+        box_positions={"headline": (0.5, 0.15), "body": (0.5, 0.85)},
+    )
+    top, bottom, _, _ = _white_box_bounds(renderer, slide)
+    assert top < 1350 * 0.25
+    assert bottom > 1350 * 0.75
+
+
+def test_loose_box_does_not_drag_the_others(renderer):
+    """Mover uma caixa não pode reposicionar a que ficou no empilhamento."""
+    stacked = SlideContent(headline="fica", body="vai embora", role="value")
+    base_top, _, _, _ = _white_box_bounds(renderer, stacked)
+    moved = SlideContent(
+        headline="fica",
+        body="vai embora",
+        role="value",
+        box_positions={"body": (0.5, 0.9)},
+    )
+    moved_top, _, _, _ = _white_box_bounds(renderer, moved)
+    assert moved_top == base_top
+
+
+def test_box_position_is_clamped_inside_the_canvas(renderer):
+    slide = SlideContent(
+        headline="uma headline comprida o suficiente para ocupar duas linhas aqui",
+        role="value",
+        box_positions={"headline": (2.0, -1.0)},
+    )
+    top, bottom, left, right = _white_box_bounds(renderer, slide)
+    assert top >= 0 and left >= 0
+    assert bottom < 1350 and right < 1080
+
+
+def test_box_scale_changes_the_rendered_box(renderer):
+    """O resize do editor precisa chegar ao PNG, não só à tela.
+
+    A medida é a ALTURA: com escala maior o texto pode reagrupar em mais
+    linhas e sair mais estreito, mas nunca mais baixo.
+    """
+    text = "curto"
+    top_plain, bottom_plain, left_plain, right_plain = _white_box_bounds(
+        renderer, SlideContent(headline=text, role="value")
+    )
+    top_big, bottom_big, left_big, right_big = _white_box_bounds(
+        renderer, SlideContent(headline=text, role="value", box_scales={"headline": 1.6})
+    )
+    assert (bottom_big - top_big) > (bottom_plain - top_plain)
+    assert (right_big - left_big) > (right_plain - left_plain)
+
+
+# ---------- Caixa colada no texto ----------
+
+
+def test_box_hugs_the_text_without_leftover_space(renderer):
+    """A caixa branca é uma etiqueta na frase, não um bloco com sobra.
+
+    Mede a folga entre a borda da caixa e a tinta do texto: com a caixa
+    dimensionada pela métrica da fonte (ascent+descent) sobravam ~35% do corpo
+    da fonte em cima e embaixo, e o slide não parecia o photo post nativo.
+    """
+    from PIL import ImageDraw
+
+    slide = SlideContent(headline="Altura", role="value")
+    img = _open(renderer.render_single(slide, None, style="sticker").png_bytes).convert("RGB")
+
+    box_top, box_bottom, box_left, box_right = _white_box_bounds(renderer, slide)
+    # Linhas/colunas onde existe tinta preta (o texto).
+    ink_rows = [
+        y for y in range(box_top, box_bottom + 1)
+        if any(sum(img.getpixel((x, y))) < 200 for x in range(box_left, box_right + 1))
+    ]
+    ink_cols = [
+        x for x in range(box_left, box_right + 1)
+        if any(sum(img.getpixel((x, y))) < 200 for y in range(box_top, box_bottom + 1))
+    ]
+    assert ink_rows and ink_cols, "nenhum texto preto dentro da caixa"
+
+    draw = ImageDraw.Draw(img)
+    sized = renderer._fit_sticker_blocks(draw, [("headline", "Altura")], max_width=800)
+    size = sized[0][2].size
+    # A folga é o padding pedido (±4px de amostragem), não o vão da métrica.
+    assert (ink_rows[0] - box_top) < size * 0.30
+    assert (box_bottom - ink_rows[-1]) < size * 0.30
+    assert (ink_cols[0] - box_left) < size * 0.42
+    assert (box_right - ink_cols[-1]) < size * 0.42
 
 
 def test_empty_slide_does_not_crash(renderer):

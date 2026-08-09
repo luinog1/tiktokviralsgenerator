@@ -206,6 +206,8 @@ class SlideRenderer:
             self._draw_sticker_layout(
                 draw, headline, body, cta, slide.role,
                 pos_x=slide.pos_x, pos_y=slide.pos_y,
+                box_positions=slide.box_positions,
+                box_scales=slide.box_scales,
             )
             buffer = io.BytesIO()
             canvas.save(buffer, format="PNG", optimize=True)
@@ -267,38 +269,58 @@ class SlideRenderer:
         *,
         pos_x: float | None = None,
         pos_y: float | None = None,
+        box_positions: dict[str, tuple[float, float]] | None = None,
+        box_scales: dict[str, float] | None = None,
     ) -> None:
         """Estilo TikTok: cada linha vira uma caixa branca arredondada.
 
         headline e body são blocos separados, com respiro entre eles — é assim
         que o texto aparece nos photo posts nativos do TikTok.
 
-        `pos_x`/`pos_y` (0..1) são o centro do bloco, vindos do
+        Todos os blocos saem no MESMO corpo de fonte: no photo post nativo a
+        legenda não muda de tamanho entre "título" e "texto", e dimensionar cada
+        bloco por conta própria fazia o corpo do slide sair menor que a headline
+        do slide anterior. O tamanho só cai — e cai para todos juntos — quando o
+        texto não caberia no canvas.
+
+        `pos_x`/`pos_y` (0..1) são o centro do bloco inteiro, vindos do
         reposicionamento manual na prévia. Ausentes, vale a âncora do papel.
+        `box_positions`/`box_scales` ajustam uma caixa isolada: a que tem
+        posição própria é desenhada sozinha, fora do empilhamento.
         """
         max_width = int(self._w * 0.80)
         gap = int(self._h * 0.045)
+        box_positions = box_positions or {}
+        box_scales = box_scales or {}
 
-        headline_font, headline_lines = self._fit_sticker_font(
-            draw, headline, max_width=max_width, base=68, min_size=40, max_lines=4
+        texts = [("headline", headline), ("body", body), ("cta", cta)]
+        sized = self._fit_sticker_blocks(
+            draw, texts, max_width=max_width, scales=box_scales
         )
-        body_font, body_lines = self._fit_sticker_font(
-            draw, body, max_width=max_width, base=54, min_size=32, max_lines=5, bold=False
-        )
-        cta_font, cta_lines = self._fit_sticker_font(
-            draw, cta, max_width=max_width, base=52, min_size=32, max_lines=2
-        )
+        if not sized:
+            return
 
-        blocks = [
-            (headline_lines, headline_font),
-            (body_lines, body_font),
-            (cta_lines, cta_font),
-        ]
-        blocks = [(lines, font) for lines, font in blocks if lines]
+        # Caixa arrastada individualmente sai do fluxo e é desenhada no seu
+        # próprio centro; o resto continua empilhado como um bloco só.
+        loose = [(k, l, f) for k, l, f in sized if k in box_positions]
+        blocks = [(l, f) for k, l, f in sized if k not in box_positions]
+
+        for key, lines, font in loose:
+            bx, by = box_positions[key]
+            height = self._sticker_block_height(draw, lines, font)
+            half_w = self._sticker_block_width(draw, lines, font) // 2
+            margin_y = int(self._h * 0.02)
+            margin_x = int(self._w * 0.04)
+            top = int(self._h * by) - height // 2
+            top = max(margin_y, min(top, self._h - height - margin_y))
+            cx = int(self._w * bx)
+            cx = max(margin_x + half_w, min(cx, self._w - margin_x - half_w))
+            self._draw_sticker_block(draw, lines, font, top, cx)
+
         if not blocks:
             return
 
-        total = sum(self._sticker_block_height(l, f) for l, f in blocks)
+        total = sum(self._sticker_block_height(draw, l, f) for l, f in blocks)
         total += gap * (len(blocks) - 1)
 
         anchor = self._STICKER_ANCHORS.get(role, 0.18)
@@ -328,51 +350,95 @@ class SlideRenderer:
         for lines, font in blocks:
             y = self._draw_sticker_block(draw, lines, font, y, cx) + gap
 
-    def _fit_sticker_font(
+    # Corpo de fonte único de todas as caixas do sticker, na base de 1080px de
+    # largura. Vem do photo post de referência, onde a legenda tem um tamanho só.
+    _STICKER_BASE_SIZE = 64
+    # Piso do encolhimento automático. Abaixo disso o texto fica ilegível no
+    # feed — melhor cortar linha do que continuar reduzindo.
+    _STICKER_MIN_SIZE = 38
+    # Teto de linhas por caixa. É o que decide quando o corpo da fonte cai.
+    _STICKER_MAX_LINES = {"headline": 4, "body": 6, "cta": 2}
+
+    def _fit_sticker_blocks(
         self,
         draw,
-        text: str,
+        texts: list[tuple[str, str]],
         *,
         max_width: int,
-        base: int,
-        min_size: int,
-        max_lines: int,
-        bold: bool = True,
-    ):
-        """Reduz o corpo da fonte até o texto caber em `max_lines` linhas."""
-        if not text.strip():
-            return None, []
-        path = self._bold_path if bold else self._regular_path
-        scale = self._w / 1080
-        size = max(10, int(base * scale))
-        floor = max(8, int(min_size * scale))
-        font = _font(path, size)
-        lines = _wrap(text, font, max_width, draw)
-        while len(lines) > max_lines and size > floor:
-            size -= 2
-            font = _font(path, size)
-            lines = _wrap(text, font, max_width, draw)
-        return font, lines[:max_lines]
+        scales: dict[str, float] | None = None,
+    ) -> list[tuple[str, list[str], Any]]:
+        """Quebra as caixas num corpo de fonte COMUM, reduzindo todas juntas.
 
-    def _sticker_line_height(self, font) -> int:
+        Devolve [(chave, linhas, fonte)] só das caixas com texto. Uma caixa com
+        escala própria em `scales` é dimensionada a partir do tamanho comum, e
+        não entra na decisão de encolher — o usuário pediu aquele tamanho.
+        """
+        scales = scales or {}
+        filled = [(key, text) for key, text in texts if text.strip()]
+        if not filled:
+            return []
+
+        canvas_scale = self._w / 1080
+        size = max(10, int(self._STICKER_BASE_SIZE * canvas_scale))
+        floor = max(8, int(self._STICKER_MIN_SIZE * canvas_scale))
+
+        while True:
+            result = []
+            overflow = False
+            for key, text in filled:
+                bold = key != "body"
+                path = self._bold_path if bold else self._regular_path
+                box_size = max(10, int(round(size * scales.get(key, 1.0))))
+                font = _font(path, box_size)
+                lines = _wrap(text, font, max_width, draw)
+                limit = self._STICKER_MAX_LINES.get(key, 4)
+                if len(lines) > limit and key not in scales:
+                    overflow = True
+                result.append((key, lines[:limit], font))
+            if not overflow or size <= floor:
+                return result
+            size -= 2
+
+    def _sticker_line_height(self, draw, font) -> int:
+        """Altura da MANCHA DE TINTA de uma linha, não da métrica da fonte.
+
+        `font.getmetrics()` devolve ascent + descent, que embute o espaço morto
+        que a fonte reserva acima das maiúsculas e abaixo das descendentes — em
+        TikTok Sans isso são ~35% do corpo. A caixa branca dimensionada por essa
+        métrica sobra em cima e embaixo do texto, o efeito de "bloco" em vez de
+        etiqueta colada na frase. O bbox de uma referência fixa de glifos dá a
+        mancha real e mantém a MESMA altura em todas as linhas do bloco (medir
+        linha a linha faria a caixa pular de altura conforme houvesse ou não um
+        "g" na linha).
+        """
         try:
-            ascent, descent = font.getmetrics()
-            return ascent + descent
-        except AttributeError:  # bitmap default font
-            return int(getattr(font, "size", 30) * 1.2)
+            bbox = draw.textbbox((0, 0), _INK_REFERENCE, font=font)
+            height = int(bbox[3] - bbox[1])
+            if height > 0:
+                return height
+        except (AttributeError, TypeError):
+            pass
+        return int(getattr(font, "size", 30) * 0.95)
+
+    def _sticker_ink_offset(self, draw, font) -> int:
+        """Quanto o desenho sobe para a tinta encostar no topo da caixa."""
+        try:
+            return int(draw.textbbox((0, 0), _INK_REFERENCE, font=font)[1])
+        except (AttributeError, TypeError):
+            return 0
 
     def _sticker_padding(self, font) -> tuple[int, int, int]:
         size = getattr(font, "size", 30)
-        pad_x = max(8, int(size * 0.34))
-        pad_y = max(3, int(size * 0.13))
-        radius = max(6, int(size * 0.24))
+        pad_x = max(8, int(size * 0.30))
+        pad_y = max(4, int(size * 0.19))
+        radius = max(6, int(size * 0.22))
         return pad_x, pad_y, radius
 
-    def _sticker_block_height(self, lines, font) -> int:
+    def _sticker_block_height(self, draw, lines, font) -> int:
         if not lines:
             return 0
         _, pad_y, _ = self._sticker_padding(font)
-        box_h = self._sticker_line_height(font) + pad_y * 2
+        box_h = self._sticker_line_height(draw, font) + pad_y * 2
         # -2px por linha: as caixas se encostam, sem fresta entre elas.
         return box_h * len(lines) - 2 * (len(lines) - 1)
 
@@ -381,27 +447,35 @@ class SlideRenderer:
         if not lines:
             return 0
         pad_x, _, _ = self._sticker_padding(font)
-        widest = max(_text_width(draw, line, font) for line in lines)
+        widest = max(_ink_width(draw, line, font) for line in lines)
         return int(widest) + pad_x * 2
 
     def _draw_sticker_block(self, draw, lines, font, top: int, cx: int | None = None) -> int:
         """Desenha as caixas brancas centralizadas em `cx`. Devolve o y do rodapé."""
         pad_x, pad_y, radius = self._sticker_padding(font)
-        line_h = self._sticker_line_height(font)
+        line_h = self._sticker_line_height(draw, font)
+        ink_offset = self._sticker_ink_offset(draw, font)
         box_h = line_h + pad_y * 2
         if cx is None:
             cx = self._w // 2
         y = top
         for line in lines:
-            text_w = _text_width(draw, line, font)
-            box_w = int(text_w) + pad_x * 2
+            # Largura pela tinta, não pelo avanço: o avanço inclui a folga
+            # lateral do último glifo e deixava um vão dentro da caixa.
+            ink_w, ink_left = _ink_width(draw, line, font), _ink_left(draw, line, font)
+            box_w = int(ink_w) + pad_x * 2
             x0 = cx - box_w // 2
             draw.rounded_rectangle(
                 [x0, y, x0 + box_w, y + box_h],
                 radius=radius,
                 fill=(255, 255, 255),
             )
-            draw.text((x0 + pad_x, y + pad_y), line, font=font, fill=(17, 17, 17))
+            draw.text(
+                (x0 + pad_x - ink_left, y + pad_y - ink_offset),
+                line,
+                font=font,
+                fill=(17, 17, 17),
+            )
             y += box_h - 2
         return y + 2
 
@@ -741,7 +815,7 @@ def _safe_text(value: str) -> str:
 
 
 def _text_width(draw, text: str, font) -> float:
-    """Largura de avanço do texto — usada para dimensionar a caixa branca."""
+    """Largura de avanço do texto — usada para decidir a quebra de linha."""
     try:
         return draw.textlength(text, font=font)
     except (AttributeError, TypeError):
@@ -750,6 +824,37 @@ def _text_width(draw, text: str, font) -> float:
             return bbox[2] - bbox[0]
         except Exception:
             return len(text) * getattr(font, "size", 30) * 0.5
+
+
+# Glifos que cobrem o extremo de cima (maiúscula acentuada) e o de baixo
+# (descendentes) — a referência para medir a mancha de tinta de uma linha.
+_INK_REFERENCE = "ÁQKgjpqy"
+
+
+def _ink_box(draw, text: str, font) -> tuple[float, float, float, float] | None:
+    try:
+        return draw.textbbox((0, 0), text, font=font)
+    except (AttributeError, TypeError, Exception):
+        return None
+
+
+def _ink_width(draw, text: str, font) -> float:
+    """Largura só da tinta — é o que faz a caixa branca abraçar o texto.
+
+    O avanço (`textlength`) inclui a folga lateral que a fonte reserva depois
+    do último glifo; dimensionar a caixa por ele deixa uma sobra visível à
+    direita, e a caixa deixa de parecer colada na frase.
+    """
+    box = _ink_box(draw, text, font)
+    if box is None:
+        return _text_width(draw, text, font)
+    return max(0.0, box[2] - box[0])
+
+
+def _ink_left(draw, text: str, font) -> float:
+    """Folga à esquerda do primeiro glifo, descontada ao desenhar."""
+    box = _ink_box(draw, text, font)
+    return box[0] if box else 0.0
 
 
 def _wrap(text: str, font, max_width: int, draw) -> list[str]:
