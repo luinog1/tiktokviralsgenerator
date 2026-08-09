@@ -23,6 +23,27 @@
   --transition: 160ms ease-out;
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  /* Mesma tipografia que o SlideRenderer usa no PNG, para a prévia no navegador
+     bater com o arquivo exportado. Ver static/fonts/README.md. */
+  --font-sticker: "TikTok Sans", var(--font-sans);
+}
+
+/* Os mesmos .ttf que o Pillow carrega em app/services/slide_renderer.py. Caminho
+   relativo a este arquivo, para não depender de onde /static está montado. */
+@font-face {
+  font-family: "TikTok Sans";
+  src: url("../fonts/sticker-regular.ttf") format("truetype");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "TikTok Sans";
+  src: url("../fonts/sticker-bold.ttf") format("truetype");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
 }
 
 * { box-sizing: border-box; }
@@ -595,11 +616,14 @@ a:hover { text-decoration: underline; }
   line-height: 1.55;
   overflow: visible;
   -webkit-line-clamp: none;
+  /* Mesma família e mesmos pesos do PNG: 600 na headline/CTA, 500 no corpo. */
+  font-family: var(--font-sticker);
+  font-weight: 600;
 }
 
 .slide-visual-sticker .slide-headline {
   font-size: 0.95rem;
-  font-weight: 800;
+  font-weight: 600;
 }
 
 .slide-visual-sticker .slide-body-snippet {
@@ -610,7 +634,7 @@ a:hover { text-decoration: underline; }
 
 .slide-visual-sticker .slide-cta-snippet {
   font-size: 0.8rem;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 /* Campo vazio não pode virar uma caixa branca solta sobre a foto. */
