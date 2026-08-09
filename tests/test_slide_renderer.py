@@ -165,6 +165,64 @@ def test_hook_sits_lower_than_value(renderer):
     assert first_white_row("hook") > first_white_row("value")
 
 
+def _white_box_bounds(renderer, slide) -> tuple[int, int, int, int]:
+    """(top, bottom, left, right) das caixas brancas no PNG renderizado."""
+    img = _open(renderer.render_single(slide, None, style="sticker").png_bytes).convert("RGB")
+    rows, cols = [], []
+    for y in range(0, img.height, 4):
+        for x in range(0, img.width, 4):
+            if img.getpixel((x, y)) == (255, 255, 255):
+                rows.append(y)
+                cols.append(x)
+    assert rows, "nenhuma caixa branca encontrada no slide"
+    return min(rows), max(rows), min(cols), max(cols)
+
+
+def test_explicit_position_overrides_role_anchor(renderer):
+    """O arraste na prévia tem que aparecer no PNG, não só na tela."""
+    text = "mesma frase para comparar a posição"
+    default_top, _, _, _ = _white_box_bounds(
+        renderer, SlideContent(headline=text, role="value")
+    )
+    moved_top, moved_bottom, _, _ = _white_box_bounds(
+        renderer, SlideContent(headline=text, role="value", pos_x=0.5, pos_y=0.75)
+    )
+    assert moved_top > default_top
+    # pos_y é o CENTRO do bloco: o meio das caixas fica perto de 75% da altura.
+    center = (moved_top + moved_bottom) / 2
+    assert abs(center - 1350 * 0.75) < 40
+
+
+def test_explicit_position_moves_block_horizontally(renderer):
+    slide = SlideContent(headline="curto", role="value")
+    _, _, left_default, right_default = _white_box_bounds(renderer, slide)
+    slide_left = SlideContent(headline="curto", role="value", pos_x=0.2, pos_y=0.5)
+    _, _, left_moved, right_moved = _white_box_bounds(renderer, slide_left)
+    assert left_moved < left_default
+    assert right_moved < right_default
+
+
+def test_position_is_clamped_inside_the_canvas(renderer):
+    """Arrastar para fora não pode cortar a caixa branca."""
+    slide = SlideContent(
+        headline="uma headline comprida o suficiente para ocupar duas linhas aqui",
+        role="value",
+        pos_x=1.5,
+        pos_y=-0.4,
+    )
+    top, bottom, left, right = _white_box_bounds(renderer, slide)
+    assert top >= 0 and left >= 0
+    assert bottom < 1350 and right < 1080
+
+
+def test_slide_without_position_keeps_role_anchor(renderer):
+    """Compatibilidade: slides antigos (sem pos_x/pos_y) não mudam de lugar."""
+    text = "hook ancorado embaixo como sempre"
+    hook_top, _, _, _ = _white_box_bounds(renderer, SlideContent(headline=text, role="hook"))
+    value_top, _, _, _ = _white_box_bounds(renderer, SlideContent(headline=text, role="value"))
+    assert hook_top > value_top
+
+
 def test_empty_slide_does_not_crash(renderer):
     out = renderer.render_single(
         SlideContent(headline="", body="", call_to_action="", role="value"),

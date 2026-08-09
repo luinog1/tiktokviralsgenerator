@@ -173,6 +173,38 @@ def test_full_flow_with_preview_and_export(client):
     assert "Carrossel" in body
 
 
+def test_text_position_survives_edit_and_changes_the_png(client):
+    """O arraste na prévia só serve se sobreviver ao POST /edit e chegar no PNG
+    exportado — senão é enfeite de tela."""
+    response = client.post("/generate", data={
+        "raw_text": (
+            "Você posta todo dia e não cresce. O problema não é o algoritmo. "
+            "Salva esse post para aplicar hoje mesmo."
+        ),
+        "theme": "crescimento",
+        "language": "pt-BR",
+        "style": "sticker",
+        "slides_count": "3",
+    }, follow_redirects=True)
+    project_id = re.search(r"/preview/([a-f0-9]{12})", response.get_data(as_text=True)).group(1)
+
+    before = client.post(f"/preview/{project_id}/export", data={"format": "png"}).data
+
+    payload = {"project_id": project_id}
+    for i in range(3):
+        payload[f"headlines-{i}"] = "frase fixa para comparar o png"
+        payload[f"text_positions-{i}"] = "0.5,0.2"
+    response = client.post(
+        f"/preview/{project_id}/edit", data=payload, follow_redirects=True
+    )
+    assert response.status_code == 200
+    # A prévia devolve o hidden preenchido, senão o arraste se perde no reload.
+    assert 'value="0.5,0.2"' in response.get_data(as_text=True)
+
+    after = client.post(f"/preview/{project_id}/export", data={"format": "png"}).data
+    assert after != before, "a posição salva não mudou o PNG exportado"
+
+
 def test_rank_endpoint_returns_json(client):
     response = client.post("/generate", data={
         "raw_text": "Texto longo o suficiente para passar na validação do campo raw_text.",

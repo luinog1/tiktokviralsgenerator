@@ -192,7 +192,10 @@ class SlideRenderer:
         if style == "sticker":
             # Sticker desenha suas próprias caixas e não usa numeração nem
             # rodapé de atribuição — a atribuição fica na prévia e no Markdown.
-            self._draw_sticker_layout(draw, headline, body, cta, slide.role)
+            self._draw_sticker_layout(
+                draw, headline, body, cta, slide.role,
+                pos_x=slide.pos_x, pos_y=slide.pos_y,
+            )
             buffer = io.BytesIO()
             canvas.save(buffer, format="PNG", optimize=True)
             return buffer.getvalue()
@@ -243,11 +246,24 @@ class SlideRenderer:
         "cta": 0.38,
     }
 
-    def _draw_sticker_layout(self, draw, headline, body, cta, role: str = "value") -> None:
+    def _draw_sticker_layout(
+        self,
+        draw,
+        headline,
+        body,
+        cta,
+        role: str = "value",
+        *,
+        pos_x: float | None = None,
+        pos_y: float | None = None,
+    ) -> None:
         """Estilo TikTok: cada linha vira uma caixa branca arredondada.
 
         headline e body são blocos separados, com respiro entre eles — é assim
         que o texto aparece nos photo posts nativos do TikTok.
+
+        `pos_x`/`pos_y` (0..1) são o centro do bloco, vindos do
+        reposicionamento manual na prévia. Ausentes, vale a âncora do papel.
         """
         max_width = int(self._w * 0.80)
         gap = int(self._h * 0.045)
@@ -275,7 +291,10 @@ class SlideRenderer:
         total += gap * (len(blocks) - 1)
 
         anchor = self._STICKER_ANCHORS.get(role, 0.18)
-        if role == "hook":
+        if pos_y is not None:
+            # Arrastado na prévia: o valor guardado é o centro do bloco.
+            top = int(self._h * pos_y) - total // 2
+        elif role == "hook":
             # Ancorado pela base: o hook fecha perto do rodapé.
             top = int(self._h * 0.86) - total
         elif role == "cta":
@@ -287,9 +306,16 @@ class SlideRenderer:
         margin = int(self._h * 0.06)
         top = max(margin, min(top, self._h - total - margin))
 
+        cx = self._w // 2 if pos_x is None else int(self._w * pos_x)
+        # O mesmo cuidado no eixo X: a caixa mais larga define o quanto o
+        # bloco pode andar para os lados sem cortar texto.
+        margin_x = int(self._w * 0.04)
+        half_widest = max(self._sticker_block_width(draw, l, f) for l, f in blocks) // 2
+        cx = max(margin_x + half_widest, min(cx, self._w - margin_x - half_widest))
+
         y = top
         for lines, font in blocks:
-            y = self._draw_sticker_block(draw, lines, font, y) + gap
+            y = self._draw_sticker_block(draw, lines, font, y, cx) + gap
 
     def _fit_sticker_font(
         self,
@@ -339,12 +365,21 @@ class SlideRenderer:
         # -2px por linha: as caixas se encostam, sem fresta entre elas.
         return box_h * len(lines) - 2 * (len(lines) - 1)
 
-    def _draw_sticker_block(self, draw, lines, font, top: int) -> int:
-        """Desenha as caixas brancas centralizadas. Devolve o y do rodapé."""
+    def _sticker_block_width(self, draw, lines, font) -> int:
+        """Largura da caixa mais larga do bloco — limita o arraste lateral."""
+        if not lines:
+            return 0
+        pad_x, _, _ = self._sticker_padding(font)
+        widest = max(_text_width(draw, line, font) for line in lines)
+        return int(widest) + pad_x * 2
+
+    def _draw_sticker_block(self, draw, lines, font, top: int, cx: int | None = None) -> int:
+        """Desenha as caixas brancas centralizadas em `cx`. Devolve o y do rodapé."""
         pad_x, pad_y, radius = self._sticker_padding(font)
         line_h = self._sticker_line_height(font)
         box_h = line_h + pad_y * 2
-        cx = self._w // 2
+        if cx is None:
+            cx = self._w // 2
         y = top
         for line in lines:
             text_w = _text_width(draw, line, font)

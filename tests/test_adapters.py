@@ -317,6 +317,65 @@ def test_unsplash_401_explains_the_wrong_key(monkeypatch):
     assert "Access Key" in client.last_fallback_reason
 
 
+def _unsplash_payload(photo_id: str = "abc123") -> dict:
+    return {
+        "total": 400,
+        "total_pages": 40,
+        "results": [{
+            "id": photo_id,
+            "urls": {"regular": f"https://images.unsplash.com/{photo_id}.jpg"},
+            "links": {"html": f"https://unsplash.com/photos/{photo_id}"},
+            "alt_description": "cafe",
+            "user": {"name": "Alguem", "username": "alguem"},
+        }],
+    }
+
+
+def test_unsplash_rotates_pages_across_searches(monkeypatch):
+    """A mesma query devolvia sempre a página 1 — parecia cache, mas era a
+    ordenação por relevância do Unsplash, que é estável. Sortear a página é o
+    que renova as fotos sem o usuário mudar os termos."""
+    from app.adapters.pinterest_client import UnsplashClient
+
+    pages: list[int] = []
+
+    def _capture(*args, **kwargs):
+        pages.append(kwargs["params"]["page"])
+        return _FakeResponse(200, _unsplash_payload())
+
+    monkeypatch.setattr("app.adapters.pinterest_client.requests.get", _capture)
+    client = UnsplashClient(access_key="chave-boa")
+    for _ in range(40):
+        client.search("cafe da manha", limit=6)
+
+    assert len(set(pages)) > 1, "a página não variou entre buscas iguais"
+    assert all(1 <= p <= UnsplashClient._PAGE_WINDOW for p in pages)
+
+
+def test_unsplash_retries_page_one_when_the_drawn_page_is_past_the_end(monkeypatch):
+    """Query com pouco acervo: a página sorteada volta vazia e a busca precisa
+    reentrar dentro do total_pages em vez de cair no gradiente mock."""
+    from app.adapters.pinterest_client import UnsplashClient, is_mock_image
+
+    calls: list[int] = []
+
+    def _thin_catalog(*args, **kwargs):
+        page = kwargs["params"]["page"]
+        calls.append(page)
+        if page > 1:
+            return _FakeResponse(200, {"total": 1, "total_pages": 1, "results": []})
+        return _FakeResponse(200, _unsplash_payload("only-one"))
+
+    monkeypatch.setattr("app.adapters.pinterest_client.requests.get", _thin_catalog)
+    monkeypatch.setattr("app.adapters.pinterest_client.random.randint", lambda a, b: 4)
+
+    images = UnsplashClient(access_key="chave-boa").search("termo raro", limit=6)
+
+    assert calls == [4, 1]
+    assert len(images) == 1
+    assert not is_mock_image(images[0])
+
+
 def test_successful_unsplash_search_leaves_no_fallback_reason(monkeypatch):
     from app.adapters.pinterest_client import UnsplashClient, is_mock_image
 

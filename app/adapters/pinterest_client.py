@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 from dataclasses import dataclass
 from typing import Any, Iterable, Protocol, runtime_checkable
 
@@ -142,6 +143,11 @@ class UnsplashClient:
 
     name = "unsplash"
     _BASE = "https://api.unsplash.com"
+    # /search/photos é determinístico: mesma query + order_by=relevant devolve
+    # sempre a mesma página 1, o que parecia cache do lado do app. Sortear a
+    # página dentro desta janela renova as fotos sem perder relevância — ela
+    # cai rápido depois das primeiras páginas.
+    _PAGE_WINDOW = 5
 
     def __init__(self, access_key: str, timeout: int = 20):
         self._access_key = access_key
@@ -149,26 +155,40 @@ class UnsplashClient:
         # Por que a última busca caiu no mock. Vazio = não caiu.
         self.last_fallback_reason = ""
 
+    def _request(self, query: str, per_page: int, page: int) -> dict[str, Any]:
+        response = requests.get(
+            f"{self._BASE}/search/photos",
+            params={
+                "query": query,
+                "per_page": per_page,
+                "page": page,
+                "orientation": "portrait",  # ideal para TikTok/Instagram
+            },
+            headers={
+                "Authorization": f"Client-ID {self._access_key}",
+                "Accept-Version": "v1",
+            },
+            timeout=self._timeout,
+        )
+        if response.status_code >= 400:
+            logger.warning("Unsplash HTTP %d: %s", response.status_code, response.text[:200])
+            self.last_fallback_reason = _http_reason("Unsplash", response)
+        response.raise_for_status()
+        return response.json() or {}
+
     def search(self, query: str, limit: int = 8) -> list[PinterestImage]:
         self.last_fallback_reason = ""
+        per_page = min(limit, 30)
+        page = random.randint(1, self._PAGE_WINDOW)
         try:
-            response = requests.get(
-                f"{self._BASE}/search/photos",
-                params={
-                    "query": query,
-                    "per_page": min(limit, 30),
-                    "orientation": "portrait",  # ideal para TikTok/Instagram
-                },
-                headers={
-                    "Authorization": f"Client-ID {self._access_key}",
-                    "Accept-Version": "v1",
-                },
-                timeout=self._timeout,
-            )
-            if response.status_code >= 400:
-                logger.warning("Unsplash HTTP %d: %s", response.status_code, response.text[:200])
-                self.last_fallback_reason = _http_reason("Unsplash", response)
-            response.raise_for_status()
+            payload = self._request(query, per_page, page)
+            results = payload.get("results") or []
+            total_pages = int(payload.get("total_pages") or 0)
+            # A página sorteada pode cair além do fim do catálogo desta query.
+            if not results and total_pages:
+                page = ((page - 1) % total_pages) + 1
+                payload = self._request(query, per_page, page)
+                results = payload.get("results") or []
         except requests.Timeout:
             logger.warning("Unsplash timeout — usando fallback mock.")
             self.last_fallback_reason = (
@@ -182,7 +202,6 @@ class UnsplashClient:
             )
             return MockPinterestClient().search(query, limit)
 
-        results = (response.json() or {}).get("results") or []
         images: list[PinterestImage] = []
         for item in results:
             urls = item.get("urls") or {}
@@ -199,7 +218,10 @@ class UnsplashClient:
                     f"(@{user.get('username', 'unsplash')}) no Unsplash"
                 ),
             ))
-        logger.info("Unsplash retornou %d imagens para query=%r", len(images), query[:80])
+        logger.info(
+            "Unsplash retornou %d imagens para query=%r (página %d)",
+            len(images), query[:80], page,
+        )
         return images[:limit]
 
 

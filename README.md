@@ -2,9 +2,22 @@
 
 Aplicação Flask que transforma o texto gerado pelo **goviral.ai** em um carrossel visual pronto para publicar — combinando o texto colado com imagens da API oficial do Pinterest, composição opcional via LLM e renderização estilo **TikTok photo post** (1080×1350, 4:5).
 
-> **Status:** MVP v0.4 — Ready for building
+> **Status:** MVP v0.5 — Ready for building
 > **Stack:** Python 3.11 · Flask 3 · Jinja2 · WTForms · Pillow · Docker
 > **Idioma inicial:** Português (pt-BR)
+
+---
+
+## 🎯 O que mudou na v0.5
+
+- ✅ **Reposicionamento do texto** — no estilo `sticker`, arraste o bloco de texto sobre a foto na prévia. A posição é gravada como fração do canvas (`pos_x`/`pos_y`, o centro do bloco) e o PNG exportado sai igual à prévia. Duplo clique devolve o bloco à âncora do papel no roteiro.
+- 🐛 **Unsplash repetia as mesmas fotos** — `/search/photos` ordena por relevância de forma estável, então a mesma query devolvia sempre a página 1. Parecia cache do app; era determinismo da API. Agora a página é sorteada dentro das 5 primeiras a cada busca, com reentrada quando a query tem acervo curto.
+
+### Sobre o ranking de imagens (não é vision)
+
+O `RANKING_ENABLED` manda **texto** para o LLM: ele recebe título/descrição de cada foto e o `raw_text`, e devolve uma ordem. O modelo **não vê as imagens** — nenhum pixel sai daqui. Qwen, Llama ou GPT no papel de ranker trabalham só com metadado.
+
+Consequência prática: se a foto tem `alt_description` vazio ou genérico, o ranking não tem o que julgar. Ranking multimodal real exigiria baixar as fotos e mandar para um endpoint `/chat/completions` com `image_url` — dá para fazer, mas é outra feature (custo por imagem, latência e um provider que aceite vision).
 
 ---
 
@@ -56,6 +69,7 @@ Reaproveitar essa sessão no servidor significaria repassar seus cookies, ou sej
 - Busca de imagens via API oficial do Pinterest (com fallback mock).
 - Ranking opcional de imagens por endpoint LLM (com fallback determinístico).
 - Prévia do carrossel com slides editáveis (headline, body, CTA por slide) e o papel de cada slide visível.
+- Reposicionamento do bloco de texto por arraste na prévia (estilo `sticker`), refletido no PNG exportado.
 - Galeria miniatura por slide para troca de imagem.
 - Exportação em três formatos:
   - **ZIP** — todos os slides PNG + Markdown anexo.
@@ -97,7 +111,8 @@ python run.py
 4. Preencha tema, estilo (**sticker** recomendado — ou quote/list/tutorial/story) e nº de slides (3/6/9/12).
 5. Clique em "Gerar carrossel" — o sistema estrutura o texto no roteiro viral e busca imagens.
 6. Na prévia, cada slide mostra seu papel (hook, problema, valor, CTA). Edite os textos e escolha a imagem.
-7. Exporte: **ZIP** (carrossel completo) ou **PNG** (slide único) ou **Markdown** (texto).
+7. No estilo `sticker`, **arraste o texto** sobre a foto para reposicionar (duplo clique volta ao padrão). Clique em "Salvar edições" para gravar.
+8. Exporte: **ZIP** (carrossel completo) ou **PNG** (slide único) ou **Markdown** (texto).
 
 ---
 
@@ -132,6 +147,8 @@ Nenhum valor secreto é commitado. Tokens nunca cruzam para o frontend.
 A prioridade é `PINTEREST_ACCESS_TOKEN` → `UNSPLASH_ACCESS_KEY` → **mock** (gradientes SVG sintéticos). Se as duas chaves estiverem vazias, o carrossel sai com gradientes coloridos em vez de fotos.
 
 O `/search/pins/` do Pinterest exige **Standard Access** (aprovação manual da Pinterest). O Unsplash não exige aprovação — crie um app em [unsplash.com/oauth/applications](https://unsplash.com/oauth/applications) e copie a **Access Key**.
+
+**Por que a mesma query devolve fotos diferentes agora:** o `/search/photos` do Unsplash ordena por relevância e essa ordem é estável — a página 1 de "café da manhã" é sempre a mesma. Não havia cache no app; era determinismo da API. Cada busca agora sorteia uma página entre 1 e 5 (`UnsplashClient._PAGE_WINDOW`), o que renova o resultado sem cair em fotos irrelevantes. A página escolhida aparece no log `INFO`. Se a query tem acervo curto e a página sorteada vem vazia, a busca reentra dentro do `total_pages` em vez de cair no gradiente mock.
 
 Para confirmar o que está ativo:
 
@@ -190,15 +207,17 @@ pip install -r requirements-dev.txt
 pytest -v tests/
 ```
 
-Cobertura (66 testes):
+Cobertura (89 testes):
 - **TextComposer** — split em slides, hashtags, texto curto, texto vazio.
 - **Roteiro viral** — distribuição de papéis por nº de slides, ordem `hook…cta`, CTA só no fecho, sem texto duplicado entre headline e body.
 - **SlideRenderer** — resolução de fonte TrueType, auto-ajuste do corpo da fonte, caixas brancas do estilo sticker, ausência de overlay escuro, posição do hook vs. valor, quebra de palavra longa, remoção de emoji.
+- **Reposicionamento** — `pos_x`/`pos_y` vencem a âncora do papel, clamp dentro do canvas, slide sem posição mantém o comportamento antigo.
 - **Pinterest mock** — geração de SVGs sintéticos.
+- **Unsplash** — rotação de páginas entre buscas iguais, reentrada quando a página sorteada passa do fim do acervo, motivo do fallback por status HTTP.
 - **Ranking** — correlação com `raw_text`, fallback sem corpus.
 - **Settings** — mock vs LLM configurado, compatibilidade reversa.
-- **Forms** — validação de `raw_text` (mín 20 chars), `theme`, `style`, `slides_count`.
-- **Rotas** — fluxo completo (`/` → `/create` → `/generate` → `/preview` → `/edit` → `/export` ZIP/PNG/MD).
+- **Forms** — validação de `raw_text` (mín 20 chars), `theme`, `style`, `slides_count`, parse de `text_positions` (inclui valores inválidos).
+- **Rotas** — fluxo completo (`/` → `/create` → `/generate` → `/preview` → `/edit` → `/export` ZIP/PNG/MD) e round-trip da posição arrastada até o PNG.
 
 ---
 
@@ -223,7 +242,7 @@ Cada estilo produz um layout distinto no PNG renderizado:
 
 | Estilo | Layout | Caso de uso |
 |--------|--------|-------------|
-| `sticker` | **(padrão)** Caixas brancas arredondadas por linha, texto preto, foto sem escurecimento. Posição varia pelo papel do slide no roteiro | Photo post nativo do TikTok |
+| `sticker` | **(padrão)** Caixas brancas arredondadas por linha, texto preto, foto sem escurecimento. Posição varia pelo papel do slide no roteiro — e pode ser arrastada na prévia | Photo post nativo do TikTok |
 | `quote` | Aspas decorativas + headline centralizada + body + CTA inferior | Frases inspiradoras, quotes |
 | `list` | Headline à esquerda com barra de destaque + bullets + CTA centralizado | Listas de dicas, passos numerados |
 | `tutorial` | Tag "PASSO A PASSO" + headline + body + CTA em caixa colorida | Tutoriais, como-fazer |
@@ -287,6 +306,7 @@ Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SL
 - [x] LLM possui fallback funcional (timeout → mock).
 - [x] Usuário pode escolher manualmente a imagem de cada slide.
 - [x] Prévia é editável (headline + body + CTA por slide).
+- [x] Posição do texto é ajustável por arraste e o PNG exportado respeita o ajuste.
 - [x] Usuário consegue copiar legenda/hashtags e baixar conteúdo.
 - [x] Origem da imagem aparece na interface e no Markdown exportado.
 - [x] Nenhum segredo aparece no frontend, logs ou repositório.
@@ -302,6 +322,7 @@ Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SL
 2. Validar escopos do token Pinterest para a busca de Pins.
 3. Adicionar mais estilos visuais (antes-e-depois, capa de carrossel, etc.).
 4. Persistência real (DB ou Redis) para multi-worker.
+5. Ranking multimodal (vision) — hoje o LLM ranqueia por metadado textual. Ver "Sobre o ranking de imagens" acima.
 
 ---
 

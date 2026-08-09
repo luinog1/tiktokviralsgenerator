@@ -650,6 +650,31 @@ a:hover { text-decoration: underline; }
 .slide-visual-sticker .slide-text-stack[data-role="hook"] { justify-content: flex-end; }
 .slide-visual-sticker .slide-text-stack[data-role="cta"] { justify-content: center; }
 
+/* --- Reposicionamento manual (arraste) ---
+   Enquanto ninguém arrasta, o bloco segue no fluxo e a âncora do papel manda.
+   No primeiro arraste ele vira absoluto e passa a guardar o próprio centro em
+   fração do canvas — a mesma convenção de pos_x/pos_y no PNG exportado. */
+.slide-visual-sticker .js-draggable-text {
+  cursor: grab;
+  touch-action: none;
+}
+
+.slide-visual-sticker .js-draggable-text.dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.slide-visual-sticker .slide-text-stack.positioned {
+  position: absolute;
+  /* left/top vêm inline, do arraste. 80% = a largura útil dentro do
+     padding de 10% do .slide-visual-sticker, para o texto quebrar igual. */
+  width: 80%;
+  transform: translate(-50%, -50%);
+  margin: 0;
+}
+
+.drag-hint { margin: 8px 14px 0; }
+
 /* Badge do papel no roteiro viral */
 .role-badge {
   margin-left: auto;

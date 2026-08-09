@@ -128,3 +128,32 @@ def test_slide_edit_form_merges_with_original(app):
         # Slide 2 ficou vazio — deve preservar o original
         assert edited[1]["headline"] == "Original 2"
         assert edited[1]["image_id"] == "img-1"
+
+
+def test_slide_edit_form_reads_dragged_text_position(app):
+    """O arraste na prévia chega como "x,y" no hidden e vira pos_x/pos_y."""
+    original_slides = [{"headline": "Original", "role": "hook"}]
+    with app.test_request_context("/", method="POST", data={
+        "headlines-0": "Original",
+        "text_positions-0": "0.42,0.8125",
+    }):
+        form = SlideEditForm()
+        edited = form.to_edited_slides(original_slides)
+        assert edited[0]["pos_x"] == 0.42
+        assert edited[0]["pos_y"] == 0.8125
+
+
+@pytest.mark.parametrize(
+    "raw", ["", "0.5", "abc,0.5", "1.4,0.5", "-0.1,0.2", "0.5,0.5,0.5"]
+)
+def test_slide_edit_form_ignores_invalid_positions(app, raw):
+    """Valor fora de 0..1 ou malformado volta à âncora do papel, não quebra."""
+    original_slides = [{"headline": "Original", "role": "value"}]
+    with app.test_request_context("/", method="POST", data={
+        "headlines-0": "Original",
+        "text_positions-0": raw,
+    }):
+        form = SlideEditForm()
+        edited = form.to_edited_slides(original_slides)
+        assert edited[0]["pos_x"] is None
+        assert edited[0]["pos_y"] is None

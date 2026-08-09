@@ -137,6 +137,12 @@ class SlideEditForm(FlaskForm):
         HiddenField(),
         min_entries=0,
     )
+    # Posição do bloco de texto, gravada pelo arraste na prévia. Formato
+    # "x,y" em fração do canvas (0..1). Vazio = posição padrão do papel.
+    text_positions = FieldList(
+        HiddenField(),
+        min_entries=0,
+    )
 
     def to_edited_slides(self, original_slides: list[dict]) -> list[dict]:
         """Mescla os campos editados com a estrutura original."""
@@ -154,6 +160,10 @@ class SlideEditForm(FlaskForm):
             image_id = (
                 self.selected_image_ids[i].data if i < len(self.selected_image_ids.entries) else ""
             )
+            raw_pos = (
+                self.text_positions[i].data if i < len(self.text_positions.entries) else ""
+            )
+            pos_x, pos_y = _parse_position(raw_pos)
             result.append({
                 "headline": headline or orig.get("headline", ""),
                 "body": body or orig.get("body", ""),
@@ -162,5 +172,24 @@ class SlideEditForm(FlaskForm):
                 "image_id": image_id or orig.get("image_id", ""),
                 # O papel no roteiro viral não é editável — preservar o original.
                 "role": orig.get("role", "value"),
+                # Sem arraste, o campo vem vazio e o slide volta à âncora do papel.
+                "pos_x": pos_x,
+                "pos_y": pos_y,
             })
         return result
+
+
+def _parse_position(raw: str | None) -> tuple[float | None, float | None]:
+    """Lê o par "x,y" gravado pelo arraste na prévia. Inválido → sem posição."""
+    if not raw:
+        return None, None
+    parts = str(raw).split(",")
+    if len(parts) != 2:
+        return None, None
+    try:
+        x, y = float(parts[0]), float(parts[1])
+    except ValueError:
+        return None, None
+    if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+        return None, None
+    return round(x, 4), round(y, 4)

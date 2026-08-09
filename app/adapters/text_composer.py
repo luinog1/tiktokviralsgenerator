@@ -33,6 +33,10 @@ class SlideContent:
     `role` indica a função do slide dentro do roteiro viral
     (hook / problem / agitation / value / proof / cta) — usado pelo
     SlideRenderer para posicionar o texto na imagem.
+
+    `pos_x`/`pos_y` são o centro do bloco de texto em fração do canvas (0..1),
+    definidos quando o usuário arrasta as caixas na prévia. `None` mantém a
+    posição padrão do papel no roteiro.
     """
 
     headline: str
@@ -40,6 +44,8 @@ class SlideContent:
     call_to_action: str = ""
     order: int = 0
     role: str = "value"
+    pos_x: float | None = None
+    pos_y: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -48,6 +54,8 @@ class SlideContent:
             "call_to_action": self.call_to_action,
             "order": self.order,
             "role": self.role,
+            "pos_x": self.pos_x,
+            "pos_y": self.pos_y,
         }
 
 

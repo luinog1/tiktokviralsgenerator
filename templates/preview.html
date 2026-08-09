@@ -50,7 +50,10 @@
         <!-- Prévia visual do slide -->
         <div class="slide-visual{% if style == 'sticker' %} slide-visual-sticker{% endif %}" style="background-image: url('{{ image_for_slide[i].image_url if image_for_slide[i] else '' }}');">
           {% if style != 'sticker' %}<div class="slide-overlay"></div>{% endif %}
-          <div class="slide-text-stack" data-role="{{ slide.role or 'value' }}">
+          <div class="slide-text-stack{% if style == 'sticker' %} js-draggable-text{% endif %}"
+               data-role="{{ slide.role or 'value' }}"
+               data-position="{{ form.text_positions[i].data or '' }}"
+               {% if style == 'sticker' %}title="Arraste para reposicionar · duplo clique para voltar ao padrão"{% endif %}>
             <h3 class="slide-headline">{{ form.headlines[i].data or slide.headline }}</h3>
             {# Sempre no DOM (o editor ao vivo escreve aqui); CSS :empty esconde
                a caixa branca enquanto não houver texto. #}
@@ -59,9 +62,16 @@
           </div>
         </div>
 
+        {% if style == 'sticker' %}
+        <p class="drag-hint small muted">
+          Arraste o texto sobre a foto para reposicionar · duplo clique volta ao padrão
+        </p>
+        {% endif %}
+
         <!-- Campos editáveis -->
         <div class="slide-edit-fields">
           <input type="hidden" name="{{ form.selected_image_ids[i].name }}" value="{{ form.selected_image_ids[i].data }}" class="js-slide-image-id" data-slide="{{ i }}" />
+          <input type="hidden" name="{{ form.text_positions[i].name }}" value="{{ form.text_positions[i].data or '' }}" class="js-slide-text-position" data-slide="{{ i }}" />
 
           <label>Headline</label>
           {{ form.headlines[i](class_="input", placeholder="Título curto do slide") }}
@@ -176,6 +186,92 @@
           c.addEventListener("input", () => ctaDisplay.textContent = c.value);
         }
       }
+    });
+
+    // Reposicionamento: arrastar o bloco de texto sobre a foto.
+    // O valor gravado é o CENTRO do bloco em fração do canvas — a mesma
+    // convenção que o SlideRenderer usa no PNG (pos_x / pos_y).
+    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+    const pointOf = (event) => (event.touches ? event.touches[0] : event);
+
+    document.querySelectorAll(".js-draggable-text").forEach((stack) => {
+      const visual = stack.closest(".slide-visual");
+      const card = stack.closest(".slide-card");
+      const hidden = card ? card.querySelector(".js-slide-text-position") : null;
+      if (!visual || !hidden) return;
+
+      const place = (x, y) => {
+        stack.style.left = `${(x * 100).toFixed(2)}%`;
+        stack.style.top = `${(y * 100).toFixed(2)}%`;
+        stack.classList.add("positioned");
+      };
+
+      // Posição já salva no projeto: aplicar antes de qualquer arraste.
+      const saved = (stack.dataset.position || "").split(",");
+      if (saved.length === 2) {
+        const sx = parseFloat(saved[0]);
+        const sy = parseFloat(saved[1]);
+        if (!Number.isNaN(sx) && !Number.isNaN(sy)) place(sx, sy);
+      }
+
+      let dragging = false;
+      let grabX = 0;
+      let grabY = 0;
+
+      const start = (event) => {
+        const box = visual.getBoundingClientRect();
+        const rect = stack.getBoundingClientRect();
+        // Primeiro arraste: fixar o bloco exatamente onde o CSS o deixou,
+        // senão ele salta para o centro ao virar absoluto.
+        if (!stack.classList.contains("positioned")) {
+          place(
+            (rect.left + rect.width / 2 - box.left) / box.width,
+            (rect.top + rect.height / 2 - box.top) / box.height
+          );
+        }
+        const p = pointOf(event);
+        grabX = p.clientX - (rect.left + rect.width / 2);
+        grabY = p.clientY - (rect.top + rect.height / 2);
+        dragging = true;
+        stack.classList.add("dragging");
+        event.preventDefault();
+      };
+
+      const move = (event) => {
+        if (!dragging) return;
+        const box = visual.getBoundingClientRect();
+        const rect = stack.getBoundingClientRect();
+        const p = pointOf(event);
+        // Margem = meio bloco: nenhuma caixa branca sai da foto.
+        const marginX = rect.width / 2 / box.width;
+        const marginY = rect.height / 2 / box.height;
+        const x = clamp((p.clientX - grabX - box.left) / box.width, marginX, 1 - marginX);
+        const y = clamp((p.clientY - grabY - box.top) / box.height, marginY, 1 - marginY);
+        place(x, y);
+        hidden.value = `${x.toFixed(4)},${y.toFixed(4)}`;
+        event.preventDefault();
+      };
+
+      const end = () => {
+        if (!dragging) return;
+        dragging = false;
+        stack.classList.remove("dragging");
+      };
+
+      stack.addEventListener("mousedown", start);
+      stack.addEventListener("touchstart", start, { passive: false });
+      document.addEventListener("mousemove", move);
+      document.addEventListener("touchmove", move, { passive: false });
+      document.addEventListener("mouseup", end);
+      document.addEventListener("touchend", end);
+
+      // Duplo clique devolve o bloco à âncora do papel no roteiro.
+      stack.addEventListener("dblclick", () => {
+        stack.classList.remove("positioned");
+        stack.style.left = "";
+        stack.style.top = "";
+        hidden.value = "";
+      });
     });
 
     // Copy buttons
