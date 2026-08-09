@@ -11,7 +11,7 @@ Aplicação Flask que transforma o texto gerado pelo **goviral.ai** em um carros
 ## 🎯 O que mudou na v0.4
 
 - ✅ **Estilo `sticker` (padrão)** — texto preto em caixas brancas arredondadas, uma por linha, sobre a foto sem escurecer. É o formato de legenda nativo dos photo posts do TikTok.
-- ✅ **Poppins empacotada** — `static/fonts/sticker-{bold,regular}.ttf` (SemiBold/Medium). Sem isso o servidor caía na Liberation Sans, e a tipografia era o que ainda destoava do visual do TikTok.
+- ✅ **TikTok Sans empacotada** — `static/fonts/sticker-{bold,regular}.ttf` (SemiBold/Medium), a tipografia oficial do TikTok. Sem isso o servidor caía na Liberation Sans, e a tipografia era o que ainda destoava do visual dos photo posts.
 - ✅ **Roteiro viral** — os slides são ordenados na estrutura de 3 atos (`hook → problema → agitação → valor → prova → CTA`). Cada slide carrega um `role`, e o `role` decide onde o texto é posicionado na imagem.
 - ✅ **Prompt de roteirista no Groq** — o LLM reordena e encurta o texto colado seguindo os tipos de hook e as regras de escrita de script viral, em vez de só fatiar o texto.
 - 🐛 **Fontes no Docker** — a imagem `python:3.11-slim` não traz nenhuma fonte TrueType, então o Pillow caía na fonte bitmap padrão e renderizava os slides com texto minúsculo. Agora `fonts-liberation` e `fonts-dejavu-core` são instaladas.
@@ -233,20 +233,22 @@ Cada estilo produz um layout distinto no PNG renderizado:
 
 ### Tipografia
 
-O projeto **empacota Poppins** em `static/fonts/` — a geométrica que aproxima os slides da tipografia dos photo posts do TikTok:
+O projeto **empacota TikTok Sans** em `static/fonts/` — a tipografia oficial do TikTok:
 
-| Arquivo | Peso | Usado em |
-|---------|------|----------|
-| `static/fonts/sticker-bold.ttf` | Poppins **SemiBold** | headline e CTA |
-| `static/fonts/sticker-regular.ttf` | Poppins **Medium** | corpo do texto |
+| Arquivo | Corte | Usado em |
+|---------|-------|----------|
+| `static/fonts/sticker-bold.ttf` | TikTok Sans **SemiBold** (wght 600) | headline e CTA |
+| `static/fonts/sticker-regular.ttf` | TikTok Sans **Medium** (wght 500) | corpo do texto |
 
 SemiBold/Medium em vez de Bold/Regular porque o texto nativo do TikTok é de peso médio — Bold fica pesado demais dentro da caixa branca e Regular fica fino demais sobre a foto.
 
+O Google Fonts publica TikTok Sans **apenas como fonte variável**, com default **Light 300**. Os arquivos aqui são instâncias estáticas geradas com `fontTools` — soltar o `.ttf` variável cru renderizaria os slides finos demais, sem erro nenhum. O processo está documentado em [static/fonts/README.md](static/fonts/README.md).
+
 A detecção segue esta ordem: `static/fonts/` → Liberation/DejaVu (Linux) → Segoe UI/Arial (Windows) → Arial (macOS). Ou seja, os arquivos empacotados vencem as fontes do sistema em qualquer ambiente — o render fica igual no Docker e no dev local.
 
-Para trocar a tipografia, substitua esses dois `.ttf` ou aponte `SLIDE_FONT_BOLD` / `SLIDE_FONT_REGULAR` para outros caminhos.
+Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SLIDE_FONT_BOLD` / `SLIDE_FONT_REGULAR` para outros caminhos.
 
-> Poppins é distribuída sob SIL Open Font License 1.1 (`static/fonts/OFL.txt`).
+> TikTok Sans é distribuída sob SIL Open Font License 1.1 (`static/fonts/OFL.txt`), copyright 2024 TikTok Inc.
 
 > **Nota:** emoji é removido do PNG (as fontes do sistema não têm esses glifos e o Pillow desenharia um retângulo vazio). O emoji continua na legenda e no Markdown exportado.
 

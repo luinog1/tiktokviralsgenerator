@@ -38,7 +38,7 @@ def test_resolves_a_truetype_font():
     assert regular, "nenhuma fonte regular encontrada no sistema"
 
 
-def test_bundled_poppins_wins_over_system_fonts(monkeypatch):
+def test_bundled_tiktok_sans_wins_over_system_fonts(monkeypatch):
     """A tipografia é o que aproxima o slide do photo post do TikTok.
 
     Se os .ttf empacotados saírem do repo (ou do build Docker), a resolução cai
@@ -51,8 +51,30 @@ def test_bundled_poppins_wins_over_system_fonts(monkeypatch):
     monkeypatch.delenv("SLIDE_FONT_REGULAR", raising=False)
 
     bold, regular = _resolve_font_paths()
-    assert ImageFont.truetype(bold, 40).getname() == ("Poppins", "SemiBold")
-    assert ImageFont.truetype(regular, 40).getname() == ("Poppins", "Medium")
+    assert ImageFont.truetype(bold, 40).getname() == ("TikTok Sans", "SemiBold")
+    assert ImageFont.truetype(regular, 40).getname() == ("TikTok Sans", "Medium")
+
+
+def test_bundled_fonts_are_static_instances():
+    """O Google Fonts publica TikTok Sans só como variável, com default Light 300.
+
+    Se alguém trocar os arquivos pelo .ttf variável cru, o Pillow carrega a
+    instância default e os slides saem finos demais — sem erro nenhum.
+    """
+    from PIL import ImageFont
+
+    bold, regular = _resolve_font_paths()
+    for path in (bold, regular):
+        font = ImageFont.truetype(path, 40)
+        with pytest.raises(OSError):
+            font.get_variation_axes()
+
+    # E os dois cortes precisam ser realmente diferentes: instanciar os dois no
+    # mesmo peso passaria nas checagens de nome acima sem mudar o desenho.
+    text = "there were weeks i was posting"
+    assert ImageFont.truetype(bold, 54).getlength(text) > ImageFont.truetype(
+        regular, 54
+    ).getlength(text)
 
 
 def test_fonts_respect_requested_size(renderer):
