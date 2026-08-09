@@ -14,7 +14,9 @@ from wtforms import (
     StringField,
     TextAreaField,
 )
-from wtforms.validators import DataRequired, Length, NumberRange, Optional
+from wtforms.validators import DataRequired, Length, Optional, ValidationError
+
+from app.adapters.text_composer import viral_script_roles
 
 
 STYLE_CHOICES = [
@@ -38,12 +40,46 @@ LANGUAGE_CHOICES = [
     ("es-ES", "Español (España)"),
 ]
 
+MODE_CHOICES = [
+    ("script", "Roteiro por imagem — eu escrevo o texto de cada foto"),
+    ("auto", "Automático — o LLM organiza o texto colado em slides"),
+]
+
+# Teto de campos de roteiro. Bate com a maior opção de SLIDES_CHOICES: mais que
+# isso o formulário renderiza campos que o carrossel nunca usaria.
+MAX_SCRIPT_BLOCKS = 12
+
+# Rótulo de cada campo do roteiro, pelo papel do slide naquela posição. O papel
+# vem de `viral_script_roles`, a mesma função que decide o papel real no
+# carrossel — assim o que o formulário promete é o que o render entrega.
+_ROLE_HINTS = {
+    "hook": "hook — para o scroll",
+    "problem": "problema — nomeia a dor",
+    "agitation": "agitação — amplia a consequência",
+    "value": "valor — uma ideia só",
+    "proof": "prova — número ou resultado",
+    "cta": "CTA — uma ação clara",
+}
+
+
+def script_field_labels(slides_count: int) -> list[str]:
+    """"Imagem 1 (hook — …)" para cada campo, na ordem do carrossel."""
+    roles = viral_script_roles(slides_count)
+    return [
+        f"Imagem {i + 1} ({_ROLE_HINTS.get(role, role)})"
+        for i, role in enumerate(roles)
+    ]
+
 
 class BriefingForm(FlaskForm):
     """Briefing para o carrossel.
 
-    O campo `raw_text` é obrigatório e deve receber o conteúdo que o usuário
-    copiou da ferramenta goviral.ai (https://content.goviralai.app/).
+    Dois modos, mutuamente exclusivos na validação:
+
+    - `script` (padrão): um campo por imagem. O usuário decide o que vai em cada
+      foto e em que ordem; nenhum LLM reescreve por cima.
+    - `auto`: o campo `raw_text` recebe o texto do goviral.ai inteiro e o
+      composer (LLM ou mock) fatia em slides.
     """
 
     theme = StringField(
@@ -51,12 +87,29 @@ class BriefingForm(FlaskForm):
         validators=[DataRequired(message="Tema é obrigatório."), Length(max=200)],
         render_kw={"placeholder": "Ex.: rotina matinal produtiva", "autofocus": True},
     )
+    script_mode = SelectField(
+        "Como montar os slides *",
+        choices=MODE_CHOICES,
+        default="script",
+        validators=[DataRequired(message="Selecione como montar os slides.")],
+    )
+    # Um bloco por imagem, na ordem em que as imagens aparecem no carrossel.
+    # `max_entries` é o teto; o número real de campos vem do slides_count e a
+    # FieldList lê do POST quantos vierem.
+    slide_scripts = FieldList(
+        TextAreaField(
+            "Roteiro da imagem",
+            validators=[Optional(), Length(max=600)],
+        ),
+        min_entries=0,
+        max_entries=MAX_SCRIPT_BLOCKS,
+    )
     raw_text = TextAreaField(
-        "Texto do goviral.ai *",
-        validators=[
-            DataRequired(message="Cole o texto gerado no goviral.ai."),
-            Length(min=20, max=6000, message="Texto deve ter entre 20 e 6000 caracteres."),
-        ],
+        "Texto do goviral.ai",
+        # Sem DataRequired: no modo `script` este campo fica vazio de propósito.
+        # A obrigatoriedade por modo está em `validate_raw_text` — um
+        # `Optional()` aqui abortaria a cadeia e o validador nunca rodaria.
+        validators=[Length(max=6000)],
         render_kw={
             "placeholder": (
                 "Cole aqui o texto pronto gerado em https://content.goviralai.app/ "
@@ -84,6 +137,9 @@ class BriefingForm(FlaskForm):
     slides_count = SelectField(
         "Nº de slides *",
         choices=SLIDES_CHOICES,
+        # Sem default explícito o select abre em "3" enquanto o formulário
+        # renderiza 6 campos de roteiro — o usuário vê uma contradição.
+        default="6",
         validators=[DataRequired(message="Selecione o número de slides.")],
     )
     keywords = FieldList(
@@ -96,20 +152,76 @@ class BriefingForm(FlaskForm):
         max_entries=8,
     )
 
+    @property
+    def is_script_mode(self) -> bool:
+        """Modo roteiro (um bloco por imagem) vs. modo automático (texto único).
+
+        O seletor manda quando o formulário o enviou — é a escolha explícita do
+        usuário, e ele pode ter deixado texto nos campos do outro modo. Quando o
+        campo não vem no POST (cliente antigo, teste que só manda `raw_text`), o
+        modo é inferido do que foi preenchido: exigir um campo que o cliente nem
+        sabe que existe transformaria uma requisição válida em 422.
+        """
+        if self.script_mode.raw_data:
+            return (self.script_mode.data or "script") == "script"
+        if self._filled_blocks():
+            return True
+        return not (self.raw_text.data or "").strip()
+
+    def _filled_blocks(self) -> list[str]:
+        return [
+            (entry.data or "").strip()
+            for entry in self.slide_scripts.entries
+            if (entry.data or "").strip()
+        ]
+
+    def script_blocks(self) -> list[str]:
+        """Blocos preenchidos, na ordem dos campos. Vazios ficam de fora."""
+        return self._filled_blocks() if self.is_script_mode else []
+
+    def validate_raw_text(self, field: TextAreaField) -> None:
+        """Obrigatório só no modo automático — é a entrada dele."""
+        if self.is_script_mode:
+            return
+        text = (field.data or "").strip()
+        if not text:
+            raise ValidationError("Cole o texto gerado no goviral.ai.")
+        if len(text) < 20:
+            raise ValidationError(
+                "Texto deve ter entre 20 e 6000 caracteres."
+            )
+
+    def validate_slide_scripts(self, field: FieldList) -> None:
+        """No modo roteiro, o hook e mais um slide são o mínimo viável."""
+        if not self.is_script_mode:
+            return
+        filled = len(self.script_blocks())
+        if filled < 2:
+            raise ValidationError(
+                "Escreva o roteiro de pelo menos 2 imagens (a primeira é o hook)."
+            )
+
     def to_briefing(self) -> dict:
         keywords = [
             (k.data or "").strip()
             for k in self.keywords.entries
             if (k.data or "").strip()
         ]
+        blocks = self.script_blocks()
+        # No modo roteiro o raw_text costuma vir vazio, mas a busca de imagens, o
+        # ranking e a visão usam esse campo como corpus do tema. Os blocos são o
+        # melhor corpus disponível ali.
+        raw_text = (self.raw_text.data or "").strip() or "\n\n".join(blocks)
         return {
             "theme": (self.theme.data or "").strip(),
-            "raw_text": (self.raw_text.data or "").strip(),
+            "raw_text": raw_text,
             "niche": (self.niche.data or "").strip(),
             "language": (self.language.data or "pt-BR").strip(),
             "style": (self.style.data or "quote").strip(),
             "slides_count": int(self.slides_count.data or 6),
             "keywords": keywords,
+            "script_mode": "script" if self.is_script_mode else "auto",
+            "script_blocks": blocks,
         }
 
 
@@ -177,6 +289,18 @@ class SlideEditForm(FlaskForm):
                 "pos_y": pos_y,
             })
         return result
+
+
+__all__ = [
+    "BriefingForm",
+    "SlideEditForm",
+    "STYLE_CHOICES",
+    "SLIDES_CHOICES",
+    "LANGUAGE_CHOICES",
+    "MODE_CHOICES",
+    "MAX_SCRIPT_BLOCKS",
+    "script_field_labels",
+]
 
 
 def _parse_position(raw: str | None) -> tuple[float | None, float | None]:

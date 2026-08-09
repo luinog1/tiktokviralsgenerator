@@ -16,18 +16,10 @@
     {{ form.csrf_token }}
 
     <div class="field">
-      <label for="raw_text">{{ form.raw_text.label.text }}</label>
-      <div class="textarea-meta">
-        <span id="char-counter">0</span> / 6000 caracteres
-        <a href="{{ goviral_url }}" target="_blank" rel="noopener" class="small muted" style="margin-left: auto;">
-          Abrir goviral.ai ↗
-        </a>
-      </div>
-      {{ form.raw_text(id="raw_text", class_="input textarea textarea-lg") }}
-      {% if form.raw_text.errors %}
-        <ul class="errors">
-          {% for err in form.raw_text.errors %}<li>{{ err }}</li>{% endfor %}
-        </ul>
+      <label for="script_mode">{{ form.script_mode.label.text }}</label>
+      {{ form.script_mode(id="script_mode", class_="input") }}
+      {% if form.script_mode.errors %}
+        <ul class="errors">{% for err in form.script_mode.errors %}<li>{{ err }}</li>{% endfor %}</ul>
       {% endif %}
     </div>
 
@@ -57,6 +49,76 @@
         {{ form.language(id="language", class_="input") }}
         {% if form.language.errors %}<ul class="errors">{% for err in form.language.errors %}<li>{{ err }}</li>{% endfor %}</ul>{% endif %}
       </div>
+    </div>
+
+    <!-- Modo roteiro: um campo por imagem, na ordem do carrossel -->
+    <fieldset class="script-blocks" id="script-blocks">
+      <legend>Roteiro por imagem</legend>
+      <p class="small muted">
+        Cole o texto do <a href="{{ goviral_url }}" target="_blank" rel="noopener">viral.app</a>
+        distribuindo um bloco por foto, na ordem em que as imagens vão aparecer.
+        A <strong>primeira linha</strong> de cada bloco vira o texto grande; o
+        resto vira o texto de apoio.
+        {% if casting_enabled %}
+          A imagem 1 é o hook e recebe automaticamente uma foto com
+          {{ 'mulher' if hook_subject == 'woman' else 'pessoa' }}; as demais recebem
+          cenário (estética, viagem, comida).
+        {% endif %}
+      </p>
+      {% if form.slide_scripts.errors %}
+        <ul class="errors">
+          {% for err in form.slide_scripts.errors %}
+            {% if err is string %}<li>{{ err }}</li>{% endif %}
+          {% endfor %}
+        </ul>
+      {% endif %}
+      <details class="script-paste" id="script-paste">
+        <summary>Colar o roteiro inteiro e distribuir</summary>
+        <p class="small muted">
+          Cole tudo de uma vez. Entende "Imagem 2:", "3.", linhas separadas por
+          "---" e parágrafos em branco. Depois de distribuir, os campos abaixo
+          continuam editáveis.
+        </p>
+        <textarea id="script-paste-input" class="input textarea" rows="6"
+                  placeholder="Imagem 1: ...&#10;&#10;Imagem 2: ..."></textarea>
+        <div class="script-paste-actions">
+          <button type="button" class="btn btn-ghost" id="script-paste-apply">
+            Distribuir pelas imagens
+          </button>
+          <span class="small muted" id="script-paste-status" role="status" aria-live="polite"></span>
+        </div>
+      </details>
+      <div class="script-list" id="script-list">
+        {% for entry in form.slide_scripts %}
+        <div class="script-row" data-index="{{ loop.index0 }}">
+          <label for="{{ entry.id }}" class="script-label">
+            {{ current_labels[loop.index0] if loop.index0 < current_labels|length else 'Imagem ' ~ loop.index }}
+          </label>
+          {{ entry(id=entry.id, class_="input textarea script-input", rows=3,
+                   placeholder="primeira linha = texto grande · linhas seguintes = apoio") }}
+          {% if entry.errors %}
+            <ul class="errors">{% for err in entry.errors %}<li>{{ err }}</li>{% endfor %}</ul>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </fieldset>
+
+    <!-- Modo automático: o texto inteiro numa caixa só -->
+    <div class="field" id="raw-text-field">
+      <label for="raw_text">{{ form.raw_text.label.text }}</label>
+      <div class="textarea-meta">
+        <span id="char-counter">0</span> / 6000 caracteres
+        <a href="{{ goviral_url }}" target="_blank" rel="noopener" class="small muted" style="margin-left: auto;">
+          Abrir goviral.ai ↗
+        </a>
+      </div>
+      {{ form.raw_text(id="raw_text", class_="input textarea textarea-lg") }}
+      {% if form.raw_text.errors %}
+        <ul class="errors">
+          {% for err in form.raw_text.errors %}<li>{{ err }}</li>{% endfor %}
+        </ul>
+      {% endif %}
     </div>
 
     <div class="field">
@@ -92,6 +154,11 @@
 
 {% block extra_scripts %}
 <script>
+  // Rótulos por nº de slides, vindos de viral_script_roles no servidor — o
+  // navegador não reimplementa a distribuição de papéis.
+  const SCRIPT_LABELS = {{ script_labels | tojson }};
+</script>
+<script>
   document.addEventListener("DOMContentLoaded", () => {
     // Char counter
     const ta = document.getElementById("raw_text");
@@ -101,6 +168,105 @@
       ta.addEventListener("input", update);
       update();
     }
+
+    // Modo de montagem: roteiro por imagem ou texto colado
+    const modeSelect = document.getElementById("script_mode");
+    const scriptBlocks = document.getElementById("script-blocks");
+    const rawTextField = document.getElementById("raw-text-field");
+    const slidesSelect = document.getElementById("slides_count");
+    const scriptList = document.getElementById("script-list");
+
+    const applyMode = () => {
+      if (!modeSelect || !scriptBlocks || !rawTextField) return;
+      const isScript = modeSelect.value === "script";
+      scriptBlocks.hidden = !isScript;
+      rawTextField.hidden = isScript;
+    };
+
+    // Um campo por imagem: acompanha o nº de slides e reusa os rótulos do
+    // servidor. Campos já preenchidos não são destruídos ao mudar o número.
+    const syncScriptFields = () => {
+      if (!scriptList || !slidesSelect) return;
+      const labels = SCRIPT_LABELS[slidesSelect.value] || [];
+      const target = labels.length || Number(slidesSelect.value) || 6;
+      const template = scriptList.querySelector(".script-row");
+      if (!template) return;
+
+      while (scriptList.children.length > target) {
+        scriptList.lastElementChild.remove();
+      }
+      while (scriptList.children.length < target) {
+        const index = scriptList.children.length;
+        const clone = template.cloneNode(true);
+        clone.dataset.index = String(index);
+        const area = clone.querySelector("textarea");
+        const label = clone.querySelector(".script-label");
+        if (area) {
+          area.value = "";
+          area.name = `slide_scripts-${index}`;
+          area.id = `slide_scripts-${index}`;
+          if (label) label.setAttribute("for", area.id);
+        }
+        clone.querySelectorAll(".errors").forEach((el) => el.remove());
+        scriptList.appendChild(clone);
+      }
+
+      Array.from(scriptList.children).forEach((row, index) => {
+        const label = row.querySelector(".script-label");
+        if (label && labels[index]) label.textContent = labels[index];
+      });
+    };
+
+    modeSelect?.addEventListener("change", applyMode);
+    slidesSelect?.addEventListener("change", syncScriptFields);
+    applyMode();
+    syncScriptFields();
+
+    // "Distribuir": a divisão acontece no servidor (mesma função que o POST
+    // /generate usa), então colar aqui e colar nos campos dão o mesmo resultado.
+    const pasteInput = document.getElementById("script-paste-input");
+    const pasteApply = document.getElementById("script-paste-apply");
+    const pasteStatus = document.getElementById("script-paste-status");
+    const csrf = document.querySelector('input[name="csrf_token"]')?.value || "";
+
+    pasteApply?.addEventListener("click", async () => {
+      const rawText = (pasteInput?.value || "").trim();
+      if (!rawText) {
+        if (pasteStatus) pasteStatus.textContent = "Cole o roteiro primeiro.";
+        return;
+      }
+      pasteApply.disabled = true;
+      if (pasteStatus) pasteStatus.textContent = "Distribuindo…";
+      try {
+        const response = await fetch("{{ url_for('create.script_split') }}", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-CSRFToken": csrf },
+          body: JSON.stringify({
+            raw_text: rawText,
+            slides_count: slidesSelect?.value || 6,
+          }),
+        });
+        if (!response.ok) throw new Error(String(response.status));
+        const data = await response.json();
+        const blocks = data.blocks || [];
+        const areas = scriptList.querySelectorAll("textarea");
+        // Só os campos que receberam bloco são sobrescritos: quem já tinha
+        // escrito no campo 5 não perde o texto porque o roteiro tinha 4 partes.
+        blocks.forEach((block, i) => {
+          if (areas[i]) areas[i].value = block;
+        });
+        if (pasteStatus) {
+          const extra = data.found > blocks.length
+            ? ` (${data.found - blocks.length} sobraram — aumente o nº de slides)`
+            : "";
+          pasteStatus.textContent = `${blocks.length} imagem(ns) preenchida(s)${extra}.`;
+        }
+      } catch (err) {
+        if (pasteStatus) pasteStatus.textContent = "Não foi possível distribuir.";
+      } finally {
+        pasteApply.disabled = false;
+      }
+    });
 
     // Keywords dinâmicos
     const list = document.getElementById("keywords-list");

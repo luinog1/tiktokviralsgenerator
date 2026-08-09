@@ -27,6 +27,8 @@ def health():
             "images": images_provider,
             "pinterest": "configured" if settings.pinterest_configured else "mock",
             "ranking": settings.llm_provider if settings.ranking_enabled else "disabled",
+            "vision": "configured" if settings.vision_configured else "off",
+            "casting": settings.hook_subject if settings.casting_enabled else "off",
             "goviralai": "external_manual",
         },
         "carousel": {
@@ -49,6 +51,15 @@ def health():
             "llm_model_value": settings.llm_model or "(empty)",
             "llm_fully_configured": settings.llm_configured,
             "ranking_enabled_env": settings.ranking_enabled,
+        },
+        # Diagnóstico de visão — booleanos + o id do modelo, que não é segredo
+        # e é a causa mais comum de 404 quando o prefixo da org falta.
+        "vision_diagnostic": {
+            "vision_enabled_env": settings.vision_enabled,
+            "vision_api_base_url_set": bool(settings.vision_api_base_url),
+            "vision_api_key_set": bool(settings.vision_api_key),
+            "vision_model_value": settings.vision_model or "(empty)",
+            "vision_fully_configured": settings.vision_configured,
         },
     }
     if current_app.config.get("DEBUG"):

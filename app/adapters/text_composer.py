@@ -46,6 +46,10 @@ class SlideContent:
     role: str = "value"
     pos_x: float | None = None
     pos_y: float | None = None
+    # Foto escolhida para este slide. Preenchido pelo casting (hook = pessoa,
+    # demais = cenário) e depois pela galeria da prévia. Vazio = a prévia cai na
+    # rotação `i % len(images)`.
+    image_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +60,7 @@ class SlideContent:
             "role": self.role,
             "pos_x": self.pos_x,
             "pos_y": self.pos_y,
+            "image_id": self.image_id,
         }
 
 

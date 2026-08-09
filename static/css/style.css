@@ -804,3 +804,61 @@ a:hover { text-decoration: underline; }
   .nav a { font-size: 0.88rem; }
   .brand-text { display: none; }
 }
+
+/* ---------- Roteiro por imagem (modo manual) ---------- */
+
+.script-blocks {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  padding: 16px;
+  background: var(--surface-2);
+}
+
+.script-blocks legend { font-weight: 600; padding: 0 8px; }
+.script-list { display: grid; gap: 12px; margin-top: 12px; }
+
+.script-row {
+  display: grid;
+  gap: 6px;
+  padding-left: 12px;
+  border-left: 3px solid var(--border);
+}
+
+/* O primeiro campo é o hook: o slide que segura o scroll ganha destaque. */
+.script-row:first-child { border-left-color: #ffe66d; }
+
+.script-label { font-weight: 600; font-size: 0.85rem; }
+.script-input { min-height: 72px; }
+
+.script-paste {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.script-paste summary { cursor: pointer; font-weight: 600; font-size: 0.9rem; }
+.script-paste textarea { margin-top: 8px; }
+
+.script-paste-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.script-modes { display: grid; gap: 8px; }
+.script-mode-option { display: flex; gap: 8px; align-items: flex-start; }
+.script-mode-option input { margin-top: 4px; }
+.script-mode-option span { font-weight: 500; }
+
+.subject-badge {
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}

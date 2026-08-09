@@ -2,22 +2,82 @@
 
 Aplicação Flask que transforma o texto gerado pelo **goviral.ai** em um carrossel visual pronto para publicar — combinando o texto colado com imagens da API oficial do Pinterest, composição opcional via LLM e renderização estilo **TikTok photo post** (1080×1350, 4:5).
 
-> **Status:** MVP v0.5 — Ready for building
+> **Status:** MVP v0.6 — Ready for building
 > **Stack:** Python 3.11 · Flask 3 · Jinja2 · WTForms · Pillow · Docker
 > **Idioma inicial:** Português (pt-BR)
+
+---
+
+## 🎯 O que mudou na v0.6
+
+- ✅ **Roteiro por imagem** — em vez de colar o texto inteiro e deixar o LLM fatiar, o formulário agora tem um campo por foto do carrossel: `Imagem 1 (hook)`, `Imagem 2 (problema)`, e assim por diante. O que você cola em cada campo é **exatamente** o que sai naquela imagem, na ordem em que você escolheu. Nenhum LLM reescreve por cima. O modo antigo (colar tudo e deixar fatiar) continua ali, agora como uma escolha explícita.
+- ✅ **Colar e distribuir** — se o roteiro do goviral.ai vem numerado (`1.`, `Slide 2:`, `---`), cole tudo na caixa de distribuição e o app separa os blocos nos campos certos. Os marcadores são removidos e o texto fica editável antes de gerar.
+- ✅ **Casting de imagens por papel** — a imagem 1 recebe uma foto **com pessoa** e as demais recebem cenário (estética, viagem, comida). É o formato dos photo posts de lifestyle que performam: um rosto para parar o scroll, o resto como b-roll. Configurável em `HOOK_SUBJECT`.
+- ✅ **Visão classifica o assunto** — com `VISION_ENABLED=true`, o VLM (Qwen-VL na ModelScope, por exemplo) diz se cada foto tem mulher, homem, pessoa genérica ou só cenário. Esse sinal manda no casting. Sem chave configurada, o casting continua funcionando por busca separada + metadado.
+
+### O roteiro por imagem na prática
+
+```
+Imagem 1 (hook)      →  "ninguém acorda às 5h por disciplina"
+Imagem 2 (problema)  →  "acorda porque dormiu às 21h
+                          ninguém fala essa parte"
+Imagem 3 (CTA)       →  "salva pra começar amanhã"
+```
+
+A primeira linha de cada bloco vira a **headline** (o texto grande); as linhas seguintes viram o **corpo**. Uma linha só = só headline. O arraste do bloco de texto sobre a foto continua igual — o modo roteiro decide *o quê* e *onde na sequência*, o arraste decide *onde na foto*.
+
+Blocos em branco são descartados e o carrossel encolhe: se você abrir 6 campos e preencher 4, saem 4 slides. No modo roteiro o app **não** inventa CTA nem hashtag que você não escreveu — o texto é seu.
+
+### Casting: hook com pessoa, resto com cenário
+
+O problema: uma busca por `"rotina matinal"` devolve xícara, caderno e janela na primeira página — quase nunca o retrato que um hook precisa. Ranquear melhor não resolve, porque a foto de pessoa simplesmente não está no resultado.
+
+A solução tem três camadas, cada uma cobrindo a falha da anterior:
+
+| Camada | Sinal | Vale quando |
+| --- | --- | --- |
+| **1. Busca em dois pools** | A query roda duas vezes: `"<tema> woman portrait lifestyle aesthetic"` e `"<tema> aesthetic lifestyle travel food"`. Cada foto lembra de qual pool veio. | Sempre — é o que garante que existe foto de pessoa no conjunto. |
+| **2. Metadado** | Palavras no título/descrição (`woman`, `girl`, `portrait`, `mulher`…). O Unsplash descreve as fotos como "a woman sitting on a bed". | Sem VLM configurado. |
+| **3. Visão** | O VLM olha a foto e classifica o assunto. Vence as outras duas: a busca de retrato às vezes devolve paisagem, e o metadado às vezes está vazio. | `VISION_ENABLED=true`. |
+
+O resultado é gravado como `image_id` em cada slide — o mesmo campo que a galeria da prévia edita. Ou seja: o casting é um **palpite inicial**, não uma trava. Discordou? Troque a foto na prévia com um clique.
+
+Se nenhuma foto de pessoa aparecer em nenhuma das camadas, o slide de hook fica com a foto melhor ranqueada e um aviso amarelo aparece na prévia — o app diz o que não conseguiu em vez de fingir que deu certo.
 
 ---
 
 ## 🎯 O que mudou na v0.5
 
 - ✅ **Reposicionamento do texto** — no estilo `sticker`, arraste o bloco de texto sobre a foto na prévia. A posição é gravada como fração do canvas (`pos_x`/`pos_y`, o centro do bloco) e o PNG exportado sai igual à prévia. Duplo clique devolve o bloco à âncora do papel no roteiro.
+- ✅ **Qualificação de imagem por visão (opcional)** — com `VISION_ENABLED=true`, um VLM olha as fotos e devolve nota de relevância **e** a região limpa para o texto, que vira `pos_x`/`pos_y` automaticamente. Funciona em qualquer endpoint OpenAI-compatible com `image_url` (ex.: ModelScope API-Inference, que tem tier gratuito). Desligado por padrão; qualquer falha cai no ranking textual.
 - 🐛 **Unsplash repetia as mesmas fotos** — `/search/photos` ordena por relevância de forma estável, então a mesma query devolvia sempre a página 1. Parecia cache do app; era determinismo da API. Agora a página é sorteada dentro das 5 primeiras a cada busca, com reentrada quando a query tem acervo curto.
 
-### Sobre o ranking de imagens (não é vision)
+### Como as imagens são qualificadas — dois modos
 
-O `RANKING_ENABLED` manda **texto** para o LLM: ele recebe título/descrição de cada foto e o `raw_text`, e devolve uma ordem. O modelo **não vê as imagens** — nenhum pixel sai daqui. Qwen, Llama ou GPT no papel de ranker trabalham só com metadado.
+**Padrão (`RANKING_ENABLED`) — só texto.** O LLM recebe título/descrição de cada foto mais o `raw_text` e devolve uma ordem. Nenhum pixel sai daqui. Consequência: quando o `alt_description` do Unsplash vem vazio ou genérico, o ranking julga quase no escuro. Qwen, Llama ou GPT nesse papel trabalham só com metadado.
 
-Consequência prática: se a foto tem `alt_description` vazio ou genérico, o ranking não tem o que julgar. Ranking multimodal real exigiria baixar as fotos e mandar para um endpoint `/chat/completions` com `image_url` — dá para fazer, mas é outra feature (custo por imagem, latência e um provider que aceite vision).
+**Opcional (`VISION_ENABLED`) — o modelo olha a foto.** Um VLM recebe as imagens e devolve três coisas:
+
+1. **Nota de relevância** olhando a imagem — penaliza foto com texto/logo embutido, muito escura ou poluída no centro, coisas que o metadado nunca revela.
+2. **Onde o texto cabe.** O estilo sticker desenha caixas brancas por cima da foto. Sem visão, a posição vem da âncora do papel no roteiro e às vezes cai em cima do rosto. O modelo escolhe uma zona limpa (`top`, `bottom-left`, …) e ela vira `pos_x`/`pos_y` no slide — o mesmo campo que o arraste na prévia grava, então você continua corrigindo por cima.
+3. **O assunto da foto** (`woman`, `man`, `person`, `scene`) — é o sinal mais forte do [casting](#casting-hook-com-pessoa-resto-com-cenário), que decide qual foto abre o carrossel. Uma leitura da foto de banco, não identificação de indivíduo: serve só para saber se há alguém em cena.
+
+Pedir uma **zona nomeada** em vez de coordenadas cruas é o que torna a saída estável: VLM erra número solto, mas acerta "topo/meio/base".
+
+Precisa de um endpoint OpenAI-compatible que aceite `image_url`. O **ModelScope API-Inference** serve e tem tier gratuito (~2.000 chamadas/dia, exige conta vinculada à Alibaba Cloud):
+
+```bash
+VISION_ENABLED=true
+VISION_API_BASE_URL=https://api-inference.modelscope.cn/v1
+VISION_API_KEY=ms-xxxxxxxx
+VISION_MODEL=Qwen/Qwen3-VL-235B-A22B-Instruct   # ou PaddlePaddle/ERNIE-4.5-VL-28B-A3B-Paddle
+```
+
+O ID é **namespaced por organização** no ModelScope. Sem o prefixo, a resposta é 404 e a aplicação cai no ranking textual sem quebrar — confira em `/health` → `vision_diagnostic`.
+
+Dois cuidados de projeto: as fotos vão na versão **pequena** (~400px, `urls.small`) porque 400px basta para julgar composição e a versão cheia multiplicaria os tokens de visão; e no máximo **8 imagens por chamada**, já que a chamada é síncrona dentro do `POST /generate`. Timeout, JSON ilegível, `image_id` alucinado ou visão desligada — qualquer um desses cai no ranking textual de sempre. Com `VISION_ENABLED=true`, considere subir o `REQUEST_TIMEOUT_SECONDS` para ~60.
+
+Modelos **text-to-image** (Qwen-Image, FLUX, Stable Diffusion) são outra categoria: eles *geram* a foto em vez de qualificar, e substituiriam o Unsplash. Não estão implementados.
 
 ---
 
@@ -62,12 +122,15 @@ Reaproveitar essa sessão no servidor significaria repassar seus cookies, ou sej
 ## ✨ Funcionalidades do MVP
 
 - Landing page com link direto para o goviral.ai (login Discord manual).
-- Formulário com textarea para o texto colado + tema, estilo, nº de slides, idioma e keywords.
-- Composição de carrossel via TextComposer (mock determinístico ou LLM).
+- Formulário com **um campo de roteiro por imagem** (rotulado pelo papel do slide) ou textarea única, mais tema, estilo, nº de slides, idioma e keywords.
+- Botão "distribuir" que divide um roteiro colado entre os campos, entendendo `Imagem N:`, `2.`, `---` e parágrafos.
+- **Casting por papel**: imagem 1 sempre com pessoa (hook), demais com cenário — via busca separada, metadado da foto e visão.
+- Composição de carrossel via TextComposer (mock determinístico ou LLM); no modo por imagem, sem LLM no caminho do texto.
 - Ordenação no roteiro viral de 3 atos (`hook → problema → agitação → valor → prova → CTA`).
 - Renderização estilo sticker do TikTok — caixas brancas arredondadas com texto preto.
 - Busca de imagens via API oficial do Pinterest (com fallback mock).
 - Ranking opcional de imagens por endpoint LLM (com fallback determinístico).
+- Qualificação por **visão** opcional (VLM): nota olhando a foto + posição automática do texto + assunto da foto (pessoa/cenário) para o casting.
 - Prévia do carrossel com slides editáveis (headline, body, CTA por slide) e o papel de cada slide visível.
 - Reposicionamento do bloco de texto por arraste na prévia (estilo `sticker`), refletido no PNG exportado.
 - Galeria miniatura por slide para troca de imagem.
@@ -107,10 +170,13 @@ python run.py
 
 1. Acesse [https://content.goviralai.app/](https://content.goviralai.app/) (login Discord) **em outra aba**.
 2. Gere o texto pronto lá.
-3. No ViralPost Studio (`http://localhost:5000/create`), **cole o texto** no campo "Texto do goviral.ai".
-4. Preencha tema, estilo (**sticker** recomendado — ou quote/list/tutorial/story) e nº de slides (3/6/9/12).
-5. Clique em "Gerar carrossel" — o sistema estrutura o texto no roteiro viral e busca imagens.
-6. Na prévia, cada slide mostra seu papel (hook, problema, valor, CTA). Edite os textos e escolha a imagem.
+3. No ViralPost Studio (`http://localhost:5000/create`), escolha o nº de slides (3/6/9/12) e como entregar o texto:
+   - **Roteiro por imagem** (padrão) — um campo por foto, rotulado com o papel do slide: *Imagem 1 (hook)*, *Imagem 2 (problema)*, e assim por diante. A primeira linha de cada campo vira o texto grande; o resto vira o apoio. Nada de LLM no meio: o que você escreve é o que sai.
+   - **Distribuir de uma vez** — dentro do modo por imagem, abra "Colar o roteiro inteiro e distribuir", cole tudo e clique no botão. O servidor divide por `Imagem N:`, `2.`, `---` ou parágrafos e preenche os campos, que continuam editáveis.
+   - **Texto corrido** — cole tudo numa caixa só e deixe o LLM estruturar, como antes.
+4. Preencha tema, estilo (**sticker** recomendado — ou quote/list/tutorial/story) e as palavras-chave da busca de imagens.
+5. Clique em "Gerar carrossel". Com o casting ligado, a imagem 1 recebe uma foto com pessoa e as demais recebem cenário.
+6. Na prévia, cada slide mostra seu papel e de onde veio a foto do hook (visão, metadado ou busca). Edite os textos e troque a imagem pela galeria.
 7. No estilo `sticker`, **arraste o texto** sobre a foto para reposicionar (duplo clique volta ao padrão). Clique em "Salvar edições" para gravar.
 8. Exporte: **ZIP** (carrossel completo) ou **PNG** (slide único) ou **Markdown** (texto).
 
@@ -131,6 +197,13 @@ python run.py
 | `LLM_API_KEY` | (vazio) | Token do LLM (ex.: `gsk_...` para Groq) |
 | `LLM_MODEL` | (vazio) | Nome do modelo. Ex.: `qwen/qwen3.6-27b`, `llama-3.3-70b-versatile`, `gpt-4o-mini` |
 | `RANKING_ENABLED` | `true` | Liga/desliga ranking de imagens (reusa LLM) |
+| `HOOK_SUBJECT` | `woman` | Casting da imagem 1: `woman`, `person` ou `off` (desliga o casting) |
+| `HOOK_QUERY_HINTS` | (auto) | Termos da busca de retrato. Vazio → `<HOOK_SUBJECT> portrait lifestyle aesthetic` |
+| `SCENE_QUERY_HINTS` | `aesthetic lifestyle travel food` | Termos da busca das imagens secundárias |
+| `VISION_ENABLED` | `false` | Ranking **olhando** a foto + posição automática do texto |
+| `VISION_API_BASE_URL` | (herda `LLM_*`) | Endpoint OpenAI-compatible com suporte a `image_url` |
+| `VISION_API_KEY` | (herda `LLM_*`) | Token do provider de visão |
+| `VISION_MODEL` | (vazio) | ID do VLM. **Sem default** — ex.: `Qwen/Qwen3-VL-235B-A22B-Instruct` |
 | `REQUEST_TIMEOUT_SECONDS` | `20` | Timeout HTTP |
 | `SESSION_TTL_MINUTES` | `60` | TTL dos projetos em memória |
 | `SLIDE_WIDTH` | `1080` | Largura do slide PNG |
@@ -155,7 +228,10 @@ Para confirmar o que está ativo:
 ```bash
 curl -s http://localhost:5000/health | python -m json.tool
 # providers.images        → "pinterest_v5" | "unsplash" | "mock"
+# providers.casting       → "woman" | "person" | "off"
+# providers.vision        → "configured" | "off"
 # images_diagnostic.using_mock → true quando o carrossel sai com gradiente
+# vision_diagnostic.vision_model_value → o id do VLM, causa comum de 404
 ```
 
 > O `.env` é lido pelo `python-dotenv` no app factory, então `python run.py` e `docker compose up` enxergam as mesmas variáveis. Variáveis reais do ambiente (Render, docker-compose) têm prioridade sobre o arquivo.
@@ -173,15 +249,18 @@ curl -s http://localhost:5000/health | python -m json.tool
 │   ├── forms.py               # WTForms (BriefingForm + SlideEditForm)
 │   ├── adapters/
 │   │   ├── text_composer.py    # TextComposer (mock + LLM)
-│   │   ├── pinterest_client.py # Pinterest v5 + Mock
-│   │   └── ranking_provider.py # Inference (LLM) + Mock
+│   │   ├── script_parser.py    # Roteiro por imagem — blocos → slides (sem LLM)
+│   │   ├── pinterest_client.py # Pinterest v5 + Unsplash + Mock
+│   │   ├── ranking_provider.py # Inference (LLM) + Mock
+│   │   └── vision_provider.py  # VLM — nota + posição do texto + assunto da foto
 │   ├── services/
 │   │   ├── generation.py      # Orquestração do carrossel
+│   │   ├── casting.py         # Qual foto em qual slide (hook = pessoa)
 │   │   ├── session_store.py   # Persistência leve (TTL)
 │   │   └── slide_renderer.py  # Pillow — overlay de texto em imagem
 │   └── routes/
 │       ├── main.py            # /
-│       ├── create.py          # /create
+│       ├── create.py          # /create, /script/split
 │       ├── generate.py        # /generate, /rank
 │       ├── preview.py         # /preview/<id>, /edit, /export
 │       └── health.py         # /health
@@ -207,17 +286,22 @@ pip install -r requirements-dev.txt
 pytest -v tests/
 ```
 
-Cobertura (89 testes):
+Cobertura (190 testes):
 - **TextComposer** — split em slides, hashtags, texto curto, texto vazio.
+- **Roteiro por imagem** — primeira linha vira headline e o resto o body, rótulos `Imagem N:` removidos, campo vazio herda o papel, blocos além do nº de slides descartados, hashtags e CTA preservados.
+- **Distribuição do roteiro colado** — separadores `Imagem N:`, `2.`, `---` e parágrafo; teto no nº de slides com o total encontrado reportado; texto vazio e contagem inválida.
+- **Casting** — hook recebe pessoa por visão, por metadado (`alt_description`) e por pool de busca, nessa ordem; parte do corpo ("woman's hands") não conta como retrato; fotos de cenário nunca caem no slide 1; aviso quando não há foto com pessoa; `HOOK_SUBJECT=off` volta à rotação.
 - **Roteiro viral** — distribuição de papéis por nº de slides, ordem `hook…cta`, CTA só no fecho, sem texto duplicado entre headline e body.
 - **SlideRenderer** — resolução de fonte TrueType, auto-ajuste do corpo da fonte, caixas brancas do estilo sticker, ausência de overlay escuro, posição do hook vs. valor, quebra de palavra longa, remoção de emoji.
 - **Reposicionamento** — `pos_x`/`pos_y` vencem a âncora do papel, clamp dentro do canvas, slide sem posição mantém o comportamento antigo.
 - **Pinterest mock** — geração de SVGs sintéticos.
 - **Unsplash** — rotação de páginas entre buscas iguais, reentrada quando a página sorteada passa do fim do acervo, motivo do fallback por status HTTP.
 - **Ranking** — correlação com `raw_text`, fallback sem corpus.
-- **Settings** — mock vs LLM configurado, compatibilidade reversa.
-- **Forms** — validação de `raw_text` (mín 20 chars), `theme`, `style`, `slides_count`, parse de `text_positions` (inclui valores inválidos).
-- **Rotas** — fluxo completo (`/` → `/create` → `/generate` → `/preview` → `/edit` → `/export` ZIP/PNG/MD) e round-trip da posição arrastada até o PNG.
+- **Visão (VLM)** — envia a thumb e não a foto cheia, teto de imagens por chamada equilibrado entre os dois pools, parse de âncora → `pos_*` e de `subject` (com sinônimos: `female`/`girl` → `woman`), `<think>`/cerca markdown na resposta, nota fora de faixa, `image_id` alucinado ou duplicado, gradiente mock sem chamada, timeout e 404 caindo no ranking textual.
+- **Busca em dois pools** — uma query por papel, cada foto marcada com sua origem, fotos repetidas entre os pools deduplicadas, falha de uma busca não derruba a geração.
+- **Settings** — mock vs LLM configurado, compatibilidade reversa, visão desligada por default e herança das credenciais `LLM_*`, `HOOK_*`/`SCENE_QUERY_HINTS` customizáveis.
+- **Forms** — validação de `raw_text` (mín 20 chars) só no modo automático, mínimo de 2 blocos no modo roteiro, `theme`, `style`, `slides_count`, parse de `text_positions` (inclui valores inválidos), POST legado sem o campo de modo continua válido.
+- **Rotas** — fluxo completo (`/` → `/create` → `/generate` → `/preview` → `/edit` → `/export` ZIP/PNG/MD), round-trip da posição arrastada até o PNG, ordem dos blocos preservada da submissão à prévia, e `POST /script/split`.
 
 ---
 
@@ -226,7 +310,8 @@ Cobertura (89 testes):
 | Método | Rota | Descrição |
 |--------|------|-----------|
 | GET | `/` | Landing page + status |
-| GET | `/create` | Formulário de briefing (texto colado) |
+| GET | `/create` | Formulário de briefing (roteiro por imagem ou texto corrido) |
+| POST | `/script/split` | Divide um roteiro colado em blocos por imagem (JSON) |
 | POST | `/generate` | Executa composição do carrossel |
 | POST | `/rank` | Reordena imagens (JSON) |
 | GET | `/preview/<id>` | Exibe carrossel com slides editáveis |
@@ -305,6 +390,9 @@ Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SL
 - [x] LLM pode ser desligado (provider=mock).
 - [x] LLM possui fallback funcional (timeout → mock).
 - [x] Usuário pode escolher manualmente a imagem de cada slide.
+- [x] Roteiro pode ser escrito imagem por imagem, com um campo por foto do carrossel.
+- [x] Roteiro colado inteiro é distribuído entre os campos e continua editável.
+- [x] Primeira foto recebe pessoa; as demais, cenário — com aviso quando não dá.
 - [x] Prévia é editável (headline + body + CTA por slide).
 - [x] Posição do texto é ajustável por arraste e o PNG exportado respeita o ajuste.
 - [x] Usuário consegue copiar legenda/hashtags e baixar conteúdo.
@@ -318,11 +406,12 @@ Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SL
 
 ## 🛣️ Próximos passos
 
-1. Configurar `LLM_API_BASE_URL` e `LLM_API_KEY` (ex.: Groq) para ativar o roteiro viral com LLM real. Modelos Groq suportados: `qwen/qwen3.6-27b`, `llama-3.3-70b-versatile`, `llama-3.1-8b-instant`, `mixtral-8x7b-32768`, `gemma2-9b-it` (consulte https://console.groq.com/docs/models para a lista atual).
-2. Validar escopos do token Pinterest para a busca de Pins.
-3. Adicionar mais estilos visuais (antes-e-depois, capa de carrossel, etc.).
+1. Configurar `VISION_API_KEY` + `VISION_MODEL` na ModelScope (Qwen-VL) para o casting decidir por visão em vez de busca/metadado. É a única peça pendente das features desta versão — o resto já funciona sem chave.
+2. Configurar `LLM_API_BASE_URL` e `LLM_API_KEY` (ex.: Groq) para ativar o roteiro viral com LLM real. Modelos Groq suportados: `qwen/qwen3.6-27b`, `llama-3.3-70b-versatile`, `llama-3.1-8b-instant`, `mixtral-8x7b-32768`, `gemma2-9b-it` (consulte https://console.groq.com/docs/models para a lista atual).
+3. Validar escopos do token Pinterest para a busca de Pins.
+4. Adicionar mais estilos visuais (antes-e-depois, capa de carrossel, etc.).
 4. Persistência real (DB ou Redis) para multi-worker.
-5. Ranking multimodal (vision) — hoje o LLM ranqueia por metadado textual. Ver "Sobre o ranking de imagens" acima.
+5. Mover a chamada de visão para fora do `POST /generate` (fila ou refinamento sob demanda na prévia), tirando a latência do VLM do caminho da primeira renderização.
 
 ---
 

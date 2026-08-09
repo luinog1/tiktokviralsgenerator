@@ -1,0 +1,324 @@
+"""Testes do ranking por visão (VLM) e do auto-posicionamento do texto."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+import requests
+
+from app.adapters.pinterest_client import PinterestImage
+from app.adapters.vision_provider import (
+    VisionRankingProvider,
+    VisionVerdict,
+    build_vision_provider,
+)
+from app.config import Settings
+from app.services.generation import GenerationService
+
+
+def _settings(**over) -> Settings:
+    env = {
+        "VISION_ENABLED": "true",
+        "VISION_API_BASE_URL": "https://api-inference.modelscope.cn/v1",
+        "VISION_API_KEY": "ms-fake-key",
+        "VISION_MODEL": "Qwen/Qwen3-VL-235B-A22B-Instruct",
+        "REQUEST_TIMEOUT_SECONDS": "5",
+    }
+    env.update(over)
+    return Settings.from_env(env)
+
+
+def _photos(n: int = 2) -> list[PinterestImage]:
+    return [
+        PinterestImage(
+            image_id=f"ph{i}",
+            image_url=f"https://images.unsplash.com/full-{i}",
+            thumb_url=f"https://images.unsplash.com/small-{i}",
+            source_url="https://unsplash.com/p",
+            title="",
+        )
+        for i in range(n)
+    ]
+
+
+class _Resp:
+    def __init__(self, payload, status=200, text=""):
+        self._payload = payload
+        self.status_code = status
+        self.text = text or json.dumps(payload)
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("no json")
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"HTTP {self.status_code}")
+
+
+def _reply(content: str, status: int = 200) -> _Resp:
+    return _Resp({"choices": [{"message": {"content": content}}]}, status=status)
+
+
+# ---------------------------------------------------------------- configuração
+def test_vision_off_by_default():
+    assert build_vision_provider(Settings.from_env({})) is None
+
+
+def test_vision_needs_model_id():
+    """Sem VISION_MODEL não há default seguro — 404 só gastaria tempo."""
+    assert build_vision_provider(_settings(VISION_MODEL="")) is None
+
+
+def test_vision_inherits_llm_credentials():
+    """Quem usa o mesmo endpoint para texto e visão não repete a chave."""
+    settings = Settings.from_env({
+        "LLM_API_BASE_URL": "https://api-inference.modelscope.cn/v1",
+        "LLM_API_KEY": "ms-key",
+        "VISION_ENABLED": "true",
+        "VISION_MODEL": "PaddlePaddle/ERNIE-4.5-VL-28B-A3B-Paddle",
+    })
+    assert settings.vision_configured
+    assert settings.vision_api_key == "ms-key"
+
+
+def test_vision_enabled_alone_is_not_configured():
+    assert not Settings.from_env({"VISION_ENABLED": "true"}).vision_configured
+
+
+# --------------------------------------------------------------- chamada feita
+def test_sends_thumb_url_not_full_image(monkeypatch):
+    """A versão pequena basta para julgar composição e corta tokens de visão."""
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["json"] = kwargs["json"]
+        captured["headers"] = kwargs["headers"]
+        return _reply('{"results":[{"image_id":"ph0","score":0.9,"anchor":"top"}]}')
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    VisionRankingProvider(_settings()).rank({"theme": "café"}, _photos(1))
+
+    content = captured["json"]["messages"][1]["content"]
+    urls = [p["image_url"]["url"] for p in content if p["type"] == "image_url"]
+    assert urls == ["https://images.unsplash.com/small-0"]
+    assert captured["headers"]["Authorization"] == "Bearer ms-fake-key"
+
+
+def test_mock_gradients_skip_the_call(monkeypatch):
+    """Gradiente sintético não tem o que julgar visualmente."""
+    def boom(*a, **k):
+        pytest.fail("não deveria chamar o endpoint de visão")
+
+    monkeypatch.setattr(requests, "post", boom)
+    mock_img = PinterestImage(
+        image_id="mock-1-abc",
+        image_url="data:image/svg+xml;utf8,<svg/>",
+        source_url="",
+        title="",
+    )
+    assert VisionRankingProvider(_settings()).rank({}, [mock_img]) == []
+
+
+def test_caps_images_per_call(monkeypatch):
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["json"] = kwargs["json"]
+        return _reply('{"results":[]}')
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    VisionRankingProvider(_settings()).rank({}, _photos(20))
+
+    content = captured["json"]["messages"][1]["content"]
+    images = [p for p in content if p["type"] == "image_url"]
+    assert len(images) == VisionRankingProvider.MAX_IMAGES
+
+
+# ------------------------------------------------------------------- parsing
+def test_parses_score_and_anchor(monkeypatch):
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _reply(
+        '{"results":[{"image_id":"ph0","score":0.82,"anchor":"bottom-left",'
+        '"reason":"topo tem o rosto"}]}'
+    ))
+    verdicts = VisionRankingProvider(_settings()).rank({}, _photos(1))
+    assert len(verdicts) == 1
+    assert verdicts[0].score == pytest.approx(0.82)
+    assert verdicts[0].position == (0.34, 0.76)
+
+
+def test_strips_thinking_block_and_markdown_fence(monkeypatch):
+    """Qwen3-VL thinking e ERNIE abrem com <think>; o JSON vem depois."""
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _reply(
+        '<think>A foto 0 tem espaço no topo...</think>\n'
+        '```json\n{"results":[{"image_id":"ph0","score":0.7,"anchor":"top"}]}\n```'
+    ))
+    verdicts = VisionRankingProvider(_settings()).rank({}, _photos(1))
+    assert [v.anchor for v in verdicts] == ["top"]
+
+
+def test_clamps_out_of_range_scores(monkeypatch):
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _reply(
+        '{"results":[{"image_id":"ph0","score":7.5,"anchor":"top"},'
+        '{"image_id":"ph1","score":"abc","anchor":"top"}]}'
+    ))
+    verdicts = VisionRankingProvider(_settings()).rank({}, _photos(2))
+    assert [v.score for v in verdicts] == [1.0, 0.0]
+
+
+def test_unknown_anchor_leaves_position_unset(monkeypatch):
+    """Âncora inventada não vira coordenada — o papel do slide decide."""
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _reply(
+        '{"results":[{"image_id":"ph0","score":0.5,"anchor":"nordeste"}]}'
+    ))
+    verdicts = VisionRankingProvider(_settings()).rank({}, _photos(1))
+    assert verdicts[0].position is None
+
+
+def test_ignores_hallucinated_and_duplicate_ids(monkeypatch):
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _reply(
+        '{"results":[{"image_id":"ph0","score":0.9,"anchor":"top"},'
+        '{"image_id":"ph0","score":0.1,"anchor":"bottom"},'
+        '{"image_id":"nao-existe","score":0.99,"anchor":"top"}]}'
+    ))
+    verdicts = VisionRankingProvider(_settings()).rank({}, _photos(2))
+    assert [(v.image_id, v.score) for v in verdicts] == [("ph0", 0.9)]
+
+
+# ----------------------------------------------- assunto da foto (casting)
+def test_parses_the_subject_of_each_photo(monkeypatch):
+    """O casting precisa saber o que tem na foto — o metadado do Unsplash não
+    diz de forma confiável."""
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _reply(
+        '{"results":[{"image_id":"ph0","score":0.8,"anchor":"top","subject":"woman"},'
+        '{"image_id":"ph1","score":0.7,"anchor":"top","subject":"scene"}]}'
+    ))
+    verdicts = VisionRankingProvider(_settings()).rank({}, _photos(2))
+    assert [v.subject for v in verdicts] == ["woman", "scene"]
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("female", "woman"), ("girl", "woman"), ("mulher", "woman"),
+    ("male", "man"), ("people", "person"), ("portrait", "person"),
+    ("food", "scene"), ("landscape", "scene"), ("no-person", "scene"),
+    ("WOMAN", "woman"), (" woman ", "woman"),
+])
+def test_accepts_the_synonyms_vlms_actually_return(monkeypatch, raw, expected):
+    """Um "female" correto virando "" faria o casting perder o único sinal
+    confiável que tinha sobre aquela foto."""
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _reply(
+        '{"results":[{"image_id":"ph0","score":0.5,"anchor":"top",'
+        f'"subject":"{raw}"}}]}}'
+    ))
+    verdicts = VisionRankingProvider(_settings()).rank({}, _photos(1))
+    assert verdicts[0].subject == expected
+
+
+def test_unknown_subject_is_dropped_not_guessed(monkeypatch):
+    """Assunto inventado vira "" e o casting cai no sinal do pool."""
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _reply(
+        '{"results":[{"image_id":"ph0","score":0.5,"anchor":"top","subject":"alienígena"}]}'
+    ))
+    verdicts = VisionRankingProvider(_settings()).rank({}, _photos(1))
+    assert verdicts[0].subject == ""
+
+
+def test_missing_subject_does_not_break_the_verdict(monkeypatch):
+    """Modelo antigo (ou que ignorou o campo) ainda serve para nota e âncora."""
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _reply(
+        '{"results":[{"image_id":"ph0","score":0.6,"anchor":"bottom"}]}'
+    ))
+    verdicts = VisionRankingProvider(_settings()).rank({}, _photos(1))
+    assert verdicts[0].subject == ""
+    assert verdicts[0].position == (0.5, 0.76)
+
+
+def test_cap_keeps_both_pools_represented(monkeypatch):
+    """Com casting, a lista chega como [retratos] + [cenários]. Um corte cru
+    gastaria a cota toda no primeiro pool e o casting classificaria metade das
+    fotos no escuro."""
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["json"] = kwargs["json"]
+        return _reply('{"results":[]}')
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    hook_photos = _photos(6)
+    scene_photos = _photos(6)
+    for i, img in enumerate(hook_photos):
+        img.image_id, img.pool = f"hook{i}", "hook"
+    for i, img in enumerate(scene_photos):
+        img.image_id, img.pool = f"scene{i}", "scene"
+
+    VisionRankingProvider(_settings()).rank({}, hook_photos + scene_photos)
+
+    sent = captured["json"]["messages"][1]["content"][0]["text"]
+    assert "hook0" in sent and "scene0" in sent
+
+
+# ------------------------------------------------------------------ fallbacks
+@pytest.mark.parametrize("content", ["desculpe, não consigo", "", "{quebrado"])
+def test_unusable_answer_falls_back(monkeypatch, content):
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _reply(content))
+    assert VisionRankingProvider(_settings()).rank({}, _photos(1)) == []
+
+
+def test_timeout_falls_back(monkeypatch):
+    def timeout(*a, **k):
+        raise requests.Timeout()
+
+    monkeypatch.setattr(requests, "post", timeout)
+    assert VisionRankingProvider(_settings()).rank({}, _photos(1)) == []
+
+
+def test_http_error_falls_back(monkeypatch):
+    """404 no ModelScope é quase sempre model id sem o prefixo da org."""
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp(
+        {"error": "model not found"}, status=404
+    ))
+    assert VisionRankingProvider(_settings()).rank({}, _photos(1)) == []
+
+
+# -------------------------------------------- posição aplicada nos slides
+def test_positions_land_on_slides_by_image_rotation():
+    """Slide i usa a imagem i % len — a mesma rotação do renderer e da prévia."""
+    slides = [{"headline": f"s{i}"} for i in range(3)]
+    images = _photos(2)
+    verdicts = [
+        VisionVerdict(image_id="ph0", score=0.9, anchor="top"),
+        VisionVerdict(image_id="ph1", score=0.8, anchor="bottom"),
+    ]
+    GenerationService._apply_vision_positions(slides, images, verdicts)
+
+    assert (slides[0]["pos_x"], slides[0]["pos_y"]) == (0.5, 0.22)
+    assert (slides[1]["pos_x"], slides[1]["pos_y"]) == (0.5, 0.76)
+    assert (slides[2]["pos_x"], slides[2]["pos_y"]) == (0.5, 0.22)
+
+
+def test_unjudged_image_keeps_role_anchor():
+    """Sem veredicto utilizável, o slide não ganha pos_* e o papel decide."""
+    slides = [{"headline": "s0"}]
+    GenerationService._apply_vision_positions(
+        slides, _photos(1), [VisionVerdict(image_id="ph0", score=0.5, anchor="")]
+    )
+    assert "pos_y" not in slides[0]
+
+
+def test_position_follows_the_image_the_casting_chose():
+    """Depois do casting o slide tem image_id próprio — a posição tem que vir
+    da foto que está de fato no slide, não da rotação."""
+    slides = [
+        {"headline": "s0", "image_id": "ph1"},
+        {"headline": "s1", "image_id": "ph0"},
+    ]
+    verdicts = [
+        VisionVerdict(image_id="ph0", score=0.9, anchor="top"),
+        VisionVerdict(image_id="ph1", score=0.8, anchor="bottom"),
+    ]
+    GenerationService._apply_vision_positions(slides, _photos(2), verdicts)
+
+    assert (slides[0]["pos_x"], slides[0]["pos_y"]) == (0.5, 0.76)
+    assert (slides[1]["pos_x"], slides[1]["pos_y"]) == (0.5, 0.22)

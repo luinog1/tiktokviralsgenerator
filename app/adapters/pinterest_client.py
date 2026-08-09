@@ -67,6 +67,14 @@ class PinterestImage:
     title: str
     description: str = ""
     attribution_text: str = ""
+    # Versão pequena (~400px) da mesma foto. O VLM julga composição muito bem
+    # nessa resolução, e mandar a `image_url` cheia multiplicaria os tokens de
+    # visão sem melhorar o julgamento. Vazio → cai na image_url.
+    thumb_url: str = ""
+    # De qual busca a foto veio: "hook" (query de retrato) ou "scene" (query de
+    # estética). É o sinal que permite ao casting reservar o slide 1 para uma
+    # pessoa sem depender de VLM configurado. Vazio = busca única, sem casting.
+    pool: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -76,7 +84,13 @@ class PinterestImage:
             "title": self.title,
             "description": self.description,
             "attribution_text": self.attribution_text,
+            "thumb_url": self.thumb_url,
+            "pool": self.pool,
         }
+
+    @property
+    def vision_url(self) -> str:
+        return self.thumb_url or self.image_url
 
 
 @runtime_checkable
@@ -209,6 +223,7 @@ class UnsplashClient:
             images.append(PinterestImage(
                 image_id=str(item.get("id") or ""),
                 image_url=urls.get("regular") or urls.get("full") or "",
+                thumb_url=urls.get("small") or urls.get("thumb") or "",
                 source_url=item.get("links", {}).get("html") or "",
                 title=str(item.get("alt_description") or query)[:200],
                 description=str(item.get("description") or "")[:500],

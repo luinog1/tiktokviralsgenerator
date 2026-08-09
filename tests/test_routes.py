@@ -119,6 +119,66 @@ def test_preview_unknown_project_returns_404(client):
     assert response.status_code == 404
 
 
+# --------------------------------- modo roteiro: um bloco por imagem, na ordem
+def test_create_form_renders_the_script_section(client):
+    body = client.get("/create").data.decode("utf-8")
+    assert "slide_scripts-0" in body
+    assert "script_mode" in body
+    assert "Imagem 1" in body
+
+
+def test_script_mode_keeps_the_text_and_the_order_through_the_preview(client):
+    response = client.post("/generate", data={
+        "script_mode": "script",
+        "theme": "rotina matinal",
+        "language": "pt-BR",
+        "style": "sticker",
+        "slides_count": "3",
+        "slide_scripts-0": "ninguém acorda às 5h por disciplina",
+        "slide_scripts-1": "acorda porque dormiu às 21h",
+        "slide_scripts-2": "salva pra tentar amanhã",
+    }, follow_redirects=True)
+
+    assert response.status_code == 200
+    body = response.data.decode("utf-8")
+    hook = body.index("ninguém acorda às 5h por disciplina")
+    middle = body.index("acorda porque dormiu às 21h")
+    cta = body.index("salva pra tentar amanhã")
+    assert hook < middle < cta
+
+
+def test_script_mode_still_positions_and_casts(client):
+    """O modo roteiro só troca de onde vem o texto: reposicionamento e escolha
+    de imagem por slide continuam valendo."""
+    response = client.post("/generate", data={
+        "script_mode": "script",
+        "theme": "café",
+        "language": "pt-BR",
+        "style": "sticker",
+        "slides_count": "3",
+        "slide_scripts-0": "o segredo do café",
+        "slide_scripts-1": "salva esse post",
+    }, follow_redirects=True)
+
+    body = response.data.decode("utf-8")
+    assert "text_positions-0" in body
+    assert "selected_image_ids-0" in body
+    # 2 blocos preenchidos de 3 possíveis = carrossel de 2 imagens.
+    assert "text_positions-2" not in body
+
+
+def test_script_mode_without_blocks_returns_422(client):
+    response = client.post("/generate", data={
+        "script_mode": "script",
+        "theme": "café",
+        "language": "pt-BR",
+        "style": "sticker",
+        "slides_count": "3",
+        "slide_scripts-0": "só um bloco",
+    })
+    assert response.status_code == 422
+
+
 def test_full_flow_with_preview_and_export(client):
     # 1. Generate
     response = client.post("/generate", data={
@@ -241,3 +301,48 @@ def test_health_html_reports_unsplash_not_mock(monkeypatch):
     assert "<th>Imagens</th><td><code>unsplash</code>" in body
     # A linha do Pinterest sumiu — era ela que dizia "mock" com o Unsplash ativo.
     assert "<th>Pinterest</th>" not in body
+
+
+# ------------------------------- POST /script/split — colar tudo e distribuir
+def test_split_distributes_a_labelled_script(client):
+    response = client.post("/script/split", json={
+        "raw_text": "Imagem 1: o hook\nImagem 2: o meio\nImagem 3: o fim",
+        "slides_count": 6,
+    })
+
+    assert response.status_code == 200
+    assert response.get_json()["blocks"] == ["o hook", "o meio", "o fim"]
+
+
+def test_split_caps_at_the_requested_slide_count(client):
+    """Distribuir 9 partes em 3 campos perderia texto em silêncio — o que
+    sobrou é reportado para o usuário aumentar o nº de slides."""
+    raw = "\n\n".join(f"parte {i}" for i in range(1, 10))
+    data = client.post(
+        "/script/split", json={"raw_text": raw, "slides_count": 3}
+    ).get_json()
+
+    assert len(data["blocks"]) == 3
+    assert data["found"] == 9
+
+
+def test_split_of_empty_text_returns_no_blocks(client):
+    data = client.post("/script/split", json={"raw_text": "   "}).get_json()
+
+    assert data["blocks"] == []
+    assert data["found"] == 0
+
+
+def test_split_ignores_a_bogus_slide_count(client):
+    data = client.post("/script/split", json={
+        "raw_text": "um\n\ndois", "slides_count": "abacaxi",
+    }).get_json()
+
+    assert data["blocks"] == ["um", "dois"]
+
+
+def test_create_page_offers_the_paste_box(client):
+    body = client.get("/create").get_data(as_text=True)
+
+    assert "script-paste-input" in body
+    assert "/script/split" in body

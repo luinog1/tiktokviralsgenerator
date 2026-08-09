@@ -32,6 +32,17 @@ from .ranking_provider import (
     RankingResult,
     build_ranking_provider,
 )
+from .vision_provider import (
+    VisionRankingProvider,
+    VisionVerdict,
+    build_vision_provider,
+)
+from .script_parser import (
+    blocks_from_slides,
+    compose_from_blocks,
+    parse_manual_script,
+    split_blocks,
+)
 
 __all__ = [
     # TextComposer
@@ -53,4 +64,8 @@ __all__ = [
     "RankingProvider",
     "RankingResult",
     "build_ranking_provider",
+    # Vision (VLM) — ranking olhando a foto + posição do texto
+    "VisionRankingProvider",
+    "VisionVerdict",
+    "build_vision_provider",
 ]

@@ -22,6 +22,18 @@ def _bool(value: str | None, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
+# Casting de imagens — o formato "hook + imagens secundárias" dos photo posts
+# de lifestyle: o slide 1 traz uma pessoa (é o rosto que para o scroll) e os
+# demais trazem cenário/estética. Os termos entram na busca de imagens porque
+# uma query genérica raramente devolve retrato na primeira página.
+HOOK_SUBJECTS = ("woman", "person", "off")
+_DEFAULT_SCENE_HINTS = "aesthetic lifestyle travel food"
+
+
+def _hook_hints(subject: str) -> str:
+    return f"{subject} portrait lifestyle aesthetic"
+
+
 @dataclass(frozen=True)
 class Settings:
     """Snapshot imutável das configurações carregadas do ambiente."""
@@ -43,6 +55,20 @@ class Settings:
 
     # Ranking visual — desligável independentemente do LLM de composição
     ranking_enabled: bool
+
+    # Casting de imagens por papel do slide. "woman"/"person" reservam o slide
+    # de hook para uma foto com pessoa; "off" volta ao comportamento antigo
+    # (uma busca só, imagens em rotação).
+    hook_subject: str
+    hook_query_hints: str
+    scene_query_hints: str
+
+    # Vision (VLM) — olha a foto de verdade para ranquear e sugerir onde o
+    # texto cabe sem cobrir o assunto. Cai para o ranking textual se falhar.
+    vision_enabled: bool
+    vision_api_base_url: str
+    vision_api_key: str
+    vision_model: str
 
     # HTTP
     request_timeout_seconds: int
@@ -74,6 +100,10 @@ class Settings:
         if llm_provider_raw == "mock" and llm_key_raw and llm_base_raw:
             llm_provider_raw = "openai_compatible"
 
+        hook_subject = (_get("HOOK_SUBJECT", "woman") or "woman").lower()
+        if hook_subject not in HOOK_SUBJECTS:
+            hook_subject = "woman"
+
         return cls(
             flask_env=_get("FLASK_ENV", "development"),
             secret_key=_get("SECRET_KEY", "dev-insecure-change-me"),
@@ -88,6 +118,20 @@ class Settings:
             llm_api_key=llm_key_raw,
             llm_model=llm_model_raw,
             ranking_enabled=_bool(env.get("RANKING_ENABLED"), True),  # type: ignore[union-attr]
+            hook_subject=hook_subject,
+            hook_query_hints=(
+                _get("HOOK_QUERY_HINTS") or _hook_hints(hook_subject)
+            ),
+            scene_query_hints=(
+                _get("SCENE_QUERY_HINTS") or _DEFAULT_SCENE_HINTS
+            ),
+            vision_enabled=_bool(env.get("VISION_ENABLED"), False),  # type: ignore[union-attr]
+            # Vision costuma morar em outro provider que o LLM de texto
+            # (ex.: Groq para roteiro, ModelScope para VLM). Sem VISION_*,
+            # herda o LLM_* para quem usa o mesmo endpoint nos dois papéis.
+            vision_api_base_url=_get("VISION_API_BASE_URL") or llm_base_raw,
+            vision_api_key=_get("VISION_API_KEY") or llm_key_raw,
+            vision_model=_get("VISION_MODEL"),
             request_timeout_seconds=int(_get("REQUEST_TIMEOUT_SECONDS", "20") or 20),
             session_ttl_minutes=int(_get("SESSION_TTL_MINUTES", "60") or 60),
             slide_width=int(_get("SLIDE_WIDTH", "1080") or 1080),
@@ -110,5 +154,25 @@ class Settings:
             return True
         return bool(self.llm_api_base_url and self.llm_api_key)
 
+    @property
+    def vision_configured(self) -> bool:
+        """Vision exige o trio completo — o modelo não tem default seguro.
 
-__all__ = ["Settings"]
+        Um ID errado responde 404 e o carrossel só perderia tempo antes de cair
+        no ranking textual.
+        """
+        return bool(
+            self.vision_enabled
+            and self.vision_api_base_url
+            and self.vision_api_key
+            and self.vision_model
+        )
+
+
+    @property
+    def casting_enabled(self) -> bool:
+        """Casting por papel — hook com pessoa, demais com cenário."""
+        return self.hook_subject != "off"
+
+
+__all__ = ["Settings", "HOOK_SUBJECTS"]

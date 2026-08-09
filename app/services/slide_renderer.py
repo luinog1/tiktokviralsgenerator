@@ -97,15 +97,26 @@ class SlideRenderer:
     def render_carousel(
         self,
         slides: list[SlideContent],
-        images: list[PinterestImage],
+        images: list[PinterestImage | None],
         *,
         style: SlideStyle = "quote",
     ) -> list[RenderedSlide]:
+        """Renderiza o carrossel.
+
+        Uma lista `images` do mesmo tamanho de `slides` é tratada como já
+        alinhada slide a slide (é o que o casting e a galeria da prévia
+        produzem, e `None` ali é um slide sem foto). Qualquer outro tamanho cai
+        na rotação `i % len`, que é o comportamento de um pool solto.
+        """
         if not slides:
             return []
+        aligned = len(images) == len(slides)
         rendered: list[RenderedSlide] = []
         for i, slide in enumerate(slides):
-            image = images[i % len(images)] if images else None
+            if aligned:
+                image = images[i]
+            else:
+                image = images[i % len(images)] if images else None
             png_bytes = self._compose_one(slide, image, style)
             rendered.append(
                 RenderedSlide(

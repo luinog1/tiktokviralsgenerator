@@ -40,6 +40,15 @@ ROLE_LABELS = {
     "cta": "Fecho · CTA",
 }
 
+# O que a visão viu na foto — mostrado na prévia para o casting ser auditável:
+# sem isso, "por que essa foto no slide 1?" não tem resposta na tela.
+SUBJECT_LABELS = {
+    "woman": "👤 mulher",
+    "man": "👤 homem",
+    "person": "👤 pessoa",
+    "scene": "🏞 cenário",
+}
+
 
 def _get_service() -> GenerationService:
     settings = current_app.config["SETTINGS"]
@@ -97,7 +106,26 @@ def preview(project_id: str):
         style=style,
         form=form,
         role_labels=ROLE_LABELS,
+        subject_labels=_subject_labels(project),
+        casting_enabled=current_app.config["SETTINGS"].casting_enabled,
     )
+
+
+def _subject_labels(project) -> dict[str, str]:
+    """image_id → rótulo do assunto, para as fotos que a visão classificou.
+
+    O `ranking` guardado é o veredicto da visão quando ela rodou (o
+    GenerationService persiste os dois no mesmo campo), então o `subject` chega
+    aqui de graça — sem ele, "por que essa foto no slide 1?" não tem resposta.
+    """
+    labels: dict[str, str] = {}
+    for entry in project.ranking or []:
+        if not isinstance(entry, dict):
+            continue
+        label = SUBJECT_LABELS.get(str(entry.get("subject") or "").strip())
+        if label and entry.get("image_id"):
+            labels[str(entry["image_id"])] = label
+    return labels
 
 
 @bp.route("/preview/<project_id>/edit", methods=["POST"])
@@ -169,6 +197,7 @@ def _build_slides_and_images(slides_data, images):
             role=s.get("role", "value"),
             pos_x=s.get("pos_x"),
             pos_y=s.get("pos_y"),
+            image_id=s.get("image_id", ""),
         )
         for i, s in enumerate(slides_data)
     ]
@@ -200,7 +229,9 @@ def _render_zip(project, slides_data, images, style) -> bytes:
     settings = current_app.config["SETTINGS"]
     renderer = SlideRenderer(settings)
     slides, image_objs = _build_slides_and_images(slides_data, images)
-    rendered = renderer.render_carousel(slides, [img for img in image_objs if img], style=style)
+    # image_objs já vem alinhado slide a slide (casting + escolha na galeria).
+    # Filtrar os None aqui desalinharia tudo: o slide 3 herdaria a foto do 4.
+    rendered = renderer.render_carousel(slides, image_objs, style=style)
 
     # Criar ZIP em memória
     buffer = io.BytesIO()

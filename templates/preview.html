@@ -10,6 +10,13 @@
       ordenados no roteiro viral <strong>hook → problema → valor → CTA</strong>.
       Edite os textos e escolha a imagem de cada slide.
     </p>
+    {% if casting_enabled %}
+    <p class="small muted">
+      Imagem 1 é o hook e recebeu uma foto com pessoa; as demais seguem a
+      estética do tema. Trocou a foto na galeria? A escolha manual vence o
+      casting automático.
+    </p>
+    {% endif %}
   </header>
 
   <!-- Ações de exportação no topo -->
@@ -35,9 +42,14 @@
       {% set i = loop.index0 %}
       <article class="slide-card" data-slide-index="{{ i }}">
         <header class="slide-card-head">
-          <span class="slide-number">#{{ i + 1 }}</span>
+          <span class="slide-number">Imagem {{ i + 1 }}</span>
           {% if slide.role %}
             <span class="role-badge role-{{ slide.role }}">{{ role_labels.get(slide.role, slide.role) }}</span>
+          {% endif %}
+          {% if image_for_slide[i] and subject_labels.get(image_for_slide[i].image_id) %}
+            <span class="subject-badge" title="Assunto identificado na foto">
+              {{ subject_labels[image_for_slide[i].image_id] }}
+            </span>
           {% endif %}
           {% if project.ranking %}
             {% set rk = project.ranking | selectattr('image_id', 'equalto', image_for_slide[i].image_id if image_for_slide[i] else '') | first %}
