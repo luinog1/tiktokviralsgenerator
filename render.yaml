@@ -104,7 +104,7 @@ services:
       # acontece dentro do POST /generate e é bem mais lenta — suba para ~60,
       # senão o timeout derruba a visão e o carrossel sai no ranking textual.
       - key: REQUEST_TIMEOUT_SECONDS
-        value: "30"
+        value: "60"
 
       # --- Composição de imagem ---
       - key: SLIDE_WIDTH
