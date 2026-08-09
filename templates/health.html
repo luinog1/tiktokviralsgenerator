@@ -10,7 +10,7 @@
     <tbody>
       <tr><th>Ambiente Flask</th><td>{{ settings.flask_env }}</td></tr>
       <tr><th>Compositor (LLM)</th><td><code>{{ settings.llm_provider }}</code></td></tr>
-      <tr><th>Pinterest</th><td><code>{{ 'configured' if settings.pinterest_configured else 'mock' }}</code></td></tr>
+      <tr><th>Imagens</th><td><code>{{ images_provider }}</code></td></tr>
       <tr><th>Ranking</th><td>
         <code>{{ settings.llm_provider if settings.ranking_enabled else 'disabled' }}</code>
       </td></tr>

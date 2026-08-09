@@ -194,3 +194,18 @@ def test_rank_endpoint_returns_json(client):
     assert response.status_code == 200
     data = response.get_json()
     assert "results" in data
+
+
+def test_health_html_reports_unsplash_not_mock(monkeypatch):
+    """O painel /health/html mostrava 'mock' para imagens sempre que o Pinterest
+    não estava configurado — mesmo com o Unsplash respondendo 200. Era o
+    diagnóstico que fazia parecer que o carrossel saía em mock."""
+    monkeypatch.setenv("UNSPLASH_ACCESS_KEY", "chave-real")
+    app = create_app()
+    app.config["WTF_CSRF_ENABLED"] = False
+    with app.test_client() as client:
+        body = client.get("/health/html").get_data(as_text=True)
+
+    assert "<th>Imagens</th><td><code>unsplash</code>" in body
+    # A linha do Pinterest sumiu — era ela que dizia "mock" com o Unsplash ativo.
+    assert "<th>Pinterest</th>" not in body

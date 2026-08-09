@@ -59,4 +59,8 @@ def health():
 @bp.route("/health/html")
 def health_html():
     settings = current_app.config["SETTINGS"]
-    return render_template("health.html", settings=settings)
+    return render_template(
+        "health.html",
+        settings=settings,
+        images_provider=getattr(build_pinterest_client(settings), "name", "unknown"),
+    )
