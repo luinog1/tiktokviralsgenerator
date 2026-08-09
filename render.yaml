@@ -103,11 +103,13 @@ services:
       # Timeout das chamadas HTTP rápidas: busca de imagens e LLM de texto.
       # NÃO afeta mais a visão — ela tem o VISION_TIMEOUT_SECONDS abaixo.
       - key: REQUEST_TIMEOUT_SECONDS
-        value: "30"
+        value: "60"
       # Timeout só da chamada do VLM, que é a parte lenta do POST /generate:
       # o modelo olha até 8 fotos por requisição. Era isto que faltava — com um
       # valor único, o número que servia para o Unsplash cancelava a visão em
       # 20s e o carrossel saía no ranking textual.
+      # Precisa ficar ABAIXO do --timeout do gunicorn (180, no Dockerfile),
+      # senão o worker morre antes de a visão cair no ranking textual.
       - key: VISION_TIMEOUT_SECONDS
         value: "90"
 
