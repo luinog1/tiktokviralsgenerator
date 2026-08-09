@@ -38,6 +38,23 @@ def test_resolves_a_truetype_font():
     assert regular, "nenhuma fonte regular encontrada no sistema"
 
 
+def test_bundled_poppins_wins_over_system_fonts(monkeypatch):
+    """A tipografia é o que aproxima o slide do photo post do TikTok.
+
+    Se os .ttf empacotados saírem do repo (ou do build Docker), a resolução cai
+    numa fonte do sistema — Liberation Sans no Linux — e o render volta a
+    destoar. Este teste falha antes de o visual regredir.
+    """
+    from PIL import ImageFont
+
+    monkeypatch.delenv("SLIDE_FONT_BOLD", raising=False)
+    monkeypatch.delenv("SLIDE_FONT_REGULAR", raising=False)
+
+    bold, regular = _resolve_font_paths()
+    assert ImageFont.truetype(bold, 40).getname() == ("Poppins", "SemiBold")
+    assert ImageFont.truetype(regular, 40).getname() == ("Poppins", "Medium")
+
+
 def test_fonts_respect_requested_size(renderer):
     """Confirma que a fonte carregada é escalável (não a bitmap padrão)."""
     from PIL import ImageDraw

@@ -24,6 +24,37 @@ from app.config import Settings
 
 logger = logging.getLogger(__name__)
 
+# Prefixo dos ids gerados pelo MockPinterestClient. Serve para reconhecer
+# resultados mock *depois* da busca — um cliente real que caiu no fallback
+# continua se chamando "unsplash"/"pinterest_v5", então o nome do cliente não
+# basta para saber se o carrossel saiu com gradiente sintético.
+MOCK_IMAGE_ID_PREFIX = "mock-"
+
+
+def is_mock_image(image: "PinterestImage | dict[str, Any]") -> bool:
+    image_id = image.get("image_id") if isinstance(image, dict) else image.image_id
+    return str(image_id or "").startswith(MOCK_IMAGE_ID_PREFIX)
+
+
+def _http_reason(api: str, response: requests.Response) -> str:
+    """Motivo legível de um HTTP de erro — o que o usuário precisa corrigir."""
+    code = response.status_code
+    if code == 401:
+        return (
+            f"{api} recusou a credencial (HTTP 401). Confira se a chave é a "
+            "Access Key, não a Secret Key."
+        )
+    if code == 403:
+        return (
+            f"{api} bloqueou a chamada (HTTP 403). No Unsplash isso costuma ser "
+            "o limite de 50 req/h do app em modo Demo; no Pinterest, falta de "
+            "Standard Access."
+        )
+    if code == 429:
+        return f"{api} está limitando a taxa de chamadas (HTTP 429)."
+    return f"{api} respondeu HTTP {code}."
+
+
 
 @dataclass
 class PinterestImage:
@@ -115,8 +146,11 @@ class UnsplashClient:
     def __init__(self, access_key: str, timeout: int = 20):
         self._access_key = access_key
         self._timeout = timeout
+        # Por que a última busca caiu no mock. Vazio = não caiu.
+        self.last_fallback_reason = ""
 
     def search(self, query: str, limit: int = 8) -> list[PinterestImage]:
+        self.last_fallback_reason = ""
         try:
             response = requests.get(
                 f"{self._BASE}/search/photos",
@@ -133,12 +167,19 @@ class UnsplashClient:
             )
             if response.status_code >= 400:
                 logger.warning("Unsplash HTTP %d: %s", response.status_code, response.text[:200])
+                self.last_fallback_reason = _http_reason("Unsplash", response)
             response.raise_for_status()
         except requests.Timeout:
             logger.warning("Unsplash timeout — usando fallback mock.")
+            self.last_fallback_reason = (
+                f"Unsplash não respondeu em {self._timeout}s."
+            )
             return MockPinterestClient().search(query, limit)
         except requests.RequestException as exc:
             logger.warning("Unsplash erro: %s — usando fallback mock.", type(exc).__name__)
+            self.last_fallback_reason = self.last_fallback_reason or (
+                f"Falha de rede ao chamar o Unsplash ({type(exc).__name__})."
+            )
             return MockPinterestClient().search(query, limit)
 
         results = (response.json() or {}).get("results") or []
@@ -175,11 +216,14 @@ class PinterestV5Client:
         self._settings = settings
         self._base = settings.pinterest_api_base_url.rstrip("/")
         self._timeout = settings.request_timeout_seconds
+        # Por que a última busca caiu no mock. Vazio = não caiu.
+        self.last_fallback_reason = ""
 
     def search(self, query: str, limit: int = 8) -> list[PinterestImage]:
         if not self._settings.pinterest_configured:
             raise RuntimeError("Pinterest não configurado — token ausente.")
 
+        self.last_fallback_reason = ""
         try:
             response = requests.get(
                 f"{self._base}/search/pins/",   # /pins/ — não /boards/
@@ -195,12 +239,17 @@ class PinterestV5Client:
             )
             if response.status_code >= 400:
                 self._log_error(response)
+                self.last_fallback_reason = _http_reason("Pinterest", response)
             response.raise_for_status()
         except requests.Timeout:
             logger.warning("Pinterest timeout — usando fallback mock.")
+            self.last_fallback_reason = f"Pinterest não respondeu em {self._timeout}s."
             return MockPinterestClient().search(query, limit)
         except requests.RequestException as exc:
             logger.warning("Pinterest erro de rede: %s — usando fallback mock.", type(exc).__name__)
+            self.last_fallback_reason = self.last_fallback_reason or (
+                f"Falha de rede ao chamar o Pinterest ({type(exc).__name__})."
+            )
             return MockPinterestClient().search(query, limit)
 
         data = response.json() or {}
@@ -218,6 +267,7 @@ class PinterestV5Client:
             ))
         if not images:
             logger.info("Pinterest sem resultados para query=%r — fallback mock.", query[:80])
+            self.last_fallback_reason = "Pinterest não retornou resultados para a busca."
             return MockPinterestClient().search(query, limit)
         logger.info("Pinterest retornou %d imagens para query=%r", len(images), query[:80])
         return images[:limit]

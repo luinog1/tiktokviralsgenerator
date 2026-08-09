@@ -11,6 +11,7 @@ Aplicação Flask que transforma o texto gerado pelo **goviral.ai** em um carros
 ## 🎯 O que mudou na v0.4
 
 - ✅ **Estilo `sticker` (padrão)** — texto preto em caixas brancas arredondadas, uma por linha, sobre a foto sem escurecer. É o formato de legenda nativo dos photo posts do TikTok.
+- ✅ **Poppins empacotada** — `static/fonts/sticker-{bold,regular}.ttf` (SemiBold/Medium). Sem isso o servidor caía na Liberation Sans, e a tipografia era o que ainda destoava do visual do TikTok.
 - ✅ **Roteiro viral** — os slides são ordenados na estrutura de 3 atos (`hook → problema → agitação → valor → prova → CTA`). Cada slide carrega um `role`, e o `role` decide onde o texto é posicionado na imagem.
 - ✅ **Prompt de roteirista no Groq** — o LLM reordena e encurta o texto colado seguindo os tipos de hook e as regras de escrita de script viral, em vez de só fatiar o texto.
 - 🐛 **Fontes no Docker** — a imagem `python:3.11-slim` não traz nenhuma fonte TrueType, então o Pillow caía na fonte bitmap padrão e renderizava os slides com texto minúsculo. Agora `fonts-liberation` e `fonts-dejavu-core` são instaladas.
@@ -107,8 +108,9 @@ python run.py
 | `FLASK_ENV` | `development` | Ambiente Flask |
 | `SECRET_KEY` | `dev-insecure-change-me` | **Definir em produção** |
 | `DEBUG` | `true` | Modo debug |
-| `PINTEREST_ACCESS_TOKEN` | (vazio) | Token da API oficial v5. Vazio → mock |
+| `PINTEREST_ACCESS_TOKEN` | (vazio) | Token da API oficial v5. Vazio → tenta Unsplash |
 | `PINTEREST_API_BASE_URL` | `https://api.pinterest.com/v5` | Base URL da API |
+| `UNSPLASH_ACCESS_KEY` | (vazio) | Access Key do Unsplash. Usada quando não há token Pinterest. Vazio → mock |
 | `LLM_PROVIDER` | `mock` | `mock` ou `openai_compatible` |
 | `LLM_API_BASE_URL` | (vazio) | Endpoint OpenAI-compatible (ex.: `https://api.groq.com/openai/v1`) |
 | `LLM_API_KEY` | (vazio) | Token do LLM (ex.: `gsk_...` para Groq) |
@@ -124,6 +126,22 @@ python run.py
 **Compatibilidade reversa:** variáveis `RANKING_*` antigas (`RANKING_PROVIDER`, `RANKING_API_BASE_URL`, `RANKING_API_KEY`, `RANKING_MODEL`) ainda funcionam e mapeiam para `LLM_*`.
 
 Nenhum valor secreto é commitado. Tokens nunca cruzam para o frontend.
+
+### De onde vêm as imagens
+
+A prioridade é `PINTEREST_ACCESS_TOKEN` → `UNSPLASH_ACCESS_KEY` → **mock** (gradientes SVG sintéticos). Se as duas chaves estiverem vazias, o carrossel sai com gradientes coloridos em vez de fotos.
+
+O `/search/pins/` do Pinterest exige **Standard Access** (aprovação manual da Pinterest). O Unsplash não exige aprovação — crie um app em [unsplash.com/oauth/applications](https://unsplash.com/oauth/applications) e copie a **Access Key**.
+
+Para confirmar o que está ativo:
+
+```bash
+curl -s http://localhost:5000/health | python -m json.tool
+# providers.images        → "pinterest_v5" | "unsplash" | "mock"
+# images_diagnostic.using_mock → true quando o carrossel sai com gradiente
+```
+
+> O `.env` é lido pelo `python-dotenv` no app factory, então `python run.py` e `docker compose up` enxergam as mesmas variáveis. Variáveis reais do ambiente (Render, docker-compose) têm prioridade sobre o arquivo.
 
 ---
 
@@ -215,9 +233,20 @@ Cada estilo produz um layout distinto no PNG renderizado:
 
 ### Tipografia
 
-As fontes são detectadas automaticamente, nesta ordem: `static/fonts/` → Liberation/DejaVu (Linux) → Segoe UI/Arial (Windows) → Arial (macOS).
+O projeto **empacota Poppins** em `static/fonts/` — a geométrica que aproxima os slides da tipografia dos photo posts do TikTok:
 
-Para trocar a tipografia (ex.: Poppins, para chegar mais perto do visual do TikTok), solte os arquivos em `static/fonts/sticker-bold.ttf` e `static/fonts/sticker-regular.ttf` — ou aponte `SLIDE_FONT_BOLD` / `SLIDE_FONT_REGULAR` para os `.ttf` desejados.
+| Arquivo | Peso | Usado em |
+|---------|------|----------|
+| `static/fonts/sticker-bold.ttf` | Poppins **SemiBold** | headline e CTA |
+| `static/fonts/sticker-regular.ttf` | Poppins **Medium** | corpo do texto |
+
+SemiBold/Medium em vez de Bold/Regular porque o texto nativo do TikTok é de peso médio — Bold fica pesado demais dentro da caixa branca e Regular fica fino demais sobre a foto.
+
+A detecção segue esta ordem: `static/fonts/` → Liberation/DejaVu (Linux) → Segoe UI/Arial (Windows) → Arial (macOS). Ou seja, os arquivos empacotados vencem as fontes do sistema em qualquer ambiente — o render fica igual no Docker e no dev local.
+
+Para trocar a tipografia, substitua esses dois `.ttf` ou aponte `SLIDE_FONT_BOLD` / `SLIDE_FONT_REGULAR` para outros caminhos.
+
+> Poppins é distribuída sob SIL Open Font License 1.1 (`static/fonts/OFL.txt`).
 
 > **Nota:** emoji é removido do PNG (as fontes do sistema não têm esses glifos e o Pillow desenharia um retângulo vazio). O emoji continua na legenda e no Markdown exportado.
 
@@ -269,9 +298,8 @@ Para trocar a tipografia (ex.: Poppins, para chegar mais perto do visual do TikT
 
 1. Configurar `LLM_API_BASE_URL` e `LLM_API_KEY` (ex.: Groq) para ativar o roteiro viral com LLM real. Modelos Groq suportados: `qwen/qwen3.6-27b`, `llama-3.3-70b-versatile`, `llama-3.1-8b-instant`, `mixtral-8x7b-32768`, `gemma2-9b-it` (consulte https://console.groq.com/docs/models para a lista atual).
 2. Validar escopos do token Pinterest para a busca de Pins.
-3. Adicionar uma fonte própria em `static/fonts/` (ex.: Poppins) para aproximar ainda mais do visual do TikTok.
-4. Adicionar mais estilos visuais (antes-e-depois, capa de carrossel, etc.).
-5. Persistência real (DB ou Redis) para multi-worker.
+3. Adicionar mais estilos visuais (antes-e-depois, capa de carrossel, etc.).
+4. Persistência real (DB ou Redis) para multi-worker.
 
 ---
 

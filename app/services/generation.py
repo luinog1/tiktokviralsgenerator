@@ -20,6 +20,7 @@ from app.adapters import (
     build_ranking_provider,
     build_text_composer,
 )
+from app.adapters.pinterest_client import is_mock_image
 from app.config import Settings
 from app.services.session_store import SessionStore, StoredProject, get_store
 
@@ -103,6 +104,18 @@ class GenerationService:
 
         if not images:
             warnings.append("Nenhuma imagem retornada pela busca.")
+        elif any(is_mock_image(img) for img in images):
+            # Cuidado: um cliente real que caiu no fallback continua se chamando
+            # "unsplash"/"pinterest_v5" — por isso a checagem é no resultado.
+            reason = getattr(self._pinterest, "last_fallback_reason", "")
+            detail = reason or (
+                "Nenhuma chave de imagens configurada — defina "
+                "UNSPLASH_ACCESS_KEY ou PINTEREST_ACCESS_TOKEN."
+            )
+            warnings.append(
+                f"Imagens em modo mock (gradientes sintéticos). Motivo: {detail}"
+            )
+            logger.warning("Carrossel gerado com imagens mock. Motivo: %s", detail)
 
         # 3. Ranking (opcional) — briefing inclui raw_text para correlação
         briefing = {

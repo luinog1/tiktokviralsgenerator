@@ -262,3 +262,78 @@ def test_settings_respects_explicit_mock_even_with_creds():
     env = {"LLM_PROVIDER": "mock", "LLM_API_BASE_URL": "https://api.groq.com/openai/v1"}
     settings = Settings.from_env(env)
     assert settings.llm_provider == "mock"  # sem key, não ativa
+
+
+# ---------- Fallback silencioso para mock ----------
+
+
+class _FakeResponse:
+    """Resposta HTTP mínima para simular erro da API sem tocar a rede."""
+
+    def __init__(self, status_code: int, payload: dict | None = None):
+        self.status_code = status_code
+        self.text = str(payload or "")
+        self._payload = payload or {}
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests
+            raise requests.HTTPError(f"HTTP {self.status_code}", response=self)
+
+
+def test_unsplash_403_falls_back_to_mock_with_a_reason(monkeypatch):
+    """O caso que não aparecia: a chave está configurada, o cliente é o real,
+    mas a API recusa e o carrossel sai com gradiente. Antes isso era silencioso
+    — só um logger.warning que ninguém lê no painel do Render."""
+    from app.adapters.pinterest_client import UnsplashClient, is_mock_image
+
+    client = UnsplashClient(access_key="chave-valida-mas-limitada")
+    monkeypatch.setattr(
+        "app.adapters.pinterest_client.requests.get",
+        lambda *a, **k: _FakeResponse(403, {"errors": ["Rate Limit Exceeded"]}),
+    )
+
+    images = client.search("cafe da manha", limit=4)
+
+    assert images, "o fallback deve devolver imagens, não lista vazia"
+    assert all(is_mock_image(img) for img in images)
+    assert client.name == "unsplash", "o nome do cliente segue sendo o real"
+    assert "403" in client.last_fallback_reason
+    assert "Demo" in client.last_fallback_reason
+
+
+def test_unsplash_401_explains_the_wrong_key(monkeypatch):
+    from app.adapters.pinterest_client import UnsplashClient
+
+    client = UnsplashClient(access_key="secret-key-em-vez-de-access-key")
+    monkeypatch.setattr(
+        "app.adapters.pinterest_client.requests.get",
+        lambda *a, **k: _FakeResponse(401, {"errors": ["OAuth error"]}),
+    )
+    client.search("qualquer", limit=2)
+    assert "Access Key" in client.last_fallback_reason
+
+
+def test_successful_unsplash_search_leaves_no_fallback_reason(monkeypatch):
+    from app.adapters.pinterest_client import UnsplashClient, is_mock_image
+
+    payload = {"results": [{
+        "id": "abc123",
+        "urls": {"regular": "https://images.unsplash.com/photo-1.jpg"},
+        "links": {"html": "https://unsplash.com/photos/abc123"},
+        "alt_description": "cafe",
+        "user": {"name": "Alguem", "username": "alguem"},
+    }]}
+    monkeypatch.setattr(
+        "app.adapters.pinterest_client.requests.get",
+        lambda *a, **k: _FakeResponse(200, payload),
+    )
+    client = UnsplashClient(access_key="chave-boa")
+    images = client.search("cafe", limit=4)
+
+    assert len(images) == 1
+    assert not is_mock_image(images[0])
+    assert client.last_fallback_reason == ""

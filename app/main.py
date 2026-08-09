@@ -14,8 +14,31 @@ from app.config import Settings
 csrf = CSRFProtect()
 
 
+def _load_dotenv() -> None:
+    """Carrega o .env para o os.environ antes de ler as configurações.
+
+    Sem isso, `python run.py` enxerga apenas o ambiente do shell — o .env é
+    lido só pelo `env_file` do docker-compose. Era por isso que chaves
+    preenchidas no .env continuavam caindo no cliente mock.
+
+    `override=False`: variáveis reais do ambiente (Render, docker-compose)
+    vencem o arquivo.
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        logging.getLogger(__name__).warning(
+            "python-dotenv ausente — o .env será ignorado. "
+            "Rode: pip install -r requirements.txt"
+        )
+        return
+    load_dotenv(override=False)
+
+
 def create_app(settings: Settings | None = None) -> Flask:
     """Application factory."""
+    if settings is None:
+        _load_dotenv()
     settings = settings or Settings.from_env()
 
     # Configurar logging antes de qualquer coisa

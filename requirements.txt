@@ -3,4 +3,5 @@ Flask-WTF==1.2.1
 WTForms==3.1.2
 requests==2.32.3
 Pillow==10.4.0
+python-dotenv==1.0.1
 gunicorn==22.0.0

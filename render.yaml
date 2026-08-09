@@ -55,6 +55,12 @@ services:
       - key: PINTEREST_API_BASE_URL
         value: https://api.pinterest.com/v5
 
+      # --- Unsplash (fallback de imagens, gratuito e sem aprovação) ---
+      # Sem PINTEREST_ACCESS_TOKEN nem UNSPLASH_ACCESS_KEY o carrossel sai
+      # com gradientes mock. Confirme em /health → providers.images
+      - key: UNSPLASH_ACCESS_KEY
+        sync: false  # ← Access Key de https://unsplash.com/oauth/applications
+
       # --- HTTP / Sessão ---
       - key: SESSION_TTL_MINUTES
         value: "60"

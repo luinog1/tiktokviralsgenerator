@@ -43,6 +43,29 @@ def test_health_returns_ok(client):
     assert data["providers"]["goviralai"] == "external_manual"
 
 
+def test_health_reports_mock_images_when_no_key(client, monkeypatch):
+    monkeypatch.delenv("UNSPLASH_ACCESS_KEY", raising=False)
+    data = client.get("/health").get_json()
+    assert data["providers"]["images"] == "mock"
+    assert data["images_diagnostic"]["using_mock"] is True
+
+
+def test_health_reports_unsplash_when_key_is_set(client, monkeypatch):
+    """Antes o /health derivava o provider só de PINTEREST_ACCESS_TOKEN, então
+    uma chave Unsplash ativa ainda era reportada como 'mock' — não havia como
+    saber por que o carrossel saía com gradientes."""
+    monkeypatch.setenv("UNSPLASH_ACCESS_KEY", "chave-de-teste")
+    data = client.get("/health").get_json()
+    assert data["providers"]["images"] == "unsplash"
+    assert data["images_diagnostic"]["using_mock"] is False
+
+
+def test_health_never_leaks_the_unsplash_key(client, monkeypatch):
+    monkeypatch.setenv("UNSPLASH_ACCESS_KEY", "segredo-nao-pode-vazar")
+    body = client.get("/health").data.decode("utf-8")
+    assert "segredo-nao-pode-vazar" not in body
+
+
 def test_index_returns_landing(client):
     response = client.get("/")
     assert response.status_code == 200
