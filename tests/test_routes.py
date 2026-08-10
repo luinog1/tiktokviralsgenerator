@@ -167,6 +167,50 @@ def test_script_mode_still_positions_and_casts(client):
     assert "text_positions-2" not in body
 
 
+def test_the_sticker_preview_paints_the_letters_in_a_second_layer(client):
+    """A frase sai duas vezes por caixa: etiquetas embaixo, letras em cima.
+
+    As etiquetas brancas se sobrepõem de propósito, e o navegador pinta uma
+    linha inteira (fundo e texto) antes da seguinte — o fundo da linha de baixo
+    comia o rabo dos "g" da linha de cima. A prévia faz o mesmo que o Pillow em
+    `_draw_sticker_block`: uma passada de caixas, outra de texto.
+    """
+    response = client.post("/generate", data={
+        "script_mode": "script",
+        "theme": "rotina",
+        "language": "pt-BR",
+        "style": "sticker",
+        "slides_count": "3",
+        "slide_scripts-0": "engaging does not mean paging",
+        "slide_scripts-1": "reposting helps you",
+    }, follow_redirects=True)
+
+    body = response.data.decode("utf-8")
+    assert body.count("engaging does not mean paging") >= 2, (
+        "a camada de tinta precisa repetir o texto da etiqueta"
+    )
+    assert 'class="sticker-ink-layer"' in body
+    # Frase repetida no DOM não pode ser lida duas vezes pelo leitor de tela.
+    assert 'class="sticker-ink-layer" aria-hidden="true"' in body
+
+
+def test_other_styles_have_no_second_layer(client):
+    """Só o sticker pinta etiqueta por linha — o resto não tem o que corrigir."""
+    response = client.post("/generate", data={
+        "raw_text": (
+            "Tutorial completo de café latte em casa. Aqueça o leite. "
+            "Prepare o espresso. Misture e finalize com canela."
+        ),
+        "theme": "café",
+        "language": "pt-BR",
+        "style": "tutorial",
+        "slides_count": "3",
+    }, follow_redirects=True)
+
+    # O comentário do script cita a classe; o que não pode existir é a marcação.
+    assert 'class="sticker-ink-layer"' not in response.data.decode("utf-8")
+
+
 def test_script_mode_without_blocks_returns_422(client):
     response = client.post("/generate", data={
         "script_mode": "script",

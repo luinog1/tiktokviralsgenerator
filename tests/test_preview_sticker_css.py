@@ -45,6 +45,24 @@ def _decl(body: str, prop: str) -> str:
     return found[-1].strip()
 
 
+def _cascade(css: str, selector: str, prop: str) -> str:
+    """O valor que vence quando o seletor aparece em MAIS DE UMA regra.
+
+    `.sticker-ink-text` sai da mesma regra das etiquetas (é o que garante a
+    mesma quebra de linha) e depois cancela o fundo numa regra própria — de
+    mesma especificidade, mais abaixo no arquivo. Ler só a primeira regra
+    devolveria o valor que a segunda derruba.
+    """
+    winner = None
+    for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", css):
+        if selector in match.group(1):
+            found = re.findall(rf"(?<![-\w]){re.escape(prop)}\s*:\s*([^;]+);", match.group(2))
+            if found:
+                winner = found[-1].strip()
+    assert winner is not None, f"{prop} não é declarada em nenhuma regra de {selector}"
+    return winner
+
+
 def _em(value: str) -> float:
     return float(re.sub(r"em$", "", value.strip()))
 
@@ -125,3 +143,47 @@ def test_preview_padding_matches_the_png(css, renderer):
     assert pad_y == pytest.approx(renderer._STICKER_PAD_Y_RATIO, abs=0.01)
     radius = _em(_decl(text, "border-radius"))
     assert radius == pytest.approx(renderer._STICKER_RADIUS_RATIO, abs=0.01)
+
+
+def test_the_letters_are_painted_above_every_white_box(css):
+    """As etiquetas se sobrepõem — só a ordem de pintura salva o "g" da linha.
+
+    O navegador pinta uma linha inteira (fundo e texto) antes de começar a
+    seguinte, então a etiqueta de baixo caía sobre o descendente da linha de
+    cima e comia um pedaço da letra. A prévia faz o que o Pillow já fazia em
+    `_draw_sticker_block`: uma passada de caixas, outra de texto. Aqui isso é
+    uma camada que só pinta etiqueta (tinta transparente) e outra, por cima,
+    que só pinta letra.
+    """
+    plate = _rule(css, ".slide-visual-sticker .slide-headline")
+    assert _decl(plate, "color") == "transparent", (
+        "a camada das etiquetas não pode desenhar letra: ela é coberta pela "
+        "etiqueta da linha seguinte"
+    )
+    layer = _rule(css, ".slide-visual-sticker .sticker-ink-layer")
+    assert _decl(layer, "position") == "absolute"
+    # Só a etiqueta branca pega o arraste; a camada de cima cobre o contêiner
+    # inteiro e roubaria o clique dos vãos transparentes.
+    assert _decl(layer, "pointer-events") == "none"
+
+    ink = ".slide-visual-sticker .sticker-ink-text"
+    assert _cascade(css, ink, "background") == "none", "letra em cima, sem fundo junto"
+    assert _cascade(css, ink, "color") != "transparent"
+
+
+def test_both_layers_come_from_the_same_rule(css):
+    """Quebra de linha diferente = letra fora da etiqueta.
+
+    As duas camadas só caem nas mesmas palavras se tiverem a mesma fonte, o
+    mesmo corpo, o mesmo peso e o mesmo recuo lateral. A garantia mais barata
+    disso é serem o MESMO bloco de declarações — e o peso morar no contêiner,
+    que é o pai das duas.
+    """
+    assert _rule(css, ".sticker-ink-text") == _rule(
+        css, ".slide-visual-sticker .slide-headline"
+    ), "a cópia de cima precisa sair da mesma regra da camada das etiquetas"
+
+    box = _rule(css, ".slide-visual-sticker .slide-text-box")
+    assert "font-weight" in box, "o peso mora no pai das duas camadas"
+    plate = _rule(css, ".slide-visual-sticker .slide-headline")
+    assert _decl(plate, "font-weight") == "inherit"

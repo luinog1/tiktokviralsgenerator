@@ -621,6 +621,11 @@ a:hover { text-decoration: underline; }
   width: max-content;
   max-width: 100%;
   margin: 0;
+  /* Contêiner das DUAS camadas (etiquetas embaixo, letras em cima): é o bloco
+     de referência do `.sticker-ink-layer`, e é o que mantém cada caixa como uma
+     unidade de pintura — a caixa de baixo cobre a de cima quando as duas são
+     arrastadas para o mesmo lugar, mas nunca o texto da sua própria caixa. */
+  position: relative;
   /* Fallback para navegador sem container queries: o `calc` com `cqw` é erro de
      parse ali e a declaração inteira cai, deixando esta valer. */
   font-size: calc(1.02rem * var(--box-scale, 1));
@@ -639,6 +644,16 @@ a:hover { text-decoration: underline; }
      `_STICKER_LINE_PITCH_RATIO` do PNG. */
   line-height: 1.196;
   font-family: var(--font-sticker);
+  /* O peso mora AQUI, no pai das duas camadas, e não no texto: as letras são
+     desenhadas por uma cópia (`.sticker-ink-layer`) que precisa quebrar a linha
+     exatamente onde a camada das etiquetas quebrou, e peso diferente muda a
+     largura do glifo. Uma declaração só, herdada pelas duas. */
+  font-weight: 600;
+}
+
+/* O corpo do texto é Medium no photo post nativo — nas duas camadas. */
+.slide-visual-sticker .slide-text-box[data-box="body"] {
+  font-weight: 500;
 }
 
 /* Um tamanho só para todas as caixas — o photo post do TikTok não muda o corpo
@@ -657,13 +672,20 @@ a:hover { text-decoration: underline; }
    números de `_STICKER_LINE_PITCH_RATIO` e `_STICKER_PAD_*_RATIO` no PNG. */
 .slide-visual-sticker .slide-headline,
 .slide-visual-sticker .slide-body-snippet,
-.slide-visual-sticker .slide-cta-snippet {
+.slide-visual-sticker .slide-cta-snippet,
+.slide-visual-sticker .sticker-ink-text {
   display: inline;
   margin: 0;
-  color: #111;
   font-size: inherit;
+  /* Herdado do contêiner, que é o pai das duas camadas. Sem isto o peso 800 da
+     regra base de `.slide-headline` voltaria a valer só nesta camada, e as duas
+     quebrariam a linha em pontos diferentes. */
+  font-weight: inherit;
   text-shadow: none;
   background: #fff;
+  /* A etiqueta é o que esta camada pinta; a letra é transparente aqui e sai na
+     camada de cima (`.sticker-ink-text`), acima de TODAS as etiquetas. */
+  color: transparent;
   padding: 0.09em 0.45em;
   border-radius: 0.22em;
   -webkit-box-decoration-break: clone;
@@ -671,13 +693,49 @@ a:hover { text-decoration: underline; }
   overflow: visible;
   -webkit-line-clamp: none;
   line-height: 1.196;
-  /* Mesma família e mesmos pesos do PNG: 600 na headline/CTA, 500 no corpo. */
+  /* Mesma família do PNG; o peso vem do contêiner (600 na headline/CTA, 500 no
+     corpo), para as duas camadas usarem sempre o mesmo. */
   font-family: var(--font-sticker);
-  font-weight: 600;
+}
+
+/* --- Camada de tinta: as letras, acima de TODAS as etiquetas ---
+   As etiquetas se sobrepõem de propósito (o passo é menor que a caixa), e o
+   navegador pinta uma linha inteira — fundo e texto — antes de começar a
+   seguinte. Resultado: o fundo branco da linha de baixo caía sobre o rabo dos
+   "g", "j" e "y" da linha de cima e comia um pedaço da letra. Não era desenho
+   sobrando das caixas antigas; era ordem de pintura.
+
+   O PNG nunca teve esse defeito porque o Pillow desenha em duas passadas —
+   todas as caixas, depois todo o texto (`_draw_sticker_block` no
+   slide_renderer). Esta cópia do texto é a segunda passada da prévia: o inline
+   de baixo fica só com as etiquetas (tinta transparente) e ela desenha só as
+   letras, por cima.
+
+   As duas camadas precisam quebrar a linha no MESMO ponto, senão a letra cai
+   fora da sua etiqueta. Por isso a cópia é o MESMO tipo de caixa: o contêiner
+   colado nas bordas do de baixo (`left`/`right`) e, dentro dele, um inline com
+   as mesmas declarações do texto (a regra acima cobre as duas), inclusive o
+   recuo de 0.45em que o `clone` reserva em cada linha. Fonte, corpo e peso vêm
+   do contêiner comum. */
+.slide-visual-sticker .sticker-ink-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  /* Quem pega o arraste é a etiqueta branca lá embaixo. Esta camada cobre o
+     contêiner inteiro, inclusive os vãos transparentes das linhas curtas; com
+     o clique parando aqui, arrastar pegaria fora do branco. */
+  pointer-events: none;
+}
+
+/* O inline da cópia é igual ao de baixo, menos o fundo: ele desenha só a
+   letra. Sem fundo não há o que cobrir a linha anterior. */
+.slide-visual-sticker .sticker-ink-text {
+  background: none;
+  color: #111;
 }
 
 .slide-visual-sticker .slide-body-snippet {
-  font-weight: 500;
   opacity: 1;
 }
 
