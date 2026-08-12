@@ -58,9 +58,11 @@
         Cole o texto do <a href="{{ goviral_url }}" target="_blank" rel="noopener">viral.app</a>
         distribuindo um bloco por foto, na ordem em que as imagens vão aparecer.
         A <strong>primeira linha</strong> de cada bloco vira o texto grande; o
-        resto vira o texto de apoio.
+        resto vira o texto de apoio. A <strong>imagem 1 é a exceção</strong>:
+        ela mostra só o hook, numa caixa só — o que você escrever ali sai como
+        uma frase, sem texto de apoio e sem CTA.
         {% if casting_enabled %}
-          A imagem 1 é o hook e recebe automaticamente uma foto com
+          Ela também recebe automaticamente uma foto com
           {{ 'mulher' if hook_subject == 'woman' else 'pessoa' }}; as demais recebem
           cenário (estética, viagem, comida).
         {% endif %}

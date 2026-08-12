@@ -85,6 +85,13 @@ services:
       # Idem RANKING_API_BASE_URL / RANKING_API_KEY / RANKING_MODEL, que
       # herdam de LLM_* quando vazias.
 
+      # --- De onde vêm as fotos ---
+      # auto (default) = PINTEREST_ACCESS_TOKEN → UNSPLASH_ACCESS_KEY → mock.
+      # pinterest_scrape busca no Pinterest SEM token (biblioteca pinterest-dl)
+      # e nunca é escolhido pelo `auto` — ver compliance no README.
+      - key: IMAGE_PROVIDER
+        value: auto
+
       # --- Pinterest ---
       - key: PINTEREST_ACCESS_TOKEN
         sync: false  # ← defina no painel

@@ -23,7 +23,9 @@ from .pinterest_client import (
     PinterestClient,
     MockPinterestClient,
     PinterestImage,
+    PinterestScrapeClient,
     build_pinterest_client,
+    pinterest_scrape_available,
 )
 from .ranking_provider import (
     InferenceRankingProvider,
@@ -57,7 +59,9 @@ __all__ = [
     "PinterestClient",
     "MockPinterestClient",
     "PinterestImage",
+    "PinterestScrapeClient",
     "build_pinterest_client",
+    "pinterest_scrape_available",
     # Ranking
     "InferenceRankingProvider",
     "MockRankingProvider",

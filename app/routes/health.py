@@ -6,7 +6,7 @@ import os
 
 from flask import Blueprint, current_app, jsonify, render_template
 
-from app.adapters import build_pinterest_client
+from app.adapters import build_pinterest_client, pinterest_scrape_available
 
 bp = Blueprint("health", __name__)
 
@@ -39,8 +39,12 @@ def health():
         "images_diagnostic": {
             "active_client": images_provider,
             "using_mock": images_provider == "mock",
+            "image_provider_env": settings.image_provider,
             "pinterest_token_set": settings.pinterest_configured,
             "unsplash_key_set": bool(os.environ.get("UNSPLASH_ACCESS_KEY", "").strip()),
+            # `pinterest-dl` é dependência opcional: ausente, o cliente de
+            # scraping existe mas só sabe cair no mock.
+            "pinterest_scrape_installed": pinterest_scrape_available(),
         },
         # Diagnóstico LLM — booleanos, NUNCA valores secretos
         "llm_diagnostic": {

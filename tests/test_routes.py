@@ -390,3 +390,49 @@ def test_create_page_offers_the_paste_box(client):
 
     assert "script-paste-input" in body
     assert "/script/split" in body
+
+
+def test_the_preview_does_not_offer_body_and_cta_on_the_hook_slide(client):
+    """A imagem 1 é uma caixa só. Oferecer os campos e depois ignorá-los na
+    gravação seria pior que não oferecer."""
+    response = client.post("/generate", data={
+        "script_mode": "script",
+        "theme": "rotina matinal",
+        "language": "pt-BR",
+        "style": "sticker",
+        "slides_count": "3",
+        "slide_scripts-0": "ninguém acorda às 5h por disciplina",
+        "slide_scripts-1": "acorda porque dormiu às 21h\ne ninguém fala isso",
+        "slide_scripts-2": "salva pra tentar amanhã",
+    }, follow_redirects=True)
+
+    body = response.data.decode("utf-8")
+    hook_body = re.search(r'<textarea[^>]*name="bodies-0"[^>]*>', body)
+    other_body = re.search(r'<textarea[^>]*name="bodies-1"[^>]*>', body)
+    hook_cta = re.search(r'<input[^>]*name="ctas-0"[^>]*>', body)
+
+    assert hook_body and "readonly" in hook_body.group(0)
+    assert hook_cta and "readonly" in hook_cta.group(0)
+    assert other_body and "readonly" not in other_body.group(0)
+
+
+def test_the_hook_image_renders_a_single_box_end_to_end(client):
+    """Duas linhas no campo da imagem 1 saem como uma frase só, sem virar
+    headline + apoio."""
+    response = client.post("/generate", data={
+        "script_mode": "script",
+        "theme": "rotina matinal",
+        "language": "pt-BR",
+        "style": "sticker",
+        "slides_count": "3",
+        "slide_scripts-0": "ninguém acorda às 5h por disciplina\nninguém fala essa parte",
+        "slide_scripts-1": "comece pela hora de dormir",
+    }, follow_redirects=True)
+
+    body = response.data.decode("utf-8")
+    assert (
+        "ninguém acorda às 5h por disciplina ninguém fala essa parte" in body
+    )
+    # A caixa de apoio do hook fica vazia — o CSS :empty a esconde na prévia.
+    hook_body = re.search(r'<textarea[^>]*name="bodies-0"[^>]*>\s*</textarea>', body)
+    assert hook_body

@@ -313,3 +313,53 @@ def test_legacy_post_without_the_mode_field_still_works(app):
         form = BriefingForm()
         assert form.validate_on_submit(), form.errors
         assert form.to_briefing()["script_mode"] == "auto"
+
+
+# ---------- a regra do slide 1 sobrevive à edição na prévia ----------
+
+
+def test_edit_keeps_the_hook_slide_as_a_single_box(app):
+    """A prévia entrega apoio e CTA do hook em leitura apenas; um POST montado
+    à mão não deveria conseguir devolver as caixas que a imagem 1 não tem."""
+    original_slides = [
+        {"headline": "o hook", "body": "", "call_to_action": "", "role": "hook"},
+        {"headline": "o valor", "body": "o apoio", "call_to_action": "", "role": "value"},
+    ]
+    with app.test_request_context("/", method="POST", data={
+        "project_id": "abc123",
+        "headlines-0": "o hook editado",
+        "headlines-1": "o valor",
+        "bodies-0": "apoio injetado no hook",
+        "bodies-1": "o apoio",
+        "ctas-0": "cta injetado no hook",
+        "ctas-1": "",
+    }):
+        form = SlideEditForm()
+        for _ in original_slides:
+            form.headlines.append_entry("")
+            form.bodies.append_entry("")
+            form.ctas.append_entry("")
+        assert form.validate_on_submit(), form.errors
+        edited = form.to_edited_slides(original_slides)
+
+    assert edited[0]["headline"] == "o hook editado", "a frase do hook é editável"
+    assert edited[0]["body"] == ""
+    assert edited[0]["call_to_action"] == ""
+    # Os outros slides continuam com as três caixas.
+    assert edited[1]["body"] == "o apoio"
+
+
+def test_a_long_hook_still_validates_in_the_preview(app):
+    """A caixa única do hook cabe mais que uma headline comum — o limite do
+    campo tem que acompanhar, senão a prévia reprova o que a geração produziu."""
+    from app.adapters.text_composer import HOOK_TEXT_LIMIT
+
+    long_hook = "palavra " * 22  # ~176 caracteres, acima do limite antigo (80)
+    long_hook = long_hook[:HOOK_TEXT_LIMIT].strip()
+    with app.test_request_context("/", method="POST", data={
+        "project_id": "abc123",
+        "headlines-0": long_hook,
+    }):
+        form = SlideEditForm()
+        form.headlines.append_entry("")
+        assert form.validate_on_submit(), form.errors

@@ -195,6 +195,43 @@ def _normalize_role(value: str) -> str:
     return role if role in VIRAL_ROLES else ""
 
 
+# ---------- a regra do slide 1 ----------
+#
+# A primeira foto do carrossel mostra o hook e MAIS NADA: uma caixa, a frase
+# que para o scroll. Sem texto de apoio, sem CTA. É o formato do photo post
+# nativo — no primeiro quadro o olho tem menos de um segundo para uma frase, e
+# qualquer coisa abaixo dela divide essa atenção.
+#
+# A regra vale nos três caminhos que produzem slides (roteiro escrito à mão,
+# composer mock e LLM), então mora aqui, num lugar só. O que veio no apoio não
+# é jogado fora: entra na mesma caixa, colado à frase, porque descartar texto
+# que o usuário escreveu é pior que um hook comprido — e um hook comprido ele
+# corrige na prévia.
+HOOK_TEXT_LIMIT = 160
+
+
+def hook_box_text(*parts: str) -> str:
+    """Junta as partes do hook numa frase só, do tamanho de uma caixa.
+
+    As quebras de linha do texto original somem aqui de propósito: a caixa
+    reencaixa o texto na largura do slide, então uma quebra escrita à mão não
+    sobreviveria ao render — e deixá-la viraria um espaço duplo no meio da
+    frase.
+    """
+    joined = " ".join(part.strip() for part in parts if part and part.strip())
+    return _truncate(" ".join(joined.split()), HOOK_TEXT_LIMIT)
+
+
+def enforce_hook_slide(slide: SlideContent) -> SlideContent:
+    """Colapsa o slide de hook numa caixa só. Outros papéis passam intactos."""
+    if slide.role != "hook":
+        return slide
+    slide.headline = hook_box_text(slide.headline, slide.body)
+    slide.body = ""
+    slide.call_to_action = ""
+    return slide
+
+
 # CTA padrão por estilo — usado só no slide de fecho (role="cta").
 _STYLE_CTA = {
     "sticker": "salva esse post pra não esquecer 🤍",
@@ -292,13 +329,13 @@ class MockTextComposer:
             rest = ""
         # CTA só no slide de fecho — repetir em todos polui o carrossel.
         cta = _STYLE_CTA.get(style, "comenta abaixo 👇") if role == "cta" else ""
-        return SlideContent(
+        return enforce_hook_slide(SlideContent(
             headline=headline,
             body=rest,
             call_to_action=cta,
             order=order,
             role=role,
-        )
+        ))
 
     @staticmethod
     def _build_caption(body: str, style: str) -> str:
@@ -315,30 +352,56 @@ class MockTextComposer:
 # O texto colado do goviral.ai já vem pronto em prosa; o papel do LLM aqui é
 # REORDENAR e ENCURTAR esse texto na sequência que retém atenção, não inventar
 # conteúdo novo.
+#
+# O prompt é específico de propósito. Pedir "escreva um hook" devolve a média
+# do que existe na internet — "descubra o segredo para transformar sua rotina".
+# Nomear os tipos de hook, dar o teto de caracteres e listar o que é proibido
+# empurra o modelo para uma frase que arrisca alguma coisa, que é o que para o
+# scroll. O mesmo vale para o miolo: sem a regra de uma ideia por slide, o
+# modelo empilha três ideias na mesma imagem e o carrossel vira parágrafo.
 _VIRAL_GUIDE = """Você é roteirista de carrosséis virais para TikTok (photo post).
 
-Recebe um texto bruto já escrito e o reorganiza em {n} slides seguindo a
-estrutura de roteiro viral em 3 atos:
-
-ATO 1 — HOOK (slide 1): para o scroll em 1 segundo. Use um destes tipos:
-  - pergunta chocante ("ainda tá cometendo esse erro?")
-  - promessa forte ("o que 99% ignora")
-  - contrarian ("para de postar todo dia, faz isso")
-  - storytelling ("testei 50 formatos, esse é o melhor")
-ATO 2 — DESENVOLVIMENTO: problema (a dor) → agitação (a consequência) →
-  valor (a entrega concreta, um slide por ideia) → prova (número, resultado).
-ATO 3 — CTA (último slide): uma ação clara e só uma.
+Recebe um texto bruto já escrito e o REORGANIZA em {n} slides. Você não cria
+conteúdo novo: tudo o que sair já estava no texto — cortado, encurtado e posto
+na ordem que segura a atenção.
 
 Cada slide recebe um "role" nesta ordem exata: {roles}
+
+SLIDE 1 — O HOOK, SOZINHO
+O primeiro slide é UMA FRASE e nada mais: body vazio, sem CTA, sem hashtag.
+É a única coisa que a pessoa lê antes de decidir se desliza, então ele carrega
+a tensão do carrossel inteiro — a resposta fica nos slides seguintes.
+- até 60 caracteres, o fôlego de uma linha só
+- escolha UM tipo e comprometa-se com ele:
+  · contrarian — contraria o senso comum ("para de acordar às 5h")
+  · omissão — aponta o que ninguém conta ("ninguém fala essa parte")
+  · erro — nomeia o erro que o público comete ("você tá salvando e não aplica")
+  · número — promessa concreta ("levei 3 anos pra entender isso")
+  · história — primeira pessoa, começando no meio da cena ("testei 50 formatos")
+- proibido: saudação, contexto, "neste carrossel vou te mostrar", pergunta
+  genérica ("já pensou nisso?"), elogio vazio ("incrível", "sensacional")
+- o hook diz de que assunto se trata: lido fora de contexto, ainda faz sentido
+
+ATO 2 — DESENVOLVIMENTO (slides do meio)
+- problema: nomeia a dor em uma frase, na língua de quem sente
+- agitação: a consequência de não resolver
+- valor: a entrega concreta — UMA ideia por slide, nunca duas
+- prova: número, resultado ou exemplo que já esteja no texto original
+- cada slide fecha a sua ideia; nenhuma frase continua no slide seguinte
+- não repita a abertura de um slide no outro ("e ainda", "além disso")
+
+ATO 3 — CTA (último slide)
+- uma ação só, no imperativo, ligada ao tema ("salva pra tentar amanhã")
 
 REGRAS DE ESCRITA (formato sticker do TikTok):
 - Escreva como fala: frases curtas, "você", contrações, tom de conversa.
 - Tudo em minúsculas, sem ponto final no fim das frases.
-- 1 ideia por slide. Nunca misture assuntos.
 - headline: máx 60 caracteres. É a frase que vai grande na imagem.
-- body: máx 180 caracteres, 1 ou 2 frases. Pode ser vazio no slide de hook.
+- body: máx 180 caracteres, 1 ou 2 frases. VAZIO no slide 1 (role="hook").
 - call_to_action: SÓ no último slide (role="cta"). Vazio nos demais.
-- Use números específicos quando o texto original tiver.
+- Nada de emoji nem hashtag dentro dos slides — eles não aparecem na imagem.
+  As hashtags vão no campo "hashtags", que é onde elas são usadas.
+- Use os números específicos que estiverem no texto original.
 - Idioma da saída: {language}.
 - Não invente fatos que não estejam no texto original.
 
@@ -357,6 +420,18 @@ def _build_viral_prompt(slides_count: int, language: str, roles: list[str]) -> s
         language=language or "pt-BR",
         roles=" → ".join(roles),
     ) + _VIRAL_SCHEMA
+
+
+def _viral_max_tokens(slides_count: int) -> int:
+    """Orçamento de saída proporcional ao nº de slides, não fixo.
+
+    Um slide ocupa ~90 tokens de JSON (role, headline, body, CTA e as aspas
+    todas). Com o teto fixo de 1200 que havia aqui, um carrossel de 12 slides
+    chegava cortado no meio de um item — e o JSON quebrado descarta o documento
+    inteiro, então o pedido inteiro caía no composer mock sem dizer por quê. Os
+    400 de base cobrem hashtags e legenda.
+    """
+    return 400 + 120 * max(1, slides_count)
 
 
 
@@ -401,7 +476,7 @@ class LLMTextComposer:
                     {"role": "user", "content": cleaned},
                 ],
                 "temperature": 0.6,
-                "max_tokens": 1200,
+                "max_tokens": _viral_max_tokens(slides_count),
             }
             response = requests.post(
                 f"{self._base}/chat/completions",
@@ -461,15 +536,20 @@ class LLMTextComposer:
             role = _normalize_role(s.get("role")) or (
                 roles[order] if order < len(roles) else "value"
             )
+            if order == 0:
+                # A primeira foto do carrossel é o hook por definição do
+                # produto. Um modelo que rotule o slide 1 de outra coisa não
+                # muda isso — mudaria só o que o renderer faz com ele.
+                role = "hook"
             cta = _truncate(str(s.get("call_to_action") or "").strip(), 80)
             slides.append(
-                SlideContent(
+                enforce_hook_slide(SlideContent(
                     headline=headline,
                     body=body,
                     call_to_action=cta if role == "cta" else "",
                     order=order,
                     role=role,
-                )
+                ))
             )
 
         if not slides:
@@ -549,4 +629,7 @@ __all__ = [
     "build_text_composer",
     "VIRAL_ROLES",
     "viral_script_roles",
+    "HOOK_TEXT_LIMIT",
+    "hook_box_text",
+    "enforce_hook_slide",
 ]

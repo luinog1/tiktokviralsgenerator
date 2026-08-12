@@ -16,7 +16,9 @@ Duas portas de entrada, uma implementação:
   antes por rótulo ("Imagem 2:", "Slide 3 —", "4)") ou por linha em branco.
 
 Dentro de um bloco, a primeira linha vira headline e o resto vira body. Uma
-linha só = headline sozinha, que é o caso mais comum no slide de hook.
+linha só = headline sozinha. A **imagem 1 é a exceção**: ela mostra o hook e
+mais nada, então o bloco inteiro vira uma caixa só (ver `enforce_hook_slide`
+no text_composer) — sem texto de apoio e sem CTA.
 
 As duas funções são determinísticas e offline: modo manual nunca chama LLM,
 porque o texto já é a decisão do usuário.
@@ -33,6 +35,7 @@ from app.adapters.text_composer import (
     SlideContent,
     _extract_hashtags,
     _truncate,
+    hook_box_text,
     viral_script_roles,
 )
 
@@ -73,10 +76,18 @@ def compose_from_blocks(
 
     slides: list[SlideContent] = []
     for block in filled:
-        headline, body = _split_headline_body(block)
+        order = len(slides)
+        role = roles[order] if order < len(roles) else "value"
+        # A imagem 1 é o hook e sai numa caixa só: o bloco inteiro vira a
+        # frase, em vez de virar headline + apoio. Por isso ele não passa pelo
+        # corte de 70 caracteres da headline — quem escreveu duas linhas de
+        # hook fica com as duas.
+        headline, body = (
+            (hook_box_text(block), "") if role == "hook"
+            else _split_headline_body(block)
+        )
         if not headline and not body:
             continue
-        order = len(slides)
         slides.append(
             SlideContent(
                 headline=headline,
@@ -85,7 +96,7 @@ def compose_from_blocks(
                 # não inventamos um: o texto escrito à mão é o que vale.
                 call_to_action="",
                 order=order,
-                role=roles[order] if order < len(roles) else "value",
+                role=role,
             )
         )
 

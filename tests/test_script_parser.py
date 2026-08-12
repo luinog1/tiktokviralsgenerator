@@ -54,10 +54,39 @@ def test_text_is_kept_verbatim_no_invented_cta():
 
 
 def test_first_line_is_headline_and_rest_is_body():
-    carousel = compose_from_blocks(["A headline curta\nO corpo explicando melhor"])
+    carousel = compose_from_blocks([
+        "o hook",
+        "A headline curta\nO corpo explicando melhor",
+    ])
 
-    assert carousel.slides[0].headline == "A headline curta"
-    assert carousel.slides[0].body == "O corpo explicando melhor"
+    assert carousel.slides[1].headline == "A headline curta"
+    assert carousel.slides[1].body == "O corpo explicando melhor"
+
+
+def test_the_hook_image_shows_one_box_and_nothing_else():
+    """A imagem 1 é a frase do hook — sem apoio, sem CTA, numa caixa só."""
+    carousel = compose_from_blocks([
+        "ninguém acorda às 5h por disciplina\nacorda porque dormiu às 21h",
+        "o resto do roteiro",
+    ])
+
+    hook = carousel.slides[0]
+    assert hook.role == "hook"
+    assert hook.body == ""
+    assert hook.call_to_action == ""
+    # O apoio não é descartado: ele entra na mesma caixa, colado à frase.
+    assert hook.headline == (
+        "ninguém acorda às 5h por disciplina acorda porque dormiu às 21h"
+    )
+
+
+def test_the_hook_is_not_cut_at_the_headline_limit():
+    """A caixa única do hook cabe mais que uma headline de slide comum."""
+    long_hook = "palavra " * 15  # ~105 caracteres, acima do limite de headline
+    carousel = compose_from_blocks([long_hook, "segundo bloco"])
+
+    assert len(carousel.slides[0].headline) > 70
+    assert len(carousel.slides[0].headline) <= 160
 
 
 def test_empty_blocks_are_dropped_and_shrink_the_carousel():
@@ -85,10 +114,10 @@ def test_hashtags_move_from_the_text_to_the_carousel():
 
 
 def test_headline_is_truncated_not_dropped():
-    carousel = compose_from_blocks(["palavra " * 40])
+    carousel = compose_from_blocks(["o hook", "palavra " * 40])
 
-    assert len(carousel.slides[0].headline) <= 70
-    assert carousel.slides[0].headline.startswith("palavra")
+    assert len(carousel.slides[1].headline) <= 70
+    assert carousel.slides[1].headline.startswith("palavra")
 
 
 def test_never_calls_an_llm():
@@ -110,11 +139,12 @@ def test_labels_split_the_pasted_script():
     )
 
     assert [s.headline for s in carousel.slides] == [
-        "para de postar todo dia",
+        # Imagem 1 é o hook: as duas linhas do bloco viram uma caixa só.
+        "para de postar todo dia o alcance não vem da frequência",
         "o que ninguém te conta",
         "salva esse post",
     ]
-    assert carousel.slides[0].body == "o alcance não vem da frequência"
+    assert carousel.slides[0].body == ""
 
 
 def test_label_number_wins_over_position_in_the_text():
@@ -188,5 +218,9 @@ def test_slides_round_trip_back_into_blocks():
     ])
 
     assert blocks == ["o hook\no apoio", "só a headline"]
-    assert compose_from_blocks(blocks).slides[0].body == "o apoio"
+    # Recompor devolve o mesmo carrossel: o bloco 1 é o hook e volta numa caixa
+    # só, sem o apoio ressuscitar como segunda caixa.
+    recomposed = compose_from_blocks(blocks)
+    assert recomposed.slides[0].headline == "o hook o apoio"
+    assert recomposed.slides[0].body == ""
 

@@ -29,6 +29,10 @@ def _bool(value: str | None, default: bool = False) -> bool:
 HOOK_SUBJECTS = ("woman", "person", "off")
 _DEFAULT_SCENE_HINTS = "aesthetic lifestyle travel food"
 
+# De onde vêm as fotos. "auto" mantém a escada histórica (token oficial →
+# chave do Unsplash → scraping → mock); os demais fixam um cliente.
+IMAGE_PROVIDERS = ("auto", "pinterest_v5", "pinterest_scrape", "unsplash", "mock")
+
 
 def _hook_hints(subject: str) -> str:
     return f"{subject} portrait lifestyle aesthetic"
@@ -45,6 +49,9 @@ class Settings:
     # Pinterest
     pinterest_access_token: str
     pinterest_api_base_url: str
+
+    # Qual cliente de imagens usar. Ver IMAGE_PROVIDERS.
+    image_provider: str
 
     # LLM (OpenAI-compatible: Groq, OpenAI, Ollama, etc.) — usado para
     # composição de slides E ranking de imagens (mesma fonte).
@@ -112,6 +119,13 @@ class Settings:
         if hook_subject not in HOOK_SUBJECTS:
             hook_subject = "woman"
 
+        # Um provider desconhecido cai em "auto" em vez de derrubar o boot: o
+        # erro de digitação vira a escada de sempre, e o /health mostra qual
+        # cliente ficou ativo.
+        image_provider = (_get("IMAGE_PROVIDER", "auto") or "auto").lower()
+        if image_provider not in IMAGE_PROVIDERS:
+            image_provider = "auto"
+
         return cls(
             flask_env=_get("FLASK_ENV", "development"),
             secret_key=_get("SECRET_KEY", "dev-insecure-change-me"),
@@ -121,6 +135,7 @@ class Settings:
                 "PINTEREST_API_BASE_URL",
                 "https://api.pinterest.com/v5",
             ),
+            image_provider=image_provider,
             llm_provider=cls._provider(llm_provider_raw),
             llm_api_base_url=llm_base_raw,
             llm_api_key=llm_key_raw,
@@ -184,4 +199,4 @@ class Settings:
         return self.hook_subject != "off"
 
 
-__all__ = ["Settings", "HOOK_SUBJECTS"]
+__all__ = ["Settings", "HOOK_SUBJECTS", "IMAGE_PROVIDERS"]

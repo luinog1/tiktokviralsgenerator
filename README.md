@@ -1,10 +1,60 @@
 # ViralPost Studio
 
-Aplicação Flask que transforma o texto gerado pelo **goviral.ai** em um carrossel visual pronto para publicar — combinando o texto colado com imagens da API oficial do Pinterest, composição opcional via LLM e renderização estilo **TikTok photo post** (1080×1350, 4:5).
+Aplicação Flask que transforma o texto gerado pelo **goviral.ai** em um carrossel visual pronto para publicar — combinando o texto colado com fotos do Pinterest (API oficial **ou** busca sem token) ou do Unsplash, composição opcional via LLM e renderização estilo **TikTok photo post** (1080×1350, 4:5).
 
-> **Status:** MVP v0.6 — Ready for building
+> **Status:** MVP v0.7 — Ready for building
 > **Stack:** Python 3.11 · Flask 3 · Jinja2 · WTForms · Pillow · Docker
 > **Idioma inicial:** Português (pt-BR)
+
+---
+
+## 🎯 O que mudou na v0.7
+
+- ✅ **Pinterest sem token, como segunda opção de busca** — `IMAGE_PROVIDER=pinterest_scrape` busca as fotos pela biblioteca [pinterest-dl](https://github.com/sean1832/pinterest-dl), que lê a API interna do site. Não pede credencial nem aprovação, que é o que travava a API oficial: o `/search/pins/` da v5 exige Standard Access. É **opt-in explícito** — o modo `auto` não escolhe scraping sozinho (ver [compliance](#️-limitações-e-compliance)).
+- ✅ **A imagem 1 é só o hook** — a primeira foto do carrossel mostra uma caixa e nada mais: a frase que para o scroll, sem texto de apoio e sem CTA. Vale nos três caminhos que produzem slides (roteiro escrito à mão, composer mock e LLM) e sobrevive à edição na prévia, onde os campos de apoio e CTA da imagem 1 aparecem em leitura apenas.
+- ✅ **Prompt de roteiro mais específico** — o LLM recebe os tipos de hook nomeados (contrarian, omissão, erro, número, história), o teto de caracteres, a lista do que é proibido no hook (saudação, "neste carrossel vou te mostrar", pergunta genérica) e a regra de uma ideia por slide. Pedir "escreva um hook" devolvia a média da internet; nomear o formato empurra o modelo para uma frase que arrisca alguma coisa.
+- 🐛 **Roteiro de 12 slides caía no composer mock** — o `max_tokens` era fixo em 1200 e o JSON chegava cortado no meio de um item; um JSON quebrado descarta o documento inteiro, então o carrossel voltava do mock sem dizer por quê. O orçamento agora cresce com o número de slides.
+
+### Buscar fotos no Pinterest sem token
+
+A API oficial v5 do Pinterest só libera o `/search/pins/` com **Standard Access**, que é aprovação manual da Pinterest. Sem ela, este projeto tinha o Unsplash — que resolve o problema da foto, mas não o do *repertório*: o Pinterest é onde mora a estética de photo post que o carrossel imita.
+
+```bash
+IMAGE_PROVIDER=pinterest_scrape
+```
+
+Não há chave, cota nem conta. Cada busca é **uma requisição**: a API interna devolve 50 pins de uma vez e o cliente recorta o que precisa dessa mesma resposta — pedir mais dispararia uma segunda página com um `sleep` no meio, dentro do `POST /generate`.
+
+Do pool de 40 pins, o recorte aplica as duas mesmas correções que já valiam para o Unsplash:
+
+| Correção | Por quê |
+| --- | --- |
+| **Retrato primeiro** | O slide é 4:5. Uma foto deitada perde metade da cena no recorte de cover. O Unsplash resolve com `orientation=portrait`; a API interna não tem esse parâmetro, então o filtro é feito aqui, pela resolução que vem em cada pin. Sem retrato suficiente, o pool inteiro vale — foto deitada ainda é melhor que gradiente. |
+| **Ponto de corte sorteado** | A busca vem ordenada por relevância e essa ordem é estável: sem sortear onde o recorte começa, o mesmo tema devolveria as mesmas fotos toda vez. É o mesmo sintoma que parecia cache no Unsplash e era determinismo da API. |
+
+O `alt` de cada pin ("a woman sitting on a couch holding a cup") é a mesma forma do `alt_description` do Unsplash, então o [casting por metadado](#casting-hook-com-pessoa-resto-com-cenário) continua funcionando sem VLM configurado.
+
+**Uma armadilha do CDN**, porque ela quebra a visão em silêncio: a URL da foto carrega o tamanho no caminho (`/originals/ab/cd/ef/hash.png`), e a thumb que vai para o VLM troca esse segmento por `474x`. O caminho reduzido serve **só JPEG** — um `.png` ali responde `403`. Por isso a extensão é reescrita junto com o tamanho.
+
+Qualquer falha (rede, mudança de payload, biblioteca ausente) cai no gradiente mock com o motivo escrito no aviso da prévia, igual aos outros clientes.
+
+> A biblioteca está no `requirements.txt` e só é importada quando `IMAGE_PROVIDER=pinterest_scrape`. Nos outros modos ela nem é carregada — o `/health` mostra se o pacote está instalado em `images_diagnostic.pinterest_scrape_installed`.
+
+### A imagem 1 mostra o hook e mais nada
+
+No photo post nativo o primeiro quadro tem uma frase só. O olho tem menos de um segundo ali, e qualquer coisa embaixo da frase divide essa atenção — por isso a imagem 1 é **uma caixa**: o hook, sem apoio e sem CTA.
+
+A regra é aplicada em um lugar só (`enforce_hook_slide`) e vale nos três caminhos que produzem slides:
+
+| Caminho | O que acontece na imagem 1 |
+| --- | --- |
+| Roteiro por imagem | O bloco inteiro vira a frase. Duas linhas no campo saem coladas numa caixa só, e não como headline + apoio. |
+| Composer mock | O slide de hook sai sem body e sem CTA. |
+| Composer LLM | O prompt proíbe body no slide 1 — e o código apaga se o modelo escrever mesmo assim. O papel do slide 1 também é forçado para `hook`, independente do que o modelo rotule. |
+
+O texto do apoio **não é descartado**: ele entra na mesma caixa, colado à frase. Um hook comprido é visível e corrigível na prévia; texto que some sem aviso, não. O teto da caixa é de 160 caracteres — acima do limite de uma headline comum (70) justamente para caber quem escreveu duas linhas.
+
+Na prévia, os campos "Texto" e "CTA" da imagem 1 aparecem em leitura apenas, e a gravação limpa os dois de qualquer jeito: oferecer um campo e ignorar o que foi digitado nele seria pior que não oferecer.
 
 ---
 
@@ -24,7 +74,7 @@ Imagem 2 (problema)  →  "acorda porque dormiu às 21h
 Imagem 3 (CTA)       →  "salva pra começar amanhã"
 ```
 
-A primeira linha de cada bloco vira a **headline** (o texto grande); as linhas seguintes viram o **corpo**. Uma linha só = só headline. O arraste das caixas sobre a foto continua igual — o modo roteiro decide *o quê* e *onde na sequência*, o arraste decide *onde na foto*.
+A primeira linha de cada bloco vira a **headline** (o texto grande); as linhas seguintes viram o **corpo**. Uma linha só = só headline. **A imagem 1 é a exceção**: ela mostra só o hook, então o bloco inteiro vira uma caixa só — sem corpo e sem CTA (ver [A imagem 1 mostra o hook e mais nada](#a-imagem-1-mostra-o-hook-e-mais-nada)). O arraste das caixas sobre a foto continua igual — o modo roteiro decide *o quê* e *onde na sequência*, o arraste decide *onde na foto*.
 
 Blocos em branco são descartados e o carrossel encolhe: se você abrir 6 campos e preencher 4, saem 4 slides. No modo roteiro o app **não** inventa CTA nem hashtag que você não escreveu — o texto é seu.
 
@@ -129,7 +179,7 @@ O texto colado é reorganizado nesta ordem (baseada na estrutura de script viral
 
 | Papel | Função no carrossel |
 |-------|---------------------|
-| `hook` | Para o scroll no primeiro segundo. Fica sozinho e ancorado embaixo. |
+| `hook` | Para o scroll no primeiro segundo. **Uma caixa só** — sem texto de apoio e sem CTA. Ancorado embaixo. |
 | `problem` | Nomeia a dor do público. |
 | `agitation` | Amplia a consequência de não resolver. |
 | `value` | A entrega concreta — uma ideia por slide. |
@@ -155,9 +205,10 @@ Reaproveitar essa sessão no servidor significaria repassar seus cookies, ou sej
 - Botão "distribuir" que divide um roteiro colado entre os campos, entendendo `Imagem N:`, `2.`, `---` e parágrafos.
 - **Casting por papel**: imagem 1 sempre com pessoa (hook), demais com cenário — via busca separada, metadado da foto e visão.
 - Composição de carrossel via TextComposer (mock determinístico ou LLM); no modo por imagem, sem LLM no caminho do texto.
+- **Imagem 1 sempre com o hook sozinho** — uma caixa, sem texto de apoio e sem CTA, nos três caminhos de composição.
 - Ordenação no roteiro viral de 3 atos (`hook → problema → agitação → valor → prova → CTA`).
 - Renderização estilo sticker do TikTok — caixas brancas arredondadas com texto preto.
-- Busca de imagens via API oficial do Pinterest (com fallback mock).
+- Busca de imagens via API oficial do Pinterest, via Pinterest **sem token** (`pinterest-dl`), via Unsplash ou mock.
 - Ranking opcional de imagens por endpoint LLM (com fallback determinístico).
 - Qualificação por **visão** opcional (VLM): nota olhando a foto + posição automática do texto + assunto da foto (pessoa/cenário) para o casting.
 - Prévia do carrossel com slides editáveis (headline, body, CTA por slide) e o papel de cada slide visível.
@@ -170,7 +221,7 @@ Reaproveitar essa sessão no servidor significaria repassar seus cookies, ou sej
 - Health check sem expor segredos.
 - Funciona em modo **mock** sem credenciais externas.
 
-Fora do escopo (conforme PRD v0.2): publicação automática, scraping, automação de login via Discord, geração de vídeos, banco de imagens próprio.
+Fora do escopo (conforme PRD v0.2): publicação automática, automação de login via Discord, geração de vídeos, banco de imagens próprio. A busca de fotos sem token (`IMAGE_PROVIDER=pinterest_scrape`) é a única exceção ao "sem scraping" original, e é opt-in — ver [Limitações e compliance](#️-limitações-e-compliance).
 
 ---
 
@@ -200,7 +251,7 @@ python run.py
 1. Acesse [https://content.goviralai.app/](https://content.goviralai.app/) (login Discord) **em outra aba**.
 2. Gere o texto pronto lá.
 3. No ViralPost Studio (`http://localhost:5000/create`), escolha o nº de slides (3/6/9/12) e como entregar o texto:
-   - **Roteiro por imagem** (padrão) — um campo por foto, rotulado com o papel do slide: *Imagem 1 (hook)*, *Imagem 2 (problema)*, e assim por diante. A primeira linha de cada campo vira o texto grande; o resto vira o apoio. Nada de LLM no meio: o que você escreve é o que sai.
+   - **Roteiro por imagem** (padrão) — um campo por foto, rotulado com o papel do slide: *Imagem 1 (hook)*, *Imagem 2 (problema)*, e assim por diante. A primeira linha de cada campo vira o texto grande; o resto vira o apoio — menos na **imagem 1**, que sai como uma frase só (o hook, sem apoio e sem CTA). Nada de LLM no meio: o que você escreve é o que sai.
    - **Distribuir de uma vez** — dentro do modo por imagem, abra "Colar o roteiro inteiro e distribuir", cole tudo e clique no botão. O servidor divide por `Imagem N:`, `2.`, `---` ou parágrafos e preenche os campos, que continuam editáveis.
    - **Texto corrido** — cole tudo numa caixa só e deixe o LLM estruturar, como antes.
 4. Preencha tema, estilo (**sticker** recomendado — ou quote/list/tutorial/story) e as palavras-chave da busca de imagens.
@@ -218,6 +269,7 @@ python run.py
 | `FLASK_ENV` | `development` | Ambiente Flask |
 | `SECRET_KEY` | `dev-insecure-change-me` | **Definir em produção** |
 | `DEBUG` | `true` | Modo debug |
+| `IMAGE_PROVIDER` | `auto` | De onde vêm as fotos: `auto`, `pinterest_v5`, `pinterest_scrape`, `unsplash` ou `mock` |
 | `PINTEREST_ACCESS_TOKEN` | (vazio) | Token da API oficial v5. Vazio → tenta Unsplash |
 | `PINTEREST_API_BASE_URL` | `https://api.pinterest.com/v5` | Base URL da API |
 | `UNSPLASH_ACCESS_KEY` | (vazio) | Access Key do Unsplash. Usada quando não há token Pinterest. Vazio → mock |
@@ -247,9 +299,11 @@ Nenhum valor secreto é commitado. Tokens nunca cruzam para o frontend.
 
 ### De onde vêm as imagens
 
-A prioridade é `PINTEREST_ACCESS_TOKEN` → `UNSPLASH_ACCESS_KEY` → **mock** (gradientes SVG sintéticos). Se as duas chaves estiverem vazias, o carrossel sai com gradientes coloridos em vez de fotos.
+Com `IMAGE_PROVIDER=auto` (o default), a prioridade é `PINTEREST_ACCESS_TOKEN` → `UNSPLASH_ACCESS_KEY` → **mock** (gradientes SVG sintéticos). Se as duas chaves estiverem vazias, o carrossel sai com gradientes coloridos em vez de fotos.
 
 O `/search/pins/` do Pinterest exige **Standard Access** (aprovação manual da Pinterest). O Unsplash não exige aprovação — crie um app em [unsplash.com/oauth/applications](https://unsplash.com/oauth/applications) e copie a **Access Key**.
+
+Sem nenhuma das duas, há a terceira via: `IMAGE_PROVIDER=pinterest_scrape` busca no Pinterest **sem token**, pela API interna do site (ver [Buscar fotos no Pinterest sem token](#buscar-fotos-no-pinterest-sem-token)). Ela nunca entra sozinha no modo `auto` — é escolha explícita, com as [ressalvas de compliance](#️-limitações-e-compliance) que vêm junto.
 
 **Por que a mesma query devolve fotos diferentes agora:** o `/search/photos` do Unsplash ordena por relevância e essa ordem é estável — a página 1 de "café da manhã" é sempre a mesma. Não havia cache no app; era determinismo da API. Cada busca agora sorteia uma página entre 1 e 5 (`UnsplashClient._PAGE_WINDOW`), o que renova o resultado sem cair em fotos irrelevantes. A página escolhida aparece no log `INFO`. Se a query tem acervo curto e a página sorteada vem vazia, a busca reentra dentro do `total_pages` em vez de cair no gradiente mock.
 
@@ -257,10 +311,11 @@ Para confirmar o que está ativo:
 
 ```bash
 curl -s http://localhost:5000/health | python -m json.tool
-# providers.images        → "pinterest_v5" | "unsplash" | "mock"
+# providers.images        → "pinterest_v5" | "pinterest_scrape" | "unsplash" | "mock"
 # providers.casting       → "woman" | "person" | "off"
 # providers.vision        → "configured" | "off"
 # images_diagnostic.using_mock → true quando o carrossel sai com gradiente
+# images_diagnostic.pinterest_scrape_installed → o pacote pinterest-dl está instalado?
 # vision_diagnostic.vision_model_value → o id do VLM, causa comum de 404
 ```
 
@@ -280,7 +335,7 @@ curl -s http://localhost:5000/health | python -m json.tool
 │   ├── adapters/
 │   │   ├── text_composer.py    # TextComposer (mock + LLM)
 │   │   ├── script_parser.py    # Roteiro por imagem — blocos → slides (sem LLM)
-│   │   ├── pinterest_client.py # Pinterest v5 + Unsplash + Mock
+│   │   ├── pinterest_client.py # Pinterest v5 + Pinterest sem token + Unsplash + Mock
 │   │   ├── ranking_provider.py # Inference (LLM) + Mock
 │   │   └── vision_provider.py  # VLM — nota + posição do texto + assunto da foto
 │   ├── services/
@@ -316,9 +371,10 @@ pip install -r requirements-dev.txt
 pytest -v tests/
 ```
 
-Cobertura (245 testes):
+Cobertura (288 testes):
 - **TextComposer** — split em slides, hashtags, texto curto, texto vazio.
 - **Roteiro por imagem** — primeira linha vira headline e o resto o body, rótulos `Imagem N:` removidos, campo vazio herda o papel, blocos além do nº de slides descartados, hashtags e CTA preservados.
+- **A imagem 1 é uma caixa só** — o bloco de duas linhas vira uma frase (sem virar headline + apoio) e o hook não é cortado no limite de headline; o composer mock devolve o hook sem body nem CTA e mantém as duas caixas nos outros slides; no LLM o body e o CTA do slide 1 são apagados mesmo quando o modelo os escreve, e o papel do slide 1 é `hook` independente do que o modelo rotule; a prévia entrega os campos de apoio e CTA da imagem 1 em leitura apenas e a gravação limpa os dois; um hook longo continua validando no formulário de edição.
 - **Distribuição do roteiro colado** — separadores `Imagem N:`, `2.`, `---` e parágrafo; teto no nº de slides com o total encontrado reportado; texto vazio e contagem inválida.
 - **Casting** — hook recebe pessoa por visão, por metadado (`alt_description`) e por pool de busca, nessa ordem; parte do corpo ("woman's hands") não conta como retrato; fotos de cenário nunca caem no slide 1; aviso quando não há foto com pessoa; `HOOK_SUBJECT=off` volta à rotação.
 - **Roteiro viral** — distribuição de papéis por nº de slides, ordem `hook…cta`, CTA só no fecho, sem texto duplicado entre headline e body.
@@ -330,6 +386,9 @@ Cobertura (245 testes):
 - **Caixa colada no texto** — a geometria bate com a do photo post de referência (passo entre linhas menor que a caixa, folga lateral proporcional ao corpo da fonte), e o `box_scale` aumenta a caixa junto com a fonte.
 - **Reposicionamento** — `pos_x`/`pos_y` vencem a âncora do papel, clamp dentro do canvas, slide sem posição mantém o comportamento antigo, e cada caixa (`box_positions`) move-se sem arrastar as outras.
 - **Pinterest mock** — geração de SVGs sintéticos.
+- **Pinterest sem token** — mapeamento do pin para a forma que o app usa (id como string, link do pin, `alt` alimentando o casting por metadado), thumb `474x` com a extensão reescrita para `.jpg` (o caminho reduzido do CDN não serve PNG), retrato preferido quando há retrato suficiente e pool inteiro quando não há, resolução ausente que não derruba a seleção, ponto de corte sorteado entre buscas iguais, uma requisição por busca, timeout vindo das settings, e fallback com motivo em falha, resultado vazio, pin sem `src` e biblioteca não instalada.
+- **Escolha do provider** — `IMAGE_PROVIDER` default `auto` e valor desconhecido caindo em `auto`; o scraping só entra quando escolhido (nunca no `auto`) e vence o token oficial quando escolhido; `auto` continua preferindo token → Unsplash; `mock` ignora o token configurado; escolha impossível (Unsplash sem chave) desce a escada em vez de devolver um cliente quebrado.
+- **Prompt do roteiro** — a regra do hook sozinho e a ordem dos papéis chegam no prompt, e o orçamento de tokens cresce com o nº de slides (o teto fixo cortava o JSON de 12 slides).
 - **Unsplash** — rotação de páginas entre buscas iguais, reentrada quando a página sorteada passa do fim do acervo, motivo do fallback por status HTTP.
 - **Ranking** — correlação com `raw_text`, fallback sem corpus.
 - **Visão (VLM)** — envia a thumb e não a foto cheia, teto de imagens por chamada equilibrado entre os dois pools, orçamento de tokens que cresce com o nº de imagens, `enable_thinking: false` no pedido e repetição sem o campo quando o gateway devolve 400, parse de âncora → `pos_*` e de `subject` (com sinônimos: `female`/`girl` → `woman`), `<think>`/cerca markdown na resposta, JSON vindo em `reasoning_content` com `content` vazio, `content` devolvido como lista de partes, recuperação dos veredictos inteiros de uma resposta cortada no limite de tokens (inclusive com `}` dentro de string), nota fora de faixa, `image_id` alucinado ou duplicado, gradiente mock sem chamada, timeout e 404 caindo no ranking textual, e resposta inútil registrada no log com `finish_reason` e o conteúdo.
@@ -408,10 +467,15 @@ Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SL
 ## ⚠️ Limitações e compliance
 
 - **goviral.ai:** ferramenta externa sem API/token. O usuário é responsável por acessar via login Discord e colar o texto no formulário. O ViralPost Studio não automatiza o acesso.
-- **Pinterest:** a busca usa a API oficial v5. Imagens retornadas podem não ter licença comercial — sempre verifique os termos antes de publicar. A atribuição é preservada na exportação.
+- **Pinterest (API oficial):** a busca usa a API oficial v5. Imagens retornadas podem não ter licença comercial — sempre verifique os termos antes de publicar. A atribuição é preservada na exportação.
+- **Pinterest sem token (`IMAGE_PROVIDER=pinterest_scrape`):** usa a biblioteca [pinterest-dl](https://github.com/sean1832/pinterest-dl), que lê a API **interna** do site. Três consequências que valem a leitura antes de ligar:
+  1. **Termos de uso.** Acesso automatizado pode conflitar com os [Terms of Service do Pinterest](https://developers.pinterest.com/terms/). A biblioteca declara uso educacional e não é afiliada ao Pinterest. Ligar a opção é decisão de quem publica — por isso ela nunca entra sozinha no modo `auto`.
+  2. **Contrato instável.** Uma API interna muda sem aviso e sem versionamento. Quando mudar, a busca falha e o carrossel cai no gradiente mock com o motivo no aviso da prévia — não quebra a aplicação, mas para de trazer fotos.
+  3. **Direitos da imagem.** Um pin não é banco de imagens: a foto costuma ser de terceiros e o Pinterest é só o índice. O link do pin vai na atribuição, mas verifique a origem antes de publicar comercialmente.
+- **Unsplash:** gratuito e sem aprovação, com atribuição obrigatória — preservada na prévia e no Markdown exportado.
 - **LLM:** o endpoint é opcional. Groq, OpenAI ou qualquer provedor OpenAI-compatible podem ser usados. "Free model" não implica em disponibilidade permanente ou autorização comercial — valide os termos.
 - **Persistência:** em memória por processo. Reiniciar o container apaga projetos. Para multi-worker, substitua `SessionStore` por Redis ou DB.
-- **Sem scraping:** nenhuma parte do código faz scraping de Pinterest, goviral.ai, Discord ou TikTok.
+- **Sem automação de conta:** nenhuma parte do código faz login, publica, curte ou segue em Pinterest, goviral.ai, Discord ou TikTok. A única leitura automatizada é a busca pública de pins descrita acima, quando explicitamente habilitada.
 
 ---
 
@@ -436,7 +500,7 @@ Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SL
 - [x] Nenhum segredo aparece no frontend, logs ou repositório.
 - [x] Testes unitários para validação, adapters e fallback.
 - [x] README com instalação, configuração e execução.
-- [x] Não há scraping nem automação de login não autorizada.
+- [x] Não há automação de login nem publicação automática; a busca sem token é opt-in e documentada.
 
 ---
 
@@ -444,7 +508,7 @@ Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SL
 
 1. Configurar `VISION_API_KEY` + `VISION_MODEL` na ModelScope (Qwen-VL) para o casting decidir por visão em vez de busca/metadado. É a única peça pendente das features desta versão — o resto já funciona sem chave.
 2. Configurar `LLM_API_BASE_URL` e `LLM_API_KEY` (ex.: Groq) para ativar o roteiro viral com LLM real. Modelos Groq suportados: `qwen/qwen3.6-27b`, `llama-3.3-70b-versatile`, `llama-3.1-8b-instant`, `mixtral-8x7b-32768`, `gemma2-9b-it` (consulte https://console.groq.com/docs/models para a lista atual).
-3. Validar escopos do token Pinterest para a busca de Pins.
+3. Validar escopos do token Pinterest para a busca de Pins — ou usar `IMAGE_PROVIDER=pinterest_scrape`, que dispensa o token.
 4. Adicionar mais estilos visuais (antes-e-depois, capa de carrossel, etc.).
 4. Persistência real (DB ou Redis) para multi-worker.
 5. Mover a chamada de visão para fora do `POST /generate` (fila ou refinamento sob demanda na prévia), tirando a latência do VLM do caminho da primeira renderização.

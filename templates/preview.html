@@ -41,6 +41,10 @@
       {% for slide in slides %}
       {% set i = loop.index0 %}
       <article class="slide-card" data-slide-index="{{ i }}">
+        {# A imagem 1 mostra o hook e nada mais: uma caixa, sem apoio nem CTA.
+           Os campos continuam no formulário (a FieldList é posicional — sumir
+           com o índice 0 deslocaria todos os outros), mas em leitura apenas. #}
+        {% set is_hook = slide.role == 'hook' %}
         <header class="slide-card-head">
           <span class="slide-number">Imagem {{ i + 1 }}</span>
           {% if slide.role %}
@@ -105,7 +109,9 @@
           Arraste cada caixa separadamente sobre a foto · duplo clique volta ao padrão
         </p>
         <div class="box-size-controls" data-slide="{{ i }}">
-          {% for key, label in [('headline', 'Headline'), ('body', 'Texto'), ('cta', 'CTA')] %}
+          {# No hook só existe uma caixa — um controle para "Texto"/"CTA" ali
+             seria um slider que não mexe em nada. #}
+          {% for key, label in ([('headline', 'Hook')] if is_hook else [('headline', 'Headline'), ('body', 'Texto'), ('cta', 'CTA')]) %}
           <div class="box-size-row">
             <label for="box-scale-{{ i }}-{{ key }}">{{ label }}</label>
             <input type="range" id="box-scale-{{ i }}-{{ key }}" class="js-box-scale"
@@ -126,11 +132,20 @@
           <label>Headline</label>
           {{ form.headlines[i](class_="input", placeholder="Título curto do slide") }}
 
+          {% if is_hook %}
+          <p class="small muted">
+            A imagem 1 é só o hook — uma caixa com a frase, sem texto de apoio
+            nem CTA. Edite a frase acima.
+          </p>
+          {% endif %}
+
           <label>Texto</label>
-          {{ form.bodies[i](class_="input textarea", rows=3, placeholder="Conteúdo do slide") }}
+          {{ form.bodies[i](class_="input textarea", rows=3, readonly=is_hook,
+                            placeholder="Sem texto de apoio na imagem do hook" if is_hook else "Conteúdo do slide") }}
 
           <label>CTA</label>
-          {{ form.ctas[i](class_="input", placeholder="Chamada para ação (opcional)") }}
+          {{ form.ctas[i](class_="input", readonly=is_hook,
+                          placeholder="Sem CTA na imagem do hook" if is_hook else "Chamada para ação (opcional)") }}
 
           <!-- Mini-galeria para escolher imagem deste slide -->
           <label>Imagem</label>

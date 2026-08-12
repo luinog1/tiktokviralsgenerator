@@ -234,7 +234,10 @@ class SlideEditForm(FlaskForm):
         min_entries=0,
     )
     headlines = FieldList(
-        StringField("Headline", validators=[Optional(), Length(max=80)]),
+        # 200 e não 80: no slide de hook a caixa única guarda a frase inteira
+        # (`HOOK_TEXT_LIMIT` = 160), e um limite menor aqui reprovaria na
+        # prévia um texto que a geração acabou de produzir.
+        StringField("Headline", validators=[Optional(), Length(max=200)]),
         min_entries=0,
     )
     bodies = FieldList(
@@ -294,21 +297,30 @@ class SlideEditForm(FlaskForm):
             raw_scales = (
                 self.box_scales[i].data if i < len(self.box_scales.entries) else ""
             )
-            result.append({
+            role = orig.get("role", "value")
+            slide = {
                 "headline": headline or orig.get("headline", ""),
                 "body": body or orig.get("body", ""),
                 "call_to_action": cta or orig.get("call_to_action", ""),
                 "order": i,
                 "image_id": image_id or orig.get("image_id", ""),
                 # O papel no roteiro viral não é editável — preservar o original.
-                "role": orig.get("role", "value"),
+                "role": role,
                 # Sem arraste, o campo vem vazio e o slide volta à âncora do papel.
                 "pos_x": pos_x,
                 "pos_y": pos_y,
                 # Ajustes por caixa. Vazios = a caixa segue o bloco.
                 "box_positions": _parse_box_positions(raw_boxes),
                 "box_scales": _parse_box_scales(raw_scales),
-            })
+            }
+            # O slide de hook é uma caixa só. A prévia já entrega apoio e CTA
+            # como leitura apenas, então aqui não se perde edição nenhuma — é a
+            # trava contra um POST montado à mão, que reintroduziria as caixas
+            # que a imagem 1 não deve ter.
+            if role == "hook":
+                slide["body"] = ""
+                slide["call_to_action"] = ""
+            result.append(slide)
         return result
 
 

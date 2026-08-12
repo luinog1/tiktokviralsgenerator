@@ -396,3 +396,130 @@ def test_successful_unsplash_search_leaves_no_fallback_reason(monkeypatch):
     assert len(images) == 1
     assert not is_mock_image(images[0])
     assert client.last_fallback_reason == ""
+
+
+# ---------- a regra do slide 1: o hook sozinho, numa caixa ----------
+
+
+def test_mock_composer_leaves_the_hook_alone_on_the_first_slide():
+    """A primeira foto mostra a frase do hook — sem apoio e sem CTA."""
+    composer = MockTextComposer()
+    carousel = composer.compose(
+        "ninguém acorda às 5h por disciplina. acorda porque dormiu às 21h. "
+        "comece pela hora de dormir. o resto se ajeita sozinho.",
+        style="sticker",
+        slides_count=3,
+    )
+
+    hook = carousel.slides[0]
+    assert hook.role == "hook"
+    assert hook.headline
+    assert hook.body == ""
+    assert hook.call_to_action == ""
+
+
+def test_mock_composer_still_uses_two_boxes_on_the_other_slides():
+    """A regra vale para o hook, não para o carrossel inteiro."""
+    composer = MockTextComposer()
+    carousel = composer.compose(
+        "primeira frase do texto. segunda frase que explica. terceira frase. "
+        "quarta frase com o exemplo. quinta frase fechando o assunto. "
+        "sexta frase para o fim.",
+        style="sticker",
+        slides_count=3,
+    )
+
+    assert any(s.body for s in carousel.slides[1:])
+
+
+def _llm_settings():
+    return Settings.from_env({
+        "LLM_PROVIDER": "openai_compatible",
+        "LLM_API_BASE_URL": "https://api.groq.com/openai/v1",
+        "LLM_API_KEY": "gsk_test",
+        "LLM_MODEL": "llama-3.1-8b-instant",
+    })
+
+
+def _llm_reply(slides: list[dict]) -> _FakeResponse:
+    import json
+    content = json.dumps({"slides": slides, "hashtags": ["foco"], "caption": "legenda"})
+    return _FakeResponse(200, {"choices": [{"message": {"content": content}}]})
+
+
+def test_llm_hook_slide_is_one_box_even_when_the_model_writes_a_body(monkeypatch):
+    """O prompt proíbe apoio no slide 1, mas o modelo desobedece — a regra do
+    produto não pode depender de o modelo ter obedecido."""
+    from app.adapters.text_composer import LLMTextComposer
+
+    monkeypatch.setattr(
+        "app.adapters.text_composer.requests.post",
+        lambda *a, **k: _llm_reply([
+            {"role": "hook", "headline": "ninguém acorda às 5h por disciplina",
+             "body": "e ninguém fala essa parte", "call_to_action": "salva aí"},
+            {"role": "value", "headline": "comece pela hora de dormir",
+             "body": "o resto se ajeita", "call_to_action": ""},
+            {"role": "cta", "headline": "agora é com você",
+             "body": "", "call_to_action": "salva pra tentar amanhã"},
+        ]),
+    )
+
+    carousel = LLMTextComposer(_llm_settings()).compose("texto", slides_count=3)
+
+    hook = carousel.slides[0]
+    assert hook.body == ""
+    assert hook.call_to_action == ""
+    # O que o modelo escreveu no apoio não some: entra na mesma caixa.
+    assert hook.headline == (
+        "ninguém acorda às 5h por disciplina e ninguém fala essa parte"
+    )
+    assert carousel.slides[1].body == "o resto se ajeita"
+
+
+def test_llm_first_slide_is_the_hook_whatever_role_the_model_returns(monkeypatch):
+    from app.adapters.text_composer import LLMTextComposer
+
+    monkeypatch.setattr(
+        "app.adapters.text_composer.requests.post",
+        lambda *a, **k: _llm_reply([
+            {"role": "value", "headline": "a primeira frase", "body": "apoio"},
+            {"role": "cta", "headline": "fecho", "call_to_action": "salva"},
+        ]),
+    )
+
+    carousel = LLMTextComposer(_llm_settings()).compose("texto", slides_count=2)
+
+    assert carousel.slides[0].role == "hook"
+    assert carousel.slides[0].body == ""
+
+
+def test_the_prompt_spells_out_the_hook_rule_and_the_role_order():
+    from app.adapters.text_composer import _build_viral_prompt
+
+    prompt = _build_viral_prompt(6, "pt-BR", viral_script_roles(6))
+
+    assert "hook" in prompt.lower()
+    assert "VAZIO no slide 1" in prompt
+    assert "hook → problem → agitation" in prompt
+    assert "pt-BR" in prompt
+
+
+def test_the_token_budget_grows_with_the_number_of_slides(monkeypatch):
+    """Com o teto fixo de antes, o JSON de 12 slides chegava cortado e o
+    carrossel inteiro caía no mock sem dizer por quê."""
+    from app.adapters.text_composer import LLMTextComposer
+
+    budgets: list[int] = []
+
+    def _capture(*args, **kwargs):
+        budgets.append(kwargs["json"]["max_tokens"])
+        return _llm_reply([{"role": "hook", "headline": "frase"}])
+
+    monkeypatch.setattr("app.adapters.text_composer.requests.post", _capture)
+    composer = LLMTextComposer(_llm_settings())
+    composer.compose("texto", slides_count=3)
+    composer.compose("texto", slides_count=12)
+
+    small, large = budgets
+    assert large > small
+    assert large >= 12 * 90
