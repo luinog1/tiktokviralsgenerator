@@ -159,6 +159,27 @@ def _truncate(text: str, limit: int) -> str:
     return cut + "…"
 
 
+def _spread(items: list[str], slots: int) -> list[list[str]]:
+    """Reparte os trechos entre `slots` slides, o último ficando com as sobras.
+
+    Menos trechos que slides significa texto curto demais para o carrossel
+    pedido: os trechos entram em rotação e os slides que sobrarem saem com o
+    texto de espera do `_build_slide`, editável na prévia.
+    """
+    if slots <= 0:
+        return []
+    if not items:
+        return [[] for _ in range(slots)]
+    if len(items) < slots:
+        return [[items[i % len(items)]] for i in range(slots)]
+    per_slot = len(items) // slots
+    return [
+        items[i * per_slot :] if i == slots - 1
+        else items[i * per_slot : (i + 1) * per_slot]
+        for i in range(slots)
+    ]
+
+
 # ---------- roteiro viral (estrutura de 3 atos) ----------
 #
 # Estrutura clássica de script viral de TikTok:
@@ -279,7 +300,13 @@ class MockTextComposer:
         hashtags = _extract_hashtags(cleaned)
         # Remove hashtags do corpo para não poluir os slides
         body_text = _HASHTAG_RE.sub("", cleaned).strip()
-        body_text = re.sub(r"\s{2,}", " ", body_text)
+        # Só espaço e tab. O `\s{2,}` que havia aqui incluía o `\n` e colapsava
+        # TODAS as linhas em branco do texto colado: o `_split_paragraphs` abaixo
+        # via um parágrafo só, os slides recebiam o texto INTEIRO em rotação e o
+        # hook saía com o roteiro colado dentro dele — o sintoma era "o hook
+        # juntou com outro texto" e valia para todos os slides de uma vez.
+        body_text = re.sub(r"[ \t]{2,}", " ", body_text)
+        body_text = re.sub(r"[ \t]*\n[ \t]*", "\n", body_text)
 
         slides: list[SlideContent] = []
         paragraphs = _split_paragraphs(body_text)
@@ -299,24 +326,13 @@ class MockTextComposer:
 
         roles = viral_script_roles(target)
 
-        if len(chunks) >= target:
-            # Agrupar chunks por slide
-            per_slide = max(1, len(chunks) // target)
-            for i in range(target):
-                start = i * per_slide
-                if i == target - 1:
-                    chunk_list = chunks[start:]
-                else:
-                    chunk_list = chunks[start : start + per_slide]
-                slide_body = " ".join(chunk_list).strip()
-                slides.append(self._build_slide(slide_body, i, style, roles[i]))
-        else:
-            # Menos chunks que slides — repetir em rotação para preencher
-            for i in range(target):
-                chunk = chunks[i % len(chunks)]
-                # Variar ligeiramente para não ficar idêntico
-                suffix = f" (parte {i + 1}/{target})" if i >= len(chunks) else ""
-                slides.append(self._build_slide(chunk + suffix, i, style, roles[i]))
+        # O slide 1 é o hook: o PRIMEIRO trecho e nada mais. A divisão anterior
+        # repartia os trechos em partes iguais sem reservar esse, então o hook
+        # saía com o começo do slide 2 colado — e a regra do hook sozinho, que
+        # todo o resto do código respeita, era desfeita aqui na origem.
+        slides.append(self._build_slide([chunks[0]], 0, style, roles[0]))
+        for i, group in enumerate(_spread(chunks[1:], target - 1), start=1):
+            slides.append(self._build_slide(group, i, style, roles[i]))
 
         caption = self._build_caption(body_text, style)
         return ComposedCarousel(
@@ -327,19 +343,31 @@ class MockTextComposer:
         )
 
     @staticmethod
-    def _build_slide(body: str, order: int, style: str, role: str = "value") -> SlideContent:
-        body = body.strip()
-        if not body:
-            body = "Continue para o próximo slide."
-        # Headline = primeira frase; body = o que sobra. Repetir a mesma frase
-        # nos dois campos deixava o slide com o texto duplicado.
-        sentences = _split_sentences(body)
-        if len(sentences) > 1:
-            headline = _truncate(sentences[0], 90)
-            rest = _truncate(" ".join(sentences[1:]), 280)
+    def _build_slide(
+        parts: list[str], order: int, style: str, role: str = "value"
+    ) -> SlideContent:
+        """Um slide a partir dos trechos que couberam nele — um por caixa.
+
+        Dois trechos significam que o texto colado tinha uma linha em branco
+        entre eles, e é assim que o roteiro indica "isto vai em outra caixa":
+        o primeiro trecho fica na caixa de cima e o resto na de baixo. Um
+        trecho só volta à regra por sentença — headline = primeira frase — que
+        existe para o slide não mostrar a mesma frase duas vezes.
+        """
+        parts = [p.strip() for p in parts if p and p.strip()]
+        if not parts:
+            parts = ["Continue para o próximo slide."]
+        if len(parts) > 1:
+            headline = _truncate(parts[0], 90)
+            rest = _truncate(" ".join(parts[1:]), 280)
         else:
-            headline = _truncate(body, 90)
-            rest = ""
+            sentences = _split_sentences(parts[0])
+            if len(sentences) > 1:
+                headline = _truncate(sentences[0], 90)
+                rest = _truncate(" ".join(sentences[1:]), 280)
+            else:
+                headline = _truncate(parts[0], 90)
+                rest = ""
         # CTA só no slide de fecho — repetir em todos polui o carrossel.
         cta = _STYLE_CTA.get(style, "comenta abaixo 👇") if role == "cta" else ""
         return enforce_hook_slide(SlideContent(
@@ -539,13 +567,18 @@ class LLMTextComposer:
         slides_data: Iterable[dict[str, Any]] = parsed.get("slides") or []
         slides: list[SlideContent] = []
         for i, s in enumerate(slides_data):
-            headline = _truncate(str(s.get("headline") or "").strip(), 70)
+            order = len(slides)
+            # O slide 1 é uma caixa só, e essa caixa cabe mais que uma headline
+            # comum (HOOK_TEXT_LIMIT vs. 70). Cortar o hook em 70 aqui era o
+            # que devolvia a frase com "…" no meio — texto alterado sem motivo,
+            # já que a caixa comportava a frase inteira.
+            limit = HOOK_TEXT_LIMIT if order == 0 else 70
+            headline = _truncate(str(s.get("headline") or "").strip(), limit)
             body = _truncate(str(s.get("body") or "").strip(), 280)
             if not headline and not body:
                 continue
             # O papel vem do modelo, mas a posição manda: se o modelo devolver
             # um papel inválido (ou nenhum), usamos o da estrutura canônica.
-            order = len(slides)
             role = _normalize_role(s.get("role")) or (
                 roles[order] if order < len(roles) else "value"
             )
@@ -573,6 +606,18 @@ class LLMTextComposer:
         if not slides:
             return MockTextComposer().compose(
                 cleaned, style=style, slides_count=slides_count, extra=extra
+            )
+
+        # A primeira foto do carrossel é a única que ninguém desliza sem ler:
+        # sair sem texto nenhum é o pior resultado possível dela. Nenhuma regra
+        # acima deveria esvaziá-la, mas o veredicto é do modelo — se sobrou
+        # caixa vazia, ela recebe a primeira frase do texto colado, que é a
+        # melhor aproximação de hook disponível sem inventar nada.
+        if not slides[0].headline:
+            fallback = _split_sentences(cleaned) or [cleaned]
+            slides[0].headline = hook_box_text(fallback[0])
+            logger.warning(
+                "LLM devolveu o slide 1 sem texto — hook tirado do texto colado."
             )
 
         # Garantir que o carrossel sempre feche com um CTA visível.

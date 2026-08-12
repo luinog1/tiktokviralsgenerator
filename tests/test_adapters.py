@@ -432,6 +432,65 @@ def test_mock_composer_still_uses_two_boxes_on_the_other_slides():
     assert any(s.body for s in carousel.slides[1:])
 
 
+def _pasted_script() -> str:
+    """O formato em que o roteiro é colado: linha em branco entre as caixas,
+    intervalo maior entre as imagens, e nenhum ponto final (é texto de sticker).
+    """
+    return (
+        "ninguém acorda às 5h por disciplina\n"
+        "\n\n"
+        "acorda porque dormiu às 21h\n"
+        "\n"
+        "ninguém fala essa parte\n"
+        "\n\n"
+        "o corpo não negocia sono\n"
+        "\n"
+        "você só troca a hora da dívida\n"
+        "\n\n"
+        "salva pra começar amanhã\n"
+        "\n"
+        "e comenta que horas você dorme"
+    )
+
+
+def test_mock_composer_keeps_the_pasted_paragraphs_apart():
+    """Sem isso TODOS os slides saíam com o texto colado inteiro.
+
+    O `\\s{2,}` que limpava os espaços duplos deixados pelas hashtags incluía o
+    `\\n`: as linhas em branco desapareciam, o texto virava um parágrafo só e o
+    composer repetia esse parágrafo em rotação por todos os slides — inclusive
+    no slide 1, que é o hook.
+    """
+    carousel = MockTextComposer().compose(
+        _pasted_script(), style="sticker", slides_count=4
+    )
+
+    textos = [f"{s.headline} {s.body}".strip() for s in carousel.slides]
+    assert len(set(textos)) == 4, textos
+
+
+def test_mock_composer_gives_the_hook_only_the_first_paragraph():
+    """O hook é o primeiro trecho e nada mais — nem o começo do slide 2."""
+    carousel = MockTextComposer().compose(
+        _pasted_script(), style="sticker", slides_count=4
+    )
+
+    hook = carousel.slides[0]
+    assert hook.headline == "ninguém acorda às 5h por disciplina"
+    assert hook.body == ""
+    assert hook.call_to_action == ""
+
+
+def test_mock_composer_maps_each_pasted_chunk_to_a_box():
+    """Uma linha em branco no texto colado = a outra caixa da mesma imagem."""
+    carousel = MockTextComposer().compose(
+        _pasted_script(), style="sticker", slides_count=4
+    )
+
+    assert carousel.slides[1].headline == "acorda porque dormiu às 21h"
+    assert carousel.slides[1].body == "ninguém fala essa parte"
+
+
 def _llm_settings():
     return Settings.from_env({
         "LLM_PROVIDER": "openai_compatible",
@@ -515,6 +574,63 @@ def test_llm_first_slide_is_the_hook_whatever_role_the_model_returns(monkeypatch
     assert carousel.slides[0].body == ""
     # O papel virou hook, então o apoio segue a regra do LLM: apagado.
     assert carousel.slides[0].headline == "a primeira frase"
+
+
+def test_llm_hook_is_not_cut_at_the_headline_limit(monkeypatch):
+    """A caixa do hook cabe 160 caracteres; cortar em 70 alterava a frase.
+
+    O corte era aplicado antes de o slide ser reconhecido como hook, então uma
+    frase de 80 caracteres voltava com "…" no meio — texto alterado sem que a
+    caixa precisasse disso.
+    """
+    from app.adapters.text_composer import HOOK_TEXT_LIMIT, LLMTextComposer
+
+    hook = "ninguém acorda às cinco da manhã por disciplina e essa é a parte que ninguém conta"
+    assert 70 < len(hook) <= HOOK_TEXT_LIMIT
+    monkeypatch.setattr(
+        "app.adapters.text_composer.requests.post",
+        lambda *a, **k: _llm_reply([
+            {"role": "hook", "headline": hook},
+            {"role": "cta", "headline": "fecho", "call_to_action": "salva"},
+        ]),
+    )
+
+    carousel = LLMTextComposer(_llm_settings()).compose("texto", slides_count=2)
+
+    assert carousel.slides[0].headline == hook
+    # A regra do corte continua valendo nos outros slides.
+    assert len(carousel.slides[1].headline) <= 70
+
+
+@pytest.mark.parametrize("first_slide", [
+    {"role": "hook", "headline": "a frase", "body": "apoio", "call_to_action": "cta"},
+    {"role": "hook", "headline": "", "body": "a frase veio no campo errado"},
+    {"role": "value", "headline": "sem papel de hook", "body": "apoio"},
+    {"role": "hook", "headline": "   ", "body": "só o body tem texto"},
+])
+def test_llm_first_slide_never_comes_out_without_text(monkeypatch, first_slide):
+    """A imagem 1 é a única que ninguém desliza sem ler — vazia é o pior caso.
+
+    Cada variação é uma forma de o modelo desobedecer ao prompt do slide 1.
+    Nenhuma delas pode terminar em caixa vazia.
+    """
+    from app.adapters.text_composer import LLMTextComposer
+
+    monkeypatch.setattr(
+        "app.adapters.text_composer.requests.post",
+        lambda *a, **k: _llm_reply([
+            first_slide,
+            {"role": "cta", "headline": "fecho", "call_to_action": "salva"},
+        ]),
+    )
+
+    carousel = LLMTextComposer(_llm_settings()).compose(
+        "o texto colado do goviral, com uma frase que serve de reserva.",
+        slides_count=2,
+    )
+
+    assert carousel.slides[0].role == "hook"
+    assert carousel.slides[0].headline.strip()
 
 
 def test_the_prompt_spells_out_the_hook_rule_and_the_role_order():

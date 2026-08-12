@@ -21,7 +21,7 @@ from app.adapters import (
     build_text_composer,
 )
 from app.adapters.pinterest_client import is_mock_image
-from app.adapters.script_parser import compose_from_blocks
+from app.adapters.script_parser import compose_from_blocks, labeled_blocks
 from app.adapters.vision_provider import VisionRankingProvider, build_vision_provider
 from app.config import Settings
 from app.services.casting import POOL_HOOK, POOL_SCENE, apply_casting, cast_carousel
@@ -96,9 +96,28 @@ class GenerationService:
         `script_blocks` é o modo manual: um bloco de texto por imagem, na ordem
         em que o usuário quer as imagens. Preenchido, ele manda — o texto já é a
         decisão do usuário e nenhum LLM reescreve por cima.
+
+        O texto corrido segue a mesma regra quando ele PRÓPRIO traz os rótulos
+        "Imagem N:". Escrever o rótulo é dizer em qual foto cada trecho entra;
+        mandar isso para um LLM redistribuir só cria a chance de ele redistribuir
+        diferente — e o sintoma disso é o hook aparecendo colado no texto de
+        outro slide.
         """
         warnings: list[str] = []
         manual = [b for b in (script_blocks or []) if b and b.strip()]
+
+        if not manual:
+            manual = labeled_blocks(raw_text)
+            if manual:
+                logger.info(
+                    "Texto colado traz rótulos de imagem (%d blocos) — "
+                    "composição determinística, sem LLM.",
+                    len(manual),
+                )
+                warnings.append(
+                    f"O texto colado já indicava as imagens ({len(manual)} "
+                    "rótulos): os blocos foram usados como escritos, sem LLM."
+                )
 
         if manual:
             # 1a. Modo manual — determinístico, sem chamada de LLM.

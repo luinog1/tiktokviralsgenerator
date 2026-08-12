@@ -57,8 +57,10 @@
       <p class="small muted">
         Cole o texto do <a href="{{ goviral_url }}" target="_blank" rel="noopener">viral.app</a>
         distribuindo um bloco por foto, na ordem em que as imagens vão aparecer.
-        A <strong>primeira linha</strong> de cada bloco vira o texto grande; o
-        resto vira o texto de apoio. A <strong>imagem 1 é a exceção</strong>:
+        Dentro de um campo, <strong>pule uma linha</strong> para mandar o texto
+        seguinte para outra caixa da mesma imagem — sem linha em branco, a
+        primeira linha vira o texto grande e o resto vira o apoio.
+        A <strong>imagem 1 é a exceção</strong>:
         ela mostra só o hook, numa caixa só — o que você escrever ali sai como
         uma frase, sem texto de apoio e sem CTA.
         {% if casting_enabled %}
@@ -77,12 +79,17 @@
       <details class="script-paste" id="script-paste">
         <summary>Colar o roteiro inteiro e distribuir</summary>
         <p class="small muted">
-          Cole tudo de uma vez. Entende "Imagem 2:", "3.", linhas separadas por
-          "---" e parágrafos em branco. Depois de distribuir, os campos abaixo
+          Cole tudo de uma vez, escrevendo <code>Imagem 1:</code>,
+          <code>Imagem 2:</code>… na frente de cada trecho — é o rótulo que diz
+          em qual foto o texto entra, e ele não vai para a imagem. Dentro de um
+          trecho, <strong>uma linha em branco</strong> manda o texto seguinte
+          para a outra caixa daquela imagem. Sem rótulo, valem
+          <code>2.</code>, <code>---</code> e o intervalo de duas linhas em
+          branco entre as imagens. Depois de distribuir, os campos abaixo
           continuam editáveis.
         </p>
-        <textarea id="script-paste-input" class="input textarea" rows="6"
-                  placeholder="Imagem 1: ...&#10;&#10;Imagem 2: ..."></textarea>
+        <textarea id="script-paste-input" class="input textarea" rows="8"
+                  placeholder="Imagem 1: a frase do hook&#10;&#10;Imagem 2: a primeira caixa&#10;&#10;a segunda caixa&#10;&#10;Imagem 3: ..."></textarea>
         <div class="script-paste-actions">
           <button type="button" class="btn btn-ghost" id="script-paste-apply">
             Distribuir pelas imagens
@@ -97,7 +104,7 @@
             {{ current_labels[loop.index0] if loop.index0 < current_labels|length else 'Imagem ' ~ loop.index }}
           </label>
           {{ entry(id=entry.id, class_="input textarea script-input", rows=3,
-                   placeholder="primeira linha = texto grande · linhas seguintes = apoio") }}
+                   placeholder="texto da caixa de cima · pule uma linha para a caixa de baixo") }}
           {% if entry.errors %}
             <ul class="errors">{% for err in entry.errors %}<li>{{ err }}</li>{% endfor %}</ul>
           {% endif %}
@@ -109,6 +116,13 @@
     <!-- Modo automático: o texto inteiro numa caixa só -->
     <div class="field" id="raw-text-field">
       <label for="raw_text">{{ form.raw_text.label.text }}</label>
+      <p class="small muted">
+        O LLM organiza o texto em slides — <strong>a menos que você escreva
+        <code>Imagem 1:</code>, <code>Imagem 2:</code>…</strong> na frente dos
+        trechos. Com os rótulos, cada trecho vai para a foto que você indicou,
+        sem LLM no meio: o rótulo é orientação e não aparece na imagem. Uma
+        linha em branco dentro do trecho separa as duas caixas daquela imagem.
+      </p>
       <div class="textarea-meta">
         <span id="char-counter">0</span> / 6000 caracteres
         <a href="{{ goviral_url }}" target="_blank" rel="noopener" class="small muted" style="margin-left: auto;">

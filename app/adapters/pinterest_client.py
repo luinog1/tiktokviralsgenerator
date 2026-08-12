@@ -420,12 +420,36 @@ def pinterest_scrape_available() -> bool:
 
 def _is_portrait(media: Any) -> bool:
     """A foto é em pé? Resolução ausente ou zerada conta como "não sei"."""
+    width, height = _resolution(media)
+    return width > 0 and height >= width
+
+
+def _resolution(media: Any) -> tuple[int, int]:
+    """(largura, altura) do pin. (0, 0) quando o payload não trouxe medida."""
     resolution = getattr(media, "resolution", None) or ()
     try:
-        width, height = int(resolution[0]), int(resolution[1])
+        return int(resolution[0]), int(resolution[1])
     except (IndexError, TypeError, ValueError):
-        return False
-    return width > 0 and height >= width
+        return 0, 0
+
+
+def _covers_slide(media: Any, minimum: tuple[int, int]) -> bool:
+    """A foto tem pixel suficiente para preencher o slide sem ser ampliada?
+
+    O render faz `cover` da foto no canvas de 1080×1350: um pin de 474×711 é
+    esticado para caber e chega ao feed borrado, com a legenda nítida por cima —
+    a assinatura visual de post amador. O VLM não tem como reprovar isso, porque
+    ele julga uma thumb de 474px: a resolução da origem não está na imagem que
+    ele vê. Por isso o piso é aplicado aqui, na busca, e não no ranking.
+
+    Medida ausente conta como reprovada: o pool tem 40 pins e sobra material
+    para exigir prova em vez de dar o benefício da dúvida.
+    """
+    min_width, min_height = minimum
+    if min_width <= 0 and min_height <= 0:
+        return True
+    width, height = _resolution(media)
+    return width >= min_width and height >= min_height
 
 
 def _load_pinterest_dl() -> Any | None:
@@ -452,8 +476,15 @@ class PinterestScrapeClient:
     # numa requisição só e ainda sobra material para filtrar e sortear.
     _POOL_SIZE = 40
 
-    def __init__(self, timeout: int = 20):
+    def __init__(self, timeout: int = 20, min_resolution: tuple[int, int] = (0, 0)):
         self._timeout = timeout
+        # Piso de resolução: o tamanho do slide, para a foto não ser ampliada no
+        # render. Filtrado aqui e não no parâmetro `min_resolution` da
+        # biblioteca porque lá o corte acontece ANTES da contagem: para fechar
+        # os 40 pins ela pagina de novo, com um `sleep` a cada página, dentro do
+        # POST /generate. Filtrando o pool já recebido, a busca continua sendo
+        # uma requisição só.
+        self._min_resolution = min_resolution
         # Por que a última busca caiu no mock. Vazio = não caiu.
         self.last_fallback_reason = ""
 
@@ -497,24 +528,35 @@ class PinterestScrapeClient:
 
         selected = self._select(medias, limit)
         logger.info(
-            "Pinterest (scraping) retornou %d imagens para query=%r (de um pool de %d)",
+            "Pinterest (scraping) retornou %d imagens para query=%r "
+            "(pool de %d, %d acima do piso de %dx%d)",
             len(selected), query[:80], len(medias),
+            sum(1 for m in medias if _covers_slide(m, self._min_resolution)),
+            self._min_resolution[0], self._min_resolution[1],
         )
         return [self._to_image(media, query) for media in selected]
 
     def _select(self, medias: list[Any], limit: int) -> list[Any]:
-        """Recorta o pool: retrato primeiro, começando num ponto sorteado.
+        """Recorta o pool: alta resolução e retrato primeiro, num ponto sorteado.
 
-        Duas correções do mesmo pool, pelos mesmos motivos que já valem para o
-        Unsplash. **Retrato** porque o slide é 4:5 e uma foto deitada perde
-        metade da cena no recorte — o Unsplash resolve isso com
-        `orientation=portrait`, que a API interna não oferece. **Ponto
-        sorteado** porque a busca vem ordenada por relevância e essa ordem é
-        estável: sem isso o mesmo tema devolveria as mesmas fotos toda vez, o
-        que parece cache do app e não é.
+        Três correções do mesmo pool. **Resolução** porque o slide tem 1080×1350
+        e uma foto menor é ampliada no render — sai borrada com o texto nítido
+        por cima. **Retrato** porque uma foto deitada perde metade da cena no
+        recorte de cover; o Unsplash resolve isso com `orientation=portrait`, que
+        a API interna não oferece. **Ponto sorteado** porque a busca vem ordenada
+        por relevância e essa ordem é estável: sem isso o mesmo tema devolveria
+        as mesmas fotos toda vez, o que parece cache do app e não é.
+
+        As duas exigências caem em ordem quando o tema não tem acervo para elas:
+        primeiro a orientação, depois a resolução. Um carrossel com foto pequena
+        ainda é melhor que um carrossel de gradientes — e a foto pequena aparece
+        na galeria da prévia, onde dá para trocar.
         """
+        sharp = [m for m in medias if _covers_slide(m, self._min_resolution)]
         portrait = [m for m in medias if _is_portrait(m)]
-        pool = portrait if len(portrait) >= limit else medias
+        for pool in ([m for m in sharp if _is_portrait(m)], sharp, portrait, medias):
+            if len(pool) >= limit:
+                break
         start = random.randint(0, max(0, len(pool) - limit))
         return pool[start : start + limit]
 
@@ -569,7 +611,12 @@ def build_pinterest_client(settings: Settings) -> PinterestClient:
         # `last_fallback_reason`, que a prévia mostra. Trocar por outro provider
         # aqui esconderia a única pista de por que o carrossel saiu diferente.
         logger.info("IMAGE_PROVIDER=pinterest_scrape — Pinterest sem token.")
-        return PinterestScrapeClient(timeout=settings.request_timeout_seconds)
+        return PinterestScrapeClient(
+            timeout=settings.request_timeout_seconds,
+            # O piso de resolução é o próprio slide: exigir mais seria arbitrário
+            # e exigir menos deixaria entrar foto que o render precisa ampliar.
+            min_resolution=(settings.slide_width, settings.slide_height),
+        )
     if choice == "pinterest_v5":
         if settings.pinterest_configured:
             return PinterestV5Client(settings)

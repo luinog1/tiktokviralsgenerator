@@ -2,9 +2,63 @@
 
 Aplicação Flask que transforma o texto gerado pelo **goviral.ai** em um carrossel visual pronto para publicar — combinando o texto colado com fotos do Pinterest (API oficial **ou** busca sem token) ou do Unsplash, composição opcional via LLM e renderização estilo **TikTok photo post** (1080×1350, 4:5).
 
-> **Status:** MVP v0.7 — Ready for building
+> **Status:** MVP v0.8 — Ready for building
 > **Stack:** Python 3.11 · Flask 3 · Jinja2 · WTForms · Pillow · Docker
 > **Idioma inicial:** Português (pt-BR)
+
+---
+
+## 🎯 O que mudou na v0.8
+
+- ✅ **O rótulo `Imagem N:` decide, e o LLM sai do caminho** — quando o texto colado traz os rótulos, cada trecho vai para a foto que você indicou e **nenhum composer roda**. Antes isso só valia no botão "distribuir"; colado na caixa única, o mesmo texto ia para o LLM redistribuir. Escrever o rótulo já é a decisão de distribuição — mandar isso para um modelo só cria a chance de ele decidir diferente, e o sintoma disso era o hook aparecendo colado no texto de outro slide. A prévia avisa quantos rótulos foram obedecidos.
+- ✅ **A linha em branco é a caixa de baixo, não a imagem seguinte** — dentro de um bloco, uma linha em branco manda o texto seguinte para a **segunda caixa daquela imagem**; o intervalo de **duas** linhas em branco é que separa as imagens. Era a distinção que o roteiro colado já carregava e que o parser jogava fora: toda linha em branco virava imagem nova, então cada script rendia dois slides e o carrossel saía com o dobro de fotos.
+- ✅ **O rótulo aceita nota e linha própria** — `Imagem 1 (hook): frase` e `Imagem 2:` com o texto embaixo. A nota entre parênteses é orientação para quem escreve e sai junto com o rótulo. Antes, qualquer uma das duas formas fazia o rótulo **deixar de ser rótulo**: a frase virava preâmbulo (descartada) ou entrava na foto com `Imagem 1 (hook):` escrito nela.
+- 🐛 **Todos os slides saíam com o roteiro inteiro** — no composer mock, a limpeza que tirava os espaços duplos das hashtags usava `\s{2,}`, que inclui `\n`: as linhas em branco do texto colado desapareciam, o texto virava um parágrafo só e o mesmo parágrafo era repetido em rotação por todos os slides — hook incluído. É a causa de "o hook juntou com outro texto" quando não há LLM configurado (`LLM_PROVIDER=mock`) e também quando a chamada ao LLM falha, porque o fallback é este mesmo composer. Agora o slide 1 recebe o **primeiro trecho e nada mais**, e cada trecho seguinte vira uma caixa.
+- 🐛 **O hook cortado em 70 caracteres no caminho LLM** — a caixa do hook cabe 160 (`HOOK_TEXT_LIMIT`), mas o corte de headline era aplicado **antes** de o slide ser reconhecido como hook: uma frase de 80 caracteres voltava com `…` no meio, alterada sem que a caixa precisasse disso. O corte de 70 continua valendo nos outros slides.
+- ✅ **A imagem 1 nunca sai sem texto** — invariante testada contra as quatro formas de o modelo desobedecer ao prompt do slide 1 (apoio a mais, frase no campo errado, papel errado, headline em branco). Se ainda assim sobrar caixa vazia, ela recebe a primeira frase do texto colado, com o motivo no log.
+- ✅ **Piso de resolução na busca de fotos** — o Pinterest sem token agora descarta pin que não cobre os 1080×1350 do slide. Um pin de 474×711 era **ampliado** no render e chegava ao feed borrado, com a legenda nítida por cima. O ranking por visão não tinha como reprovar isso: o VLM julga uma thumb de 474px, e a resolução da origem não está na imagem que ele vê (ver [Só foto que cobre o slide](#só-foto-que-cobre-o-slide)).
+
+### O rótulo diz a imagem, a linha em branco diz a caixa
+
+```
+Imagem 1 (hook): ninguém acorda às 5h por disciplina
+
+Imagem 2: acorda porque dormiu às 21h
+
+ninguém fala essa parte
+
+Imagem 3: o corpo não negocia sono
+
+você só troca a hora da dívida
+```
+
+Esse texto pode ser colado em **qualquer uma** das duas caixas — a única do modo automático ou a de "distribuir" — e produz o mesmo carrossel: três imagens, a primeira com uma caixa (o hook), as outras com duas.
+
+| No texto | O que acontece |
+| --- | --- |
+| `Imagem N:` no começo da linha | Diz em qual foto o trecho entra. É orientação para a montagem: **nunca** aparece na imagem. Aceita `Foto`, `Slide`, `2.`, `3)` e nota entre parênteses. |
+| Linha em branco dentro do trecho | O texto seguinte vai para a **outra caixa** da mesma imagem. |
+| Duas linhas em branco (sem rótulo) | Imagem nova. É o que faz o formato antigo — hook, depois pares de linhas — funcionar sem rótulo nenhum. |
+| Linha em branco dentro do trecho da **imagem 1** | Nada: a imagem 1 é uma caixa só, então o bloco inteiro vira a frase do hook. |
+
+Com rótulos, o texto **não passa por LLM nenhum** — nem no modo automático. Sem rótulos, o modo automático continua como sempre: o composer (LLM ou mock) fatia o texto. O rótulo é o sinal, e é por isso que ele não é adivinhado: um texto corrido sem rótulo não tem como dizer onde uma imagem termina.
+
+### Só foto que cobre o slide
+
+O render faz `cover` da foto num canvas de 1080×1350. Uma foto menor que isso é **ampliada** — e o resultado é a assinatura visual de post amador: fundo borrado com a legenda nítida em cima.
+
+O ranking por visão não resolve isso, e é importante entender por quê: o VLM recebe uma thumb de ~474px (é o que mantém o custo de tokens baixo), então a resolução da **origem** não está na imagem que ele julga. Ele pode reprovar foto escura, poluída ou com logo; resolução, não. Por isso o piso é aplicado na **busca**:
+
+| Ordem de preferência | Quando entra |
+| --- | --- |
+| Retrato **e** cobre 1080×1350 | Sempre que o tema tiver acervo para isso. |
+| Cobre 1080×1350, em qualquer orientação | Foto grande deitada perde metade da cena no recorte; foto pequena estraga a foto inteira. Entre as duas, a grande. |
+| Retrato, em qualquer resolução | Tema sem acervo em alta. |
+| O pool inteiro | Último recurso — foto pequena ainda é melhor que gradiente, e ela aparece na galeria da prévia para você trocar. |
+
+Pin sem resolução no payload **não** passa o piso: o pool tem 40 pins e sobra material para exigir prova em vez de dar o benefício da dúvida.
+
+O piso é o próprio tamanho do slide (`SLIDE_WIDTH`×`SLIDE_HEIGHT`) — não há variável nova para configurar. O filtro é feito no pool já recebido, e não no parâmetro `min_resolution` da `pinterest-dl`: lá o corte acontece antes da contagem, então a biblioteca **pagina de novo** para fechar os 40 pins, com um `sleep` por página dentro do `POST /generate`. A busca continua sendo uma requisição só. No Unsplash o problema não existe: a `urls.regular` sai com 1080px de largura e a busca já pede `orientation=portrait`.
 
 ---
 
@@ -27,10 +81,11 @@ IMAGE_PROVIDER=pinterest_scrape
 
 Não há chave, cota nem conta. Cada busca é **uma requisição**: a API interna devolve 50 pins de uma vez e o cliente recorta o que precisa dessa mesma resposta — pedir mais dispararia uma segunda página com um `sleep` no meio, dentro do `POST /generate`.
 
-Do pool de 40 pins, o recorte aplica as duas mesmas correções que já valiam para o Unsplash:
+Do pool de 40 pins, o recorte aplica três correções — duas delas pelos mesmos motivos que já valiam para o Unsplash:
 
 | Correção | Por quê |
 | --- | --- |
+| **Resolução primeiro** | O slide tem 1080×1350 e o render faz `cover`: uma foto menor é ampliada e chega ao feed borrada, com a legenda nítida por cima. Ver [Só foto que cobre o slide](#só-foto-que-cobre-o-slide). |
 | **Retrato primeiro** | O slide é 4:5. Uma foto deitada perde metade da cena no recorte de cover. O Unsplash resolve com `orientation=portrait`; a API interna não tem esse parâmetro, então o filtro é feito aqui, pela resolução que vem em cada pin. Sem retrato suficiente, o pool inteiro vale — foto deitada ainda é melhor que gradiente. |
 | **Ponto de corte sorteado** | A busca vem ordenada por relevância e essa ordem é estável: sem sortear onde o recorte começa, o mesmo tema devolveria as mesmas fotos toda vez. É o mesmo sintoma que parecia cache no Unsplash e era determinismo da API. |
 
@@ -50,9 +105,9 @@ A regra é aplicada em um lugar só (`enforce_hook_slide`) e vale nos três cami
 
 | Caminho | O que acontece na imagem 1 |
 | --- | --- |
-| Roteiro por imagem | O bloco inteiro vira a frase. Duas linhas no campo saem coladas numa caixa só, e não como headline + apoio. |
-| Composer mock | O slide de hook sai sem body e sem CTA. |
-| Composer LLM | O prompt proíbe body no slide 1 — e o código apaga se o modelo escrever mesmo assim. O papel do slide 1 também é forçado para `hook`, independente do que o modelo rotule. |
+| Roteiro por imagem | O bloco inteiro vira a frase. Duas linhas no campo — ou duas caixas separadas por linha em branco — saem coladas numa caixa só, e não como headline + apoio. |
+| Composer mock | O slide de hook recebe o **primeiro trecho e nada mais**, sem body e sem CTA. |
+| Composer LLM | O prompt proíbe body no slide 1 — e o código apaga se o modelo escrever mesmo assim. O papel do slide 1 também é forçado para `hook`, independente do que o modelo rotule, e a caixa nunca fica vazia: sem texto utilizável, ela recebe a primeira frase do texto colado. |
 
 O apoio que **você** escreveu não é descartado: ele entra na mesma caixa, colado à frase. Um hook comprido é visível e corrigível na prévia; texto que some sem aviso, não. O teto da caixa é de 160 caracteres — acima do limite de uma headline comum (70) justamente para caber quem escreveu duas linhas. O apoio que o **LLM** inventa no slide 1 segue a regra oposta: o prompt o proíbe, então o que vier ali é excesso do modelo e é apagado em vez de colado — colar deixava o hook com texto a mais.
 
@@ -72,11 +127,12 @@ Na prévia, os campos "Texto" e "CTA" da imagem 1 aparecem em leitura apenas, e 
 ```
 Imagem 1 (hook)      →  "ninguém acorda às 5h por disciplina"
 Imagem 2 (problema)  →  "acorda porque dormiu às 21h
-                          ninguém fala essa parte"
+                         (linha em branco)
+                         ninguém fala essa parte"
 Imagem 3 (CTA)       →  "salva pra começar amanhã"
 ```
 
-A primeira linha de cada bloco vira a **headline** (o texto grande); as linhas seguintes viram o **corpo**. Uma linha só = só headline. **A imagem 1 é a exceção**: ela mostra só o hook, então o bloco inteiro vira uma caixa só — sem corpo e sem CTA (ver [A imagem 1 mostra o hook e mais nada](#a-imagem-1-mostra-o-hook-e-mais-nada)). O arraste das caixas sobre a foto continua igual — o modo roteiro decide *o quê* e *onde na sequência*, o arraste decide *onde na foto*.
+Dentro de um campo, a **linha em branco** manda o texto seguinte para a outra caixa daquela imagem. Sem linha em branco vale a regra curta: a primeira linha é a caixa de cima (o texto grande) e o resto é a de baixo. **A imagem 1 é a exceção**: ela mostra só o hook, então o bloco inteiro vira uma caixa só — sem corpo e sem CTA (ver [A imagem 1 mostra o hook e mais nada](#a-imagem-1-mostra-o-hook-e-mais-nada)). O arraste das caixas sobre a foto continua igual — o modo roteiro decide *o quê* e *onde na sequência*, o arraste decide *onde na foto*.
 
 Blocos em branco são descartados e o carrossel encolhe: se você abrir 6 campos e preencher 4, saem 4 slides. No modo roteiro o app **não** inventa CTA nem hashtag que você não escreveu — o texto é seu.
 
@@ -204,13 +260,15 @@ Reaproveitar essa sessão no servidor significaria repassar seus cookies, ou sej
 
 - Landing page com link direto para o goviral.ai (login Discord manual).
 - Formulário com **um campo de roteiro por imagem** (rotulado pelo papel do slide) ou textarea única, mais tema, estilo, nº de slides, idioma e keywords.
-- Botão "distribuir" que divide um roteiro colado entre os campos, entendendo `Imagem N:`, `2.`, `---` e parágrafos.
+- **Rótulo `Imagem N:` no texto colado dispensa o LLM** — vale nas duas caixas de texto; a linha em branco dentro do trecho separa as duas caixas da imagem.
+- Botão "distribuir" que divide um roteiro colado entre os campos, entendendo `Imagem N:` (com nota entre parênteses ou sozinho na linha), `2.`, `---`, o intervalo de duas linhas em branco e parágrafos.
 - **Casting por papel**: imagem 1 sempre com pessoa (hook), demais com cenário — via busca separada, metadado da foto e visão.
-- Composição de carrossel via TextComposer (mock determinístico ou LLM); no modo por imagem, sem LLM no caminho do texto.
-- **Imagem 1 sempre com o hook sozinho** — uma caixa, sem texto de apoio e sem CTA, nos três caminhos de composição.
+- Composição de carrossel via TextComposer (mock determinístico ou LLM); no modo por imagem — e em qualquer texto colado com rótulos —, sem LLM no caminho do texto.
+- **Imagem 1 sempre com o hook sozinho, e nunca em branco** — uma caixa, sem texto de apoio e sem CTA, nos três caminhos de composição.
 - Ordenação no roteiro viral de 3 atos (`hook → problema → agitação → valor → prova → CTA`).
 - Renderização estilo sticker do TikTok — caixas brancas arredondadas com texto preto.
 - Busca de imagens via API oficial do Pinterest, via Pinterest **sem token** (`pinterest-dl`), via Unsplash ou mock.
+- **Piso de resolução na busca sem token** — só foto que cobre o slide sem ser ampliada, com degradação em ordem quando o tema não tem acervo.
 - Ranking opcional de imagens por endpoint LLM (com fallback determinístico).
 - Qualificação por **visão** opcional (VLM): nota olhando a foto + posição automática do texto + assunto da foto (pessoa/cenário) para o casting.
 - Prévia do carrossel com slides editáveis (headline, body, CTA por slide) e o papel de cada slide visível.
@@ -253,9 +311,9 @@ python run.py
 1. Acesse [https://content.goviralai.app/](https://content.goviralai.app/) (login Discord) **em outra aba**.
 2. Gere o texto pronto lá.
 3. No ViralPost Studio (`http://localhost:5000/create`), escolha o nº de slides (3/6/9/12) e como entregar o texto:
-   - **Roteiro por imagem** (padrão) — um campo por foto, rotulado com o papel do slide: *Imagem 1 (hook)*, *Imagem 2 (problema)*, e assim por diante. A primeira linha de cada campo vira o texto grande; o resto vira o apoio — menos na **imagem 1**, que sai como uma frase só (o hook, sem apoio e sem CTA). Nada de LLM no meio: o que você escreve é o que sai.
-   - **Distribuir de uma vez** — dentro do modo por imagem, abra "Colar o roteiro inteiro e distribuir", cole tudo e clique no botão. O servidor divide por `Imagem N:`, `2.`, `---` ou parágrafos e preenche os campos, que continuam editáveis.
-   - **Texto corrido** — cole tudo numa caixa só e deixe o LLM estruturar, como antes.
+   - **Roteiro por imagem** (padrão) — um campo por foto, rotulado com o papel do slide: *Imagem 1 (hook)*, *Imagem 2 (problema)*, e assim por diante. Dentro de um campo, pule uma linha para mandar o texto seguinte para a outra caixa daquela imagem; sem linha em branco, a primeira linha vira o texto grande e o resto vira o apoio — menos na **imagem 1**, que sai como uma frase só (o hook, sem apoio e sem CTA). Nada de LLM no meio: o que você escreve é o que sai.
+   - **Distribuir de uma vez** — dentro do modo por imagem, abra "Colar o roteiro inteiro e distribuir", cole tudo e clique no botão. O servidor divide por `Imagem N:`, `2.`, `---`, intervalo de duas linhas em branco ou parágrafos e preenche os campos, que continuam editáveis.
+   - **Texto corrido** — cole tudo numa caixa só e deixe o LLM estruturar. Se você escrever `Imagem 1:`, `Imagem 2:`… na frente dos trechos, o LLM **não entra**: cada trecho vai para a foto que você indicou (ver [O rótulo diz a imagem, a linha em branco diz a caixa](#o-rótulo-diz-a-imagem-a-linha-em-branco-diz-a-caixa)).
 4. Preencha tema, estilo (**sticker** recomendado — ou quote/list/tutorial/story) e as palavras-chave da busca de imagens.
 5. Clique em "Gerar carrossel". Com o casting ligado, a imagem 1 recebe uma foto com pessoa e as demais recebem cenário.
 6. Na prévia, cada slide mostra seu papel e de onde veio a foto do hook (visão, metadado ou busca). Edite os textos e troque a imagem pela galeria.
@@ -373,10 +431,12 @@ pip install -r requirements-dev.txt
 pytest -v tests/
 ```
 
-Cobertura (296 testes):
-- **TextComposer** — split em slides, hashtags, texto curto, texto vazio.
+Cobertura (324 testes):
+- **TextComposer** — split em slides, hashtags, texto curto, texto vazio, e as linhas em branco do texto colado sobrevivendo à limpeza das hashtags (colapsá-las fazia todos os slides saírem com o roteiro inteiro).
+- **Rótulo `Imagem N`** — nota entre parênteses e rótulo sozinho na linha continuam sendo rótulo; hora no começo da linha (`5:30 da manhã`) não é rótulo; `labeled_blocks` só responde quando os rótulos existem; rótulo digitado dentro do campo não chega ao slide; texto colado com rótulos pula o composer, mantém a ordem e avisa quantos rótulos foram obedecidos, e texto sem rótulo continua indo para o composer.
+- **Caixa vs. imagem** — linha em branco dentro do bloco separa as duas caixas daquela imagem, duas linhas em branco separam as imagens, uma caixa de duas linhas sai como uma frase, e no bloco da imagem 1 a linha em branco não cria segunda caixa.
 - **Roteiro por imagem** — primeira linha vira headline e o resto o body, rótulos `Imagem N:` removidos, campo vazio herda o papel, blocos além do nº de slides descartados, hashtags e CTA preservados.
-- **A imagem 1 é uma caixa só** — o bloco de duas linhas vira uma frase (sem virar headline + apoio) e o hook não é cortado no limite de headline; o composer mock devolve o hook sem body nem CTA e mantém as duas caixas nos outros slides; no LLM o body e o CTA do slide 1 são apagados mesmo quando o modelo os escreve **sem colar o apoio na frase** (a frase mandada no lugar da headline ainda vira o hook), e o papel do slide 1 é `hook` independente do que o modelo rotule; a prévia entrega os campos de apoio e CTA da imagem 1 em leitura apenas e a gravação limpa os dois; um hook longo continua validando no formulário de edição.
+- **A imagem 1 é uma caixa só** — o bloco de duas linhas vira uma frase (sem virar headline + apoio) e o hook não é cortado no limite de headline, no roteiro manual **e** no caminho LLM (onde o corte de 70 vinha antes de o slide ser reconhecido como hook); o composer mock devolve o hook sem body nem CTA, com o primeiro trecho e nada mais, e mantém as duas caixas nos outros slides; no LLM o body e o CTA do slide 1 são apagados mesmo quando o modelo os escreve **sem colar o apoio na frase** (a frase mandada no lugar da headline ainda vira o hook), o papel do slide 1 é `hook` independente do que o modelo rotule, e o slide 1 nunca sai sem texto nas quatro formas de o modelo desobedecer ao prompt; a prévia entrega os campos de apoio e CTA da imagem 1 em leitura apenas e a gravação limpa os dois; um hook longo continua validando no formulário de edição.
 - **Distribuição do roteiro colado** — separadores `Imagem N:`, `2.`, `---` e parágrafo; teto no nº de slides com o total encontrado reportado; texto vazio e contagem inválida.
 - **Casting** — hook recebe pessoa por visão, por metadado (`alt_description`) e por pool de busca, nessa ordem; parte do corpo ("woman's hands") não conta como retrato; fotos de cenário nunca caem no slide 1; aviso quando não há foto com pessoa; `HOOK_SUBJECT=off` volta à rotação.
 - **Roteiro viral** — distribuição de papéis por nº de slides, ordem `hook…cta`, CTA só no fecho, sem texto duplicado entre headline e body.
@@ -389,6 +449,7 @@ Cobertura (296 testes):
 - **Reposicionamento** — `pos_x`/`pos_y` vencem a âncora do papel, clamp dentro do canvas, slide sem posição mantém o comportamento antigo, e cada caixa (`box_positions`) move-se sem arrastar as outras.
 - **Pinterest mock** — geração de SVGs sintéticos.
 - **Pinterest sem token** — mapeamento do pin para a forma que o app usa (id como string, link do pin, `alt` alimentando o casting por metadado), thumb `474x` com a extensão reescrita para `.jpg` (o caminho reduzido do CDN não serve PNG), retrato preferido quando há retrato suficiente e pool inteiro quando não há, resolução ausente que não derruba a seleção, ponto de corte sorteado entre buscas iguais, uma requisição por busca, timeout vindo das settings, e fallback com motivo em falha, resultado vazio, pin sem `src` e biblioteca não instalada.
+- **Piso de resolução** — pin menor que o slide fica de fora; foto grande deitada vence foto pequena em pé; sem acervo em alta o piso cai em vez de o carrossel virar gradiente; pin sem resolução não passa o piso; o piso vem de `SLIDE_WIDTH`×`SLIDE_HEIGHT`; e o `min_resolution` da biblioteca continua em `(0, 0)`, para a busca não paginar dentro do `POST /generate`.
 - **Escolha do provider** — `IMAGE_PROVIDER` default `auto` e valor desconhecido caindo em `auto`; o scraping só entra quando escolhido (nunca no `auto`) e vence o token oficial quando escolhido; `auto` continua preferindo token → Unsplash; `mock` ignora o token configurado; escolha impossível (Unsplash sem chave) desce a escada em vez de devolver um cliente quebrado.
 - **Prompt do roteiro** — a regra do hook sozinho e a ordem dos papéis chegam no prompt, e o orçamento de tokens cresce com o nº de slides (o teto fixo cortava o JSON de 12 slides).
 - **Unsplash** — rotação de páginas entre buscas iguais, reentrada quando a página sorteada passa do fim do acervo, motivo do fallback por status HTTP.
@@ -494,7 +555,10 @@ Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SL
 - [x] Usuário pode escolher manualmente a imagem de cada slide.
 - [x] Roteiro pode ser escrito imagem por imagem, com um campo por foto do carrossel.
 - [x] Roteiro colado inteiro é distribuído entre os campos e continua editável.
+- [x] Texto colado com `Imagem N:` vai para as fotos indicadas, sem LLM no caminho.
+- [x] A imagem 1 mostra o hook sozinho e nunca sai sem texto.
 - [x] Primeira foto recebe pessoa; as demais, cenário — com aviso quando não dá.
+- [x] A busca sem token descarta foto que o slide precisaria ampliar.
 - [x] Prévia é editável (headline + body + CTA por slide).
 - [x] Posição e tamanho de cada caixa são ajustáveis na prévia e o PNG exportado respeita o ajuste.
 - [x] Usuário consegue copiar legenda/hashtags e baixar conteúdo.

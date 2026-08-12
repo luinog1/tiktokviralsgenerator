@@ -7,6 +7,7 @@ import pytest
 from app.adapters.script_parser import (
     blocks_from_slides,
     compose_from_blocks,
+    labeled_blocks,
     parse_manual_script,
     split_blocks,
 )
@@ -223,4 +224,120 @@ def test_slides_round_trip_back_into_blocks():
     recomposed = compose_from_blocks(blocks)
     assert recomposed.slides[0].headline == "o hook o apoio"
     assert recomposed.slides[0].body == ""
+
+
+# ------------------------------------- o rótulo diz a imagem, a linha a caixa
+def test_a_note_in_parentheses_is_part_of_the_label():
+    """"Imagem 1 (hook): frase" — a nota orienta quem escreve, não vai na foto.
+
+    Sem isso o rótulo inteiro deixava de ser reconhecido: a frase virava
+    preâmbulo (descartada) ou entrava na imagem com "Imagem 1 (hook):" colado
+    nela.
+    """
+    blocks = split_blocks(
+        "Imagem 1 (hook): para de acordar às 5h\n"
+        "Imagem 2 (problema): você dormiu à 1h"
+    )
+
+    assert blocks == ["para de acordar às 5h", "você dormiu à 1h"]
+
+
+def test_the_label_can_be_alone_on_its_line():
+    """"Imagem 2:" com o texto embaixo — exigir texto na mesma linha fazia o
+    rótulo virar corpo do bloco anterior."""
+    blocks = split_blocks("Imagem 1:\no hook\n\nImagem 2:\no segundo bloco")
+
+    assert blocks == ["o hook", "o segundo bloco"]
+
+
+def test_a_blank_line_inside_a_labeled_block_splits_the_boxes():
+    """Uma imagem, duas caixas: é o que a linha em branco indica no roteiro."""
+    carousel = parse_manual_script(
+        "Imagem 1: o hook\n"
+        "\n"
+        "Imagem 2: a primeira caixa\n"
+        "\n"
+        "a segunda caixa"
+    )
+
+    assert carousel.slides[1].headline == "a primeira caixa"
+    assert carousel.slides[1].body == "a segunda caixa"
+
+
+def test_a_box_can_have_more_than_one_line():
+    """A caixa reencaixa o texto na largura do slide, então as duas linhas da
+    mesma caixa saem como uma frase — e não como caixas diferentes."""
+    carousel = parse_manual_script(
+        "Imagem 1: o hook\n"
+        "\n"
+        "Imagem 2: primeira linha da caixa\n"
+        "segunda linha da mesma caixa\n"
+        "\n"
+        "a caixa de baixo"
+    )
+
+    assert carousel.slides[1].headline == (
+        "primeira linha da caixa segunda linha da mesma caixa"
+    )
+    assert carousel.slides[1].body == "a caixa de baixo"
+
+
+def test_two_blank_lines_separate_images_and_one_separates_boxes():
+    """O roteiro colado sem rótulo: o intervalo maior é imagem nova.
+
+    Tratar toda linha em branco como imagem nova dobrava o carrossel e punha a
+    segunda caixa de cada script numa imagem só dela.
+    """
+    carousel = parse_manual_script(
+        "o hook\n"
+        "\n\n"
+        "primeira caixa da imagem 2\n"
+        "\n"
+        "segunda caixa da imagem 2\n"
+        "\n\n"
+        "primeira caixa da imagem 3\n"
+        "\n"
+        "segunda caixa da imagem 3"
+    )
+
+    assert len(carousel.slides) == 3
+    assert carousel.slides[0].headline == "o hook"
+    assert carousel.slides[0].body == ""
+    assert carousel.slides[1].headline == "primeira caixa da imagem 2"
+    assert carousel.slides[1].body == "segunda caixa da imagem 2"
+    assert carousel.slides[2].headline == "primeira caixa da imagem 3"
+    assert carousel.slides[2].body == "segunda caixa da imagem 3"
+
+
+def test_the_hook_image_stays_one_box_even_with_a_blank_line():
+    """A imagem 1 é uma caixa: duas caixas ali não é opção, é erro de digitação."""
+    carousel = parse_manual_script("Imagem 1: o hook\n\ne mais isso\n\n\nImagem 2: outro")
+
+    assert carousel.slides[0].headline == "o hook e mais isso"
+    assert carousel.slides[0].body == ""
+
+
+def test_a_time_at_the_start_of_a_line_is_not_a_label():
+    """"5:30 da manhã" é texto do roteiro, não "imagem 5"."""
+    blocks = split_blocks("5:30 da manhã eu já tinha desistido\n\n6:00 recomecei")
+
+    assert blocks == ["5:30 da manhã eu já tinha desistido", "6:00 recomecei"]
+
+
+def test_labeled_blocks_only_answers_when_the_labels_are_there():
+    """É o sinal que autoriza pular o composer — adivinhar aqui seria pior."""
+    assert labeled_blocks("Imagem 1: um\nImagem 2: dois") == ["um", "dois"]
+    assert labeled_blocks("um texto corrido\n\ncom dois parágrafos") == []
+    assert labeled_blocks("") == []
+
+
+def test_the_label_typed_inside_the_field_does_not_reach_the_slide():
+    """Quem cola no campo "Imagem 2" cola o rótulo junto; ele não é texto."""
+    carousel = compose_from_blocks([
+        "Imagem 1: o hook",
+        "Imagem 2: o segundo bloco",
+    ])
+
+    assert carousel.slides[0].headline == "o hook"
+    assert carousel.slides[1].headline == "o segundo bloco"
 

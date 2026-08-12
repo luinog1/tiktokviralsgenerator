@@ -113,8 +113,12 @@ class BriefingForm(FlaskForm):
         render_kw={
             "placeholder": (
                 "Cole aqui o texto pronto gerado em https://content.goviralai.app/ "
-                "(você acessa manualmente via login Discord). O ViralPost Studio "
-                "vai organizar esse texto em slides sobrepostos às imagens."
+                "(você acessa manualmente via login Discord).\n\n"
+                "Escreva \"Imagem 1:\", \"Imagem 2:\"… na frente de cada trecho "
+                "para decidir você mesmo o que entra em cada foto — o rótulo "
+                "orienta a montagem e não aparece na imagem. Uma linha em branco "
+                "dentro do trecho separa as duas caixas daquela imagem. Sem "
+                "rótulo, o texto vai para o LLM organizar em slides."
             ),
             "rows": 10,
         },

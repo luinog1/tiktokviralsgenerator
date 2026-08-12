@@ -209,3 +209,62 @@ def test_no_mock_llm_warning_in_script_mode():
     outcome = _run(client, _service(client), script_blocks=["um", "dois"])
 
     assert not any("mock" in w.lower() and "LLM" in w for w in outcome.warnings)
+
+
+# ------------------------------- rótulos no texto colado valem como roteiro
+LABELED = (
+    "Imagem 1 (hook): ninguém acorda às 5h por disciplina\n"
+    "\n"
+    "Imagem 2: acorda porque dormiu às 21h\n"
+    "\n"
+    "ninguém fala essa parte\n"
+    "\n"
+    "Imagem 3: salva pra começar amanhã"
+)
+
+
+def test_labels_in_the_pasted_text_skip_the_composer():
+    """Escrever "Imagem N:" é decidir a distribuição — não há o que um LLM
+    redistribua ali sem criar a chance de redistribuir diferente."""
+    client = _FakeClient()
+    outcome = _run(client, _service(client), raw_text=LABELED)
+
+    slides = outcome.project.carousel["slides"]
+    assert outcome.project.carousel["provider"] == "manual"
+    assert [s["headline"] for s in slides] == [
+        "ninguém acorda às 5h por disciplina",
+        "acorda porque dormiu às 21h",
+        "salva pra começar amanhã",
+    ]
+    # A linha em branco dentro do bloco é a segunda caixa daquela imagem.
+    assert slides[1]["body"] == "ninguém fala essa parte"
+    # E a imagem 1 continua sendo uma caixa só.
+    assert slides[0]["body"] == ""
+
+
+def test_the_label_is_orientation_and_never_becomes_text():
+    client = _FakeClient()
+    outcome = _run(client, _service(client), raw_text=LABELED)
+
+    todo_o_texto = " ".join(
+        f"{s['headline']} {s['body']}" for s in outcome.project.carousel["slides"]
+    ).lower()
+    assert "imagem 1" not in todo_o_texto
+    assert "hook)" not in todo_o_texto
+
+
+def test_the_warning_says_the_labels_were_obeyed():
+    """Pular o composer é uma decisão visível: sem o aviso, o usuário não tem
+    como saber por que o texto saiu exatamente como ele escreveu."""
+    client = _FakeClient()
+    outcome = _run(client, _service(client), raw_text=LABELED)
+
+    assert any("rótulos" in w for w in outcome.warnings)
+
+
+def test_text_without_labels_still_goes_through_the_composer():
+    """O modo texto corrido continua existindo — o rótulo é que é o sinal."""
+    client = _FakeClient()
+    outcome = _run(client, _service(client), raw_text=RAW)
+
+    assert outcome.project.carousel["provider"] == "mock"

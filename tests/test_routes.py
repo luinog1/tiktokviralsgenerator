@@ -114,6 +114,38 @@ def test_generate_invalid_returns_422(client):
     assert response.status_code == 422
 
 
+def test_labelled_paste_reaches_the_preview_exactly_as_written(client):
+    """O caminho que o usuário usa: colar na caixa única, com os rótulos.
+
+    O texto colado indica a imagem de cada trecho, então o composer é pulado —
+    o que chega na prévia é o que foi escrito, sem o rótulo e com a imagem 1
+    numa caixa só.
+    """
+    response = client.post("/generate", data={
+        "raw_text": (
+            "Imagem 1 (hook): ninguém acorda às 5h por disciplina\n"
+            "\n"
+            "Imagem 2: acorda porque dormiu às 21h\n"
+            "\n"
+            "ninguém fala essa parte\n"
+            "\n"
+            "Imagem 3: salva pra começar amanhã"
+        ),
+        "theme": "rotina matinal",
+        "language": "pt-BR",
+        "style": "sticker",
+        "slides_count": "6",
+    }, follow_redirects=True)
+
+    body = response.data.decode("utf-8")
+    assert response.status_code == 200
+    assert "ninguém acorda às 5h por disciplina" in body
+    assert "ninguém fala essa parte" in body
+    # O rótulo é orientação para a montagem — nunca texto do slide.
+    assert "Imagem 1 (hook)" not in body
+    assert "Imagem 2:" not in body
+
+
 def test_preview_unknown_project_returns_404(client):
     response = client.get("/preview/does-not-exist")
     assert response.status_code == 404

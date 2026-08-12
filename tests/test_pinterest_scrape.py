@@ -225,6 +225,104 @@ def test_a_pin_without_resolution_does_not_break_the_selection(install_fake):
     assert len(images) == 2
 
 
+# ---------- seleção: piso de resolução ----------
+
+
+def _hi_res(n, start=200):
+    return [
+        _FakeMedia(id=start + i, src=f"https://i.pinimg.com/originals/a/b/c/hi{i}.jpg",
+                   resolution=(1440, 1800))
+        for i in range(n)
+    ]
+
+
+def _lo_res(n, start=300):
+    return [
+        _FakeMedia(id=start + i, src=f"https://i.pinimg.com/originals/a/b/c/lo{i}.jpg",
+                   resolution=(474, 711))
+        for i in range(n)
+    ]
+
+
+def test_photos_smaller_than_the_slide_are_left_out(install_fake):
+    """474x711 esticado para 1080x1350 chega ao feed borrado — e o VLM não tem
+    como reprovar isso, porque ele julga uma thumb de 474px."""
+    install_fake(_lo_res(12) + _hi_res(5))
+
+    images = PinterestScrapeClient(min_resolution=(1080, 1350)).search("tema", limit=4)
+
+    assert all(img.image_id.startswith("20") for img in images), [
+        img.image_id for img in images
+    ]
+
+
+def test_resolution_beats_orientation_when_both_cannot_be_had(install_fake):
+    """Foto pequena em pé perde para foto grande deitada: o recorte de cover
+    perde metade da cena, a ampliação estraga a foto inteira."""
+    landscape_hi = [
+        _FakeMedia(id=200 + i, src=f"https://i.pinimg.com/originals/a/b/c/lh{i}.jpg",
+                   resolution=(1920, 1440))
+        for i in range(4)
+    ]
+    install_fake(_lo_res(10) + landscape_hi)
+
+    images = PinterestScrapeClient(min_resolution=(1080, 1350)).search("tema", limit=4)
+
+    assert all(img.image_id.startswith("20") for img in images)
+
+
+def test_a_small_photo_is_still_better_than_a_gradient(install_fake):
+    """Tema sem acervo em alta: o piso cai em vez de o carrossel virar mock."""
+    install_fake(_lo_res(6))
+
+    images = PinterestScrapeClient(min_resolution=(1080, 1350)).search("tema", limit=4)
+
+    assert len(images) == 4
+    assert not any(is_mock_image(img) for img in images)
+
+
+def test_a_pin_without_resolution_does_not_pass_the_floor(install_fake):
+    """Medida ausente não é prova de alta resolução — com 40 pins no pool, dá
+    para exigir prova em vez de dar o benefício da dúvida."""
+    unknown = [
+        _FakeMedia(id=300 + i, src=f"https://i.pinimg.com/originals/a/b/c/u{i}.jpg",
+                   resolution=None)
+        for i in range(10)
+    ]
+    install_fake(unknown + _hi_res(5))
+
+    images = PinterestScrapeClient(min_resolution=(1080, 1350)).search("tema", limit=4)
+
+    assert all(img.image_id.startswith("20") for img in images)
+
+
+def test_the_floor_comes_from_the_slide_size(monkeypatch):
+    """O piso é o próprio slide: exigir mais seria arbitrário, menos deixaria
+    entrar foto que o render precisa ampliar."""
+    settings = Settings.from_env({
+        "IMAGE_PROVIDER": "pinterest_scrape",
+        "SLIDE_WIDTH": "1080",
+        "SLIDE_HEIGHT": "1350",
+    })
+
+    client = build_pinterest_client(settings)
+
+    assert client._min_resolution == (1080, 1350)  # noqa: SLF001
+
+
+def test_the_library_still_gets_no_floor_of_its_own(install_fake):
+    """O `min_resolution` da biblioteca corta ANTES de contar os pins: para
+    fechar o pool ela pagina de novo, com um sleep por página, dentro do
+    POST /generate. O corte é feito no pool já recebido."""
+    calls: list[dict] = []
+    install_fake(_hi_res(40), calls=calls)
+
+    PinterestScrapeClient(min_resolution=(1080, 1350)).search("tema", limit=4)
+
+    assert calls[0]["min_resolution"] == (0, 0)
+    assert len(calls) == 1
+
+
 def test_the_same_query_does_not_always_return_the_same_photos(install_fake):
     """A busca vem ordenada por relevância e essa ordem é estável — sem sortear
     o ponto de corte, o mesmo tema devolveria as mesmas fotos toda vez."""
