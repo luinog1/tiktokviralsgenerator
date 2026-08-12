@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
@@ -62,6 +63,37 @@ def _reply(content: str, status: int = 200) -> _Resp:
     return _Resp({"choices": [{"message": {"content": content}}]}, status=status)
 
 
+class _ThumbResp:
+    """Resposta fake do GET da thumb — o que `_download_as_data_uri` consome."""
+
+    def __init__(self, body=b"fake-jpeg-bytes", status=200, content_type="image/jpeg"):
+        self.content = body
+        self.status_code = status
+        self.headers = {"Content-Type": content_type}
+
+
+_FAKE_THUMB_DATA_URI = (
+    "data:image/jpeg;base64," + base64.b64encode(b"fake-jpeg-bytes").decode()
+)
+
+
+@pytest.fixture(autouse=True)
+def thumb_downloads(monkeypatch):
+    """Toda thumb "baixa" bytes fake — nenhum teste sai para a rede.
+
+    Devolve a lista de URLs baixadas, para os testes que afirmam sobre elas.
+    Um teste que precise de outro comportamento re-monkeypatcha `requests.get`.
+    """
+    calls: list[str] = []
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        return _ThumbResp()
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    return calls
+
+
 # ---------------------------------------------------------------- configuração
 def test_vision_off_by_default():
     assert build_vision_provider(Settings.from_env({})) is None
@@ -89,8 +121,14 @@ def test_vision_enabled_alone_is_not_configured():
 
 
 # --------------------------------------------------------------- chamada feita
-def test_sends_thumb_url_not_full_image(monkeypatch):
-    """A versão pequena basta para julgar composição e corta tokens de visão."""
+def test_downloads_the_thumb_and_sends_the_bytes(monkeypatch, thumb_downloads):
+    """A thumb é baixada pelo app e vai como data URI — a URL não serve.
+
+    Mandar a URL deixava o download por conta do endpoint: o servidor da
+    ModelScope (na China) não alcança o i.pinimg.com e a chamada inteira
+    voltava HTTP 400 "context deadline exceeded". A versão pequena continua
+    sendo a que vai: basta para julgar composição e corta tokens de visão.
+    """
     captured = {}
 
     def fake_post(url, **kwargs):
@@ -101,10 +139,84 @@ def test_sends_thumb_url_not_full_image(monkeypatch):
     monkeypatch.setattr(requests, "post", fake_post)
     VisionRankingProvider(_settings()).rank({"theme": "café"}, _photos(1))
 
+    assert thumb_downloads == ["https://images.unsplash.com/small-0"]
     content = captured["json"]["messages"][1]["content"]
     urls = [p["image_url"]["url"] for p in content if p["type"] == "image_url"]
-    assert urls == ["https://images.unsplash.com/small-0"]
+    assert urls == [_FAKE_THUMB_DATA_URI]
     assert captured["headers"]["Authorization"] == "Bearer ms-fake-key"
+
+
+@pytest.mark.parametrize("failure", ["conexao", "http-403", "grande-demais"])
+def test_unfetchable_thumb_stays_out_of_the_call(monkeypatch, failure, caplog):
+    """Thumb que não baixa fica FORA — como URL ela derrubaria a chamada inteira.
+
+    O endpoint baixa cada URL do lado de lá: UMA inalcançável (o 403 do caminho
+    474x para .png, por exemplo) devolve 400 para a requisição toda, levando
+    junto os veredictos das fotos que estavam boas.
+    """
+    def fake_get(url, **kwargs):
+        if url.endswith("small-1"):
+            if failure == "conexao":
+                raise requests.ConnectionError()
+            if failure == "http-403":
+                return _ThumbResp(status=403)
+            return _ThumbResp(body=b"x" * (2 * 1024 * 1024 + 1))
+        return _ThumbResp()
+
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["json"] = kwargs["json"]
+        return _reply('{"results":[]}')
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(requests, "post", fake_post)
+    with caplog.at_level("WARNING"):
+        VisionRankingProvider(_settings()).rank({}, _photos(3))
+
+    content = captured["json"]["messages"][1]["content"]
+    images = [p for p in content if p["type"] == "image_url"]
+    assert len(images) == 2
+    sent = content[0]["text"]
+    assert "ph0" in sent and "ph2" in sent and "ph1" not in sent
+    assert "1 de 3 thumbs" in caplog.text
+
+
+def test_no_downloadable_thumb_skips_the_call(monkeypatch):
+    """Sem nenhuma foto baixada não há o que perguntar — ranking textual."""
+    def fake_get(url, **kwargs):
+        raise requests.ConnectionError()
+
+    def boom(*a, **k):
+        pytest.fail("não deveria chamar o endpoint de visão sem nenhuma foto")
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(requests, "post", boom)
+    assert VisionRankingProvider(_settings()).rank({}, _photos(2)) == []
+
+
+@pytest.mark.parametrize("content_type,expected_mime", [
+    ("image/png", "image/png"),
+    ("image/jpeg; charset=binary", "image/jpeg"),
+    ("application/octet-stream", "image/jpeg"),
+])
+def test_data_uri_carries_the_content_type(monkeypatch, content_type, expected_mime):
+    """PNG continua PNG; content-type que não é imagem cai no JPEG do CDN."""
+    monkeypatch.setattr(
+        requests, "get", lambda url, **k: _ThumbResp(content_type=content_type)
+    )
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["json"] = kwargs["json"]
+        return _reply('{"results":[]}')
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    VisionRankingProvider(_settings()).rank({}, _photos(1))
+
+    content = captured["json"]["messages"][1]["content"]
+    urls = [p["image_url"]["url"] for p in content if p["type"] == "image_url"]
+    assert urls[0].startswith(f"data:{expected_mime};base64,")
 
 
 def test_mock_gradients_skip_the_call(monkeypatch):

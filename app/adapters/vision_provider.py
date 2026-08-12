@@ -17,6 +17,7 @@ fluxo cai no ranking textual de sempre.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import math
@@ -188,6 +189,38 @@ class VisionRankingProvider:
             # Gradientes sintéticos não têm o que julgar visualmente.
             return []
 
+        # As fotos vão como BYTES (data URI base64), não como URL: URL deixa o
+        # download por conta do endpoint, e o servidor da ModelScope (na China)
+        # não alcança o CDN do Pinterest — a chamada inteira voltava HTTP 400
+        # com "Get https://i.pinimg.com/…: context deadline exceeded", enquanto
+        # o Unsplash funcionava só porque o CDN dele responde de lá. Os bytes
+        # nós mesmos baixamos, de onde o CDN responde.
+        #
+        # Uma thumb que falhe aqui fica FORA da chamada em vez de ir como URL:
+        # uma única URL inalcançável (o 403 do caminho 474x para .png, por
+        # exemplo) derruba a requisição inteira, e perder um veredicto é mais
+        # barato que perder os oito.
+        kept: list[PinterestImage] = []
+        image_parts: list[dict[str, Any]] = []
+        for img in candidates:
+            data_uri = _download_as_data_uri(img.vision_url)
+            if not data_uri:
+                continue
+            kept.append(img)
+            image_parts.append({
+                "type": "image_url",
+                "image_url": {"url": data_uri},
+            })
+        if len(kept) < len(candidates):
+            logger.warning(
+                "Vision: %d de %d thumbs não baixaram e ficaram fora da avaliação.",
+                len(candidates) - len(kept),
+                len(candidates),
+            )
+        if not kept:
+            return []
+        candidates = kept
+
         content: list[dict[str, Any]] = [{
             "type": "text",
             "text": (
@@ -197,11 +230,7 @@ class VisionRankingProvider:
                 "Os image_id são: " + ", ".join(i.image_id for i in candidates)
             ),
         }]
-        for img in candidates:
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": img.vision_url},
-            })
+        content.extend(image_parts)
 
         try:
             response = self._post(candidates, content)
@@ -308,6 +337,32 @@ def _cap_across_pools(images: list[PinterestImage], cap: int) -> list[PinterestI
             break
         round_index += 1
     return picked
+
+
+# Timeout curto e por imagem para baixar as thumbs: são até 8 GETs sequenciais
+# dentro do POST /generate, ANTES da chamada de visão (90s) — e a soma tem de
+# caber no --timeout 180 do gunicorn, senão o worker morre sem dar o fallback.
+_THUMB_FETCH_TIMEOUT_SECONDS = 10
+# `vision_url` cai na image_url CHEIA quando o pin não tem thumb; uma foto
+# "originals" de vários MB viraria um payload gigante. Acima disso, fica fora.
+_THUMB_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _download_as_data_uri(url: str) -> str:
+    """Bytes da foto como data URI base64. "" = a foto fica de fora da chamada."""
+    try:
+        response = requests.get(url, timeout=_THUMB_FETCH_TIMEOUT_SECONDS)
+    except requests.RequestException:
+        return ""
+    body = response.content or b""
+    if response.status_code >= 400 or not body or len(body) > _THUMB_MAX_BYTES:
+        return ""
+    mime = (response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    if not mime.startswith("image/"):
+        # O caminho 474x do pinimg só serve JPEG; um CDN que responda
+        # octet-stream ainda é foto.
+        mime = "image/jpeg"
+    return f"data:{mime};base64,{base64.b64encode(body).decode('ascii')}"
 
 
 def _clamp_score(value: Any) -> float:
