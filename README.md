@@ -15,6 +15,7 @@ Aplicação Flask que transforma o texto gerado pelo **goviral.ai** em um carros
 - ✅ **Prompt de roteiro mais específico** — o LLM recebe os tipos de hook nomeados (contrarian, omissão, erro, número, história), o teto de caracteres, a lista do que é proibido no hook (saudação, "neste carrossel vou te mostrar", pergunta genérica) e a regra de uma ideia por slide. Pedir "escreva um hook" devolvia a média da internet; nomear o formato empurra o modelo para uma frase que arrisca alguma coisa.
 - 🐛 **Roteiro de 12 slides caía no composer mock** — o `max_tokens` era fixo em 1200 e o JSON chegava cortado no meio de um item; um JSON quebrado descarta o documento inteiro, então o carrossel voltava do mock sem dizer por quê. O orçamento agora cresce com o número de slides.
 - 🐛 **A visão falhava com as fotos do Pinterest** — a chamada mandava a **URL** da thumb e deixava o download por conta do endpoint: o servidor da ModelScope (na China) não alcança o `i.pinimg.com` e devolvia `HTTP 400` com `context deadline exceeded` — a mesma chamada que funcionava no Unsplash, cujo CDN responde de lá. Agora a thumb é baixada pelo app e vai como **bytes** (data URI base64), formato que qualquer endpoint OpenAI-compatible aceita. Uma foto que não baixe fica **fora** da chamada em vez de ir como URL, porque uma única URL inalcançável derrubava a avaliação das oito; sem nenhuma foto baixada, a chamada nem sai e o ranking textual assume.
+- 🐛 **O hook saía com texto a mais no composer LLM** — o prompt proíbe apoio no slide 1, mas quando o modelo escrevia um mesmo assim o código **colava** essa frase no hook, aplicando a regra pensada para o roteiro manual (lá o apoio é texto do usuário, e descartar seria pior). Vindo do modelo, o apoio é excesso — a informação continua nos outros slides — e agora é **apagado**, como a tabela abaixo sempre prometeu. Um roteiro colado no padrão "duas linhas por script" induzia exatamente isso: o modelo imitava o padrão também no slide 1. Se o modelo inverter os campos (frase no body, headline vazia), o body vira o hook para o slide 1 não sair em branco. No roteiro manual nada muda.
 
 ### Buscar fotos no Pinterest sem token
 
@@ -53,7 +54,7 @@ A regra é aplicada em um lugar só (`enforce_hook_slide`) e vale nos três cami
 | Composer mock | O slide de hook sai sem body e sem CTA. |
 | Composer LLM | O prompt proíbe body no slide 1 — e o código apaga se o modelo escrever mesmo assim. O papel do slide 1 também é forçado para `hook`, independente do que o modelo rotule. |
 
-O texto do apoio **não é descartado**: ele entra na mesma caixa, colado à frase. Um hook comprido é visível e corrigível na prévia; texto que some sem aviso, não. O teto da caixa é de 160 caracteres — acima do limite de uma headline comum (70) justamente para caber quem escreveu duas linhas.
+O apoio que **você** escreveu não é descartado: ele entra na mesma caixa, colado à frase. Um hook comprido é visível e corrigível na prévia; texto que some sem aviso, não. O teto da caixa é de 160 caracteres — acima do limite de uma headline comum (70) justamente para caber quem escreveu duas linhas. O apoio que o **LLM** inventa no slide 1 segue a regra oposta: o prompt o proíbe, então o que vier ali é excesso do modelo e é apagado em vez de colado — colar deixava o hook com texto a mais.
 
 Na prévia, os campos "Texto" e "CTA" da imagem 1 aparecem em leitura apenas, e a gravação limpa os dois de qualquer jeito: oferecer um campo e ignorar o que foi digitado nele seria pior que não oferecer.
 
@@ -372,10 +373,10 @@ pip install -r requirements-dev.txt
 pytest -v tests/
 ```
 
-Cobertura (295 testes):
+Cobertura (296 testes):
 - **TextComposer** — split em slides, hashtags, texto curto, texto vazio.
 - **Roteiro por imagem** — primeira linha vira headline e o resto o body, rótulos `Imagem N:` removidos, campo vazio herda o papel, blocos além do nº de slides descartados, hashtags e CTA preservados.
-- **A imagem 1 é uma caixa só** — o bloco de duas linhas vira uma frase (sem virar headline + apoio) e o hook não é cortado no limite de headline; o composer mock devolve o hook sem body nem CTA e mantém as duas caixas nos outros slides; no LLM o body e o CTA do slide 1 são apagados mesmo quando o modelo os escreve, e o papel do slide 1 é `hook` independente do que o modelo rotule; a prévia entrega os campos de apoio e CTA da imagem 1 em leitura apenas e a gravação limpa os dois; um hook longo continua validando no formulário de edição.
+- **A imagem 1 é uma caixa só** — o bloco de duas linhas vira uma frase (sem virar headline + apoio) e o hook não é cortado no limite de headline; o composer mock devolve o hook sem body nem CTA e mantém as duas caixas nos outros slides; no LLM o body e o CTA do slide 1 são apagados mesmo quando o modelo os escreve **sem colar o apoio na frase** (a frase mandada no lugar da headline ainda vira o hook), e o papel do slide 1 é `hook` independente do que o modelo rotule; a prévia entrega os campos de apoio e CTA da imagem 1 em leitura apenas e a gravação limpa os dois; um hook longo continua validando no formulário de edição.
 - **Distribuição do roteiro colado** — separadores `Imagem N:`, `2.`, `---` e parágrafo; teto no nº de slides com o total encontrado reportado; texto vazio e contagem inválida.
 - **Casting** — hook recebe pessoa por visão, por metadado (`alt_description`) e por pool de busca, nessa ordem; parte do corpo ("woman's hands") não conta como retrato; fotos de cenário nunca caem no slide 1; aviso quando não há foto com pessoa; `HOOK_SUBJECT=off` volta à rotação.
 - **Roteiro viral** — distribuição de papéis por nº de slides, ordem `hook…cta`, CTA só no fecho, sem texto duplicado entre headline e body.

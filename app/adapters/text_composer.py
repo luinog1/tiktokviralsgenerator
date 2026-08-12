@@ -203,10 +203,9 @@ def _normalize_role(value: str) -> str:
 # qualquer coisa abaixo dela divide essa atenção.
 #
 # A regra vale nos três caminhos que produzem slides (roteiro escrito à mão,
-# composer mock e LLM), então mora aqui, num lugar só. O que veio no apoio não
-# é jogado fora: entra na mesma caixa, colado à frase, porque descartar texto
-# que o usuário escreveu é pior que um hook comprido — e um hook comprido ele
-# corrige na prévia.
+# composer mock e LLM), então mora aqui, num lugar só. O destino do apoio que
+# chegar junto com o hook depende de quem o escreveu — usuário ou modelo — e
+# está documentado em `enforce_hook_slide`.
 HOOK_TEXT_LIMIT = 160
 
 
@@ -222,11 +221,25 @@ def hook_box_text(*parts: str) -> str:
     return _truncate(" ".join(joined.split()), HOOK_TEXT_LIMIT)
 
 
-def enforce_hook_slide(slide: SlideContent) -> SlideContent:
-    """Colapsa o slide de hook numa caixa só. Outros papéis passam intactos."""
+def enforce_hook_slide(slide: SlideContent, *, merge_body: bool = True) -> SlideContent:
+    """Colapsa o slide de hook numa caixa só. Outros papéis passam intactos.
+
+    `merge_body` diz o destino do apoio que chegou junto com o hook:
+    - `True` (roteiro manual, composer mock): entra na mesma caixa, colado à
+      frase — ali o apoio é texto do usuário, e descartar texto escrito é pior
+      que um hook comprido.
+    - `False` (composer LLM): é apagado. O prompt proíbe body no slide 1; o que
+      o modelo escreve ali mesmo assim é excesso dele — a informação continua
+      no texto original e nos outros slides — e colar inflava o hook. O body só
+      é aproveitado quando veio no LUGAR da headline, para o slide 1 não sair
+      em branco.
+    """
     if slide.role != "hook":
         return slide
-    slide.headline = hook_box_text(slide.headline, slide.body)
+    if merge_body:
+        slide.headline = hook_box_text(slide.headline, slide.body)
+    else:
+        slide.headline = hook_box_text(slide.headline or slide.body)
     slide.body = ""
     slide.call_to_action = ""
     return slide
@@ -543,13 +556,18 @@ class LLMTextComposer:
                 role = "hook"
             cta = _truncate(str(s.get("call_to_action") or "").strip(), 80)
             slides.append(
-                enforce_hook_slide(SlideContent(
-                    headline=headline,
-                    body=body,
-                    call_to_action=cta if role == "cta" else "",
-                    order=order,
-                    role=role,
-                ))
+                enforce_hook_slide(
+                    SlideContent(
+                        headline=headline,
+                        body=body,
+                        call_to_action=cta if role == "cta" else "",
+                        order=order,
+                        role=role,
+                    ),
+                    # Apoio no slide 1 aqui é desobediência ao prompt, não texto
+                    # do usuário — apagar, não colar (colar inflava o hook).
+                    merge_body=False,
+                )
             )
 
         if not slides:

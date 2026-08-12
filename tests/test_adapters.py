@@ -449,7 +449,12 @@ def _llm_reply(slides: list[dict]) -> _FakeResponse:
 
 def test_llm_hook_slide_is_one_box_even_when_the_model_writes_a_body(monkeypatch):
     """O prompt proíbe apoio no slide 1, mas o modelo desobedece — a regra do
-    produto não pode depender de o modelo ter obedecido."""
+    produto não pode depender de o modelo ter obedecido.
+
+    O apoio que o modelo inventa é apagado, não colado à frase: colar inflava o
+    hook com texto a mais (a informação continua nos outros slides). Diferente
+    do roteiro manual, onde o apoio é texto do usuário e entra na caixa.
+    """
     from app.adapters.text_composer import LLMTextComposer
 
     monkeypatch.setattr(
@@ -469,11 +474,28 @@ def test_llm_hook_slide_is_one_box_even_when_the_model_writes_a_body(monkeypatch
     hook = carousel.slides[0]
     assert hook.body == ""
     assert hook.call_to_action == ""
-    # O que o modelo escreveu no apoio não some: entra na mesma caixa.
-    assert hook.headline == (
-        "ninguém acorda às 5h por disciplina e ninguém fala essa parte"
-    )
+    # Só a frase do hook — o apoio desobediente não entra na caixa.
+    assert hook.headline == "ninguém acorda às 5h por disciplina"
     assert carousel.slides[1].body == "o resto se ajeita"
+
+
+def test_llm_hook_sent_in_the_body_field_still_becomes_the_hook(monkeypatch):
+    """Modelo que inverte os campos (headline vazia, frase no body) não pode
+    deixar o slide 1 em branco — o body vale como a frase nesse caso."""
+    from app.adapters.text_composer import LLMTextComposer
+
+    monkeypatch.setattr(
+        "app.adapters.text_composer.requests.post",
+        lambda *a, **k: _llm_reply([
+            {"role": "hook", "headline": "", "body": "a frase que para o scroll"},
+            {"role": "cta", "headline": "fecho", "call_to_action": "salva"},
+        ]),
+    )
+
+    carousel = LLMTextComposer(_llm_settings()).compose("texto", slides_count=2)
+
+    assert carousel.slides[0].headline == "a frase que para o scroll"
+    assert carousel.slides[0].body == ""
 
 
 def test_llm_first_slide_is_the_hook_whatever_role_the_model_returns(monkeypatch):
@@ -491,6 +513,8 @@ def test_llm_first_slide_is_the_hook_whatever_role_the_model_returns(monkeypatch
 
     assert carousel.slides[0].role == "hook"
     assert carousel.slides[0].body == ""
+    # O papel virou hook, então o apoio segue a regra do LLM: apagado.
+    assert carousel.slides[0].headline == "a primeira frase"
 
 
 def test_the_prompt_spells_out_the_hook_rule_and_the_role_order():
