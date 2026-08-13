@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% block title %}Painel do goviral → carrossel — ViralPost Studio{% endblock %}
+
+{% block content %}
+<section class="create-section">
+  <header class="section-head">
+    <h1>Painel do goviral → carrossel</h1>
+    <p>
+      Selecione o painel inteiro no
+      <a href="{{ goviral_url }}" target="_blank" rel="noopener">goviral.ai</a>
+      (<code>Ctrl+A</code>, <code>Ctrl+C</code>) e cole aqui. O
+      <strong>Hook</strong> vira a imagem 1 e cada <strong>Script</strong> vira
+      uma imagem, com o <em>Paragraph 1</em> na caixa de cima e o
+      <em>Paragraph 2</em> na de baixo — sem distribuir campo por campo e sem
+      LLM reescrevendo por cima.
+    </p>
+  </header>
+
+  <form method="POST" action="{{ url_for('goviral.generate') }}" class="briefing-form" novalidate>
+    {{ form.csrf_token }}
+
+    <div class="field">
+      <label for="raw_text">{{ form.raw_text.label.text }}</label>
+      <p class="small muted">
+        O nº de imagens vem do próprio painel (hook + um por script, até
+        {{ max_images }}). Linhas de interface antes do <code>Hook</code>
+        — cabeçalho, "Last updated", "Sign Out" — são descartadas.
+        {% if casting_enabled %}
+          A imagem 1 recebe uma foto com
+          {{ 'mulher' if hook_subject == 'woman' else 'pessoa' }}; as demais,
+          cenário.
+        {% endif %}
+      </p>
+      {{ form.raw_text(id="raw_text", class_="input textarea textarea-lg") }}
+      {% if form.raw_text.errors %}
+        <ul class="errors">{% for err in form.raw_text.errors %}<li>{{ err }}</li>{% endfor %}</ul>
+      {% endif %}
+    </div>
+
+    <div class="goviral-check">
+      <button type="button" class="btn btn-ghost" id="goviral-check">
+        Conferir o que foi entendido
+      </button>
+      <span class="small muted" id="goviral-status" role="status" aria-live="polite"></span>
+      <ol class="goviral-blocks" id="goviral-blocks" hidden></ol>
+    </div>
+
+    <div class="grid-3">
+      <div class="field">
+        <label for="theme">{{ form.theme.label.text }}</label>
+        {{ form.theme(id="theme", class_="input") }}
+        {% if form.theme.errors %}
+          <ul class="errors">{% for err in form.theme.errors %}<li>{{ err }}</li>{% endfor %}</ul>
+        {% endif %}
+      </div>
+      <div class="field">
+        <label for="keywords">{{ form.keywords.label.text }}</label>
+        {{ form.keywords(id="keywords", class_="input") }}
+      </div>
+      <div class="field">
+        <label for="style">{{ form.style.label.text }}</label>
+        {{ form.style(id="style", class_="input") }}
+        {% if form.style.errors %}
+          <ul class="errors">{% for err in form.style.errors %}<li>{{ err }}</li>{% endfor %}</ul>
+        {% endif %}
+      </div>
+    </div>
+    <p class="small muted">
+      Tema e palavras-chave só alimentam a <strong>busca de fotos</strong> — o
+      texto do carrossel é o do painel, sempre. Sem tema, a busca usa as
+      primeiras palavras do hook, e o resultado é mais genérico.
+    </p>
+
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary btn-lg">Gerar carrossel</button>
+      <a href="{{ url_for('create.create') }}" class="btn btn-ghost">Briefing completo</a>
+    </div>
+  </form>
+</section>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    const input = document.getElementById("raw_text");
+    const button = document.getElementById("goviral-check");
+    const status = document.getElementById("goviral-status");
+    const list = document.getElementById("goviral-blocks");
+    const csrf = document.querySelector('input[name="csrf_token"]')?.value || "";
+
+    // A conferência roda no servidor, no MESMO parser que o POST usa. Reescrevê-la
+    // em JS daria uma segunda resposta para "o que o painel disse", e as duas
+    // divergiriam na primeira correção.
+    button?.addEventListener("click", async () => {
+      const rawText = (input?.value || "").trim();
+      list.hidden = true;
+      list.innerHTML = "";
+      if (!rawText) {
+        status.textContent = "Cole o painel primeiro.";
+        return;
+      }
+      button.disabled = true;
+      status.textContent = "Lendo o painel…";
+      try {
+        const response = await fetch("{{ url_for('goviral.parse') }}", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-CSRFToken": csrf },
+          body: JSON.stringify({ raw_text: rawText }),
+        });
+        if (!response.ok) throw new Error(String(response.status));
+        const data = await response.json();
+        if (!data.recognized) {
+          status.textContent =
+            'Não reconheci o painel — preciso do rótulo "Hook" com a frase e de ' +
+            'pelo menos um "Script 1" com os parágrafos.';
+          return;
+        }
+        (data.blocks || []).forEach((block, i) => {
+          const item = document.createElement("li");
+          const role = i === 0 ? "hook — uma caixa só" : "duas caixas";
+          const label = document.createElement("strong");
+          label.textContent = `Imagem ${i + 1} (${role})`;
+          const text = document.createElement("p");
+          text.textContent = block;
+          item.append(label, text);
+          list.appendChild(item);
+        });
+        list.hidden = false;
+        const extra = data.found > data.blocks.length
+          ? ` (${data.found - data.blocks.length} além do limite de ${data.limit})`
+          : "";
+        status.textContent = `${data.blocks.length} imagem(ns)${extra}.`;
+      } catch (err) {
+        status.textContent = "Não foi possível ler o painel.";
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
+</script>
+{% endblock %}

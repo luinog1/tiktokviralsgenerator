@@ -229,6 +229,71 @@ class BriefingForm(FlaskForm):
         }
 
 
+class GoviralForm(FlaskForm):
+    """O painel do goviral colado inteiro — a ferramenta de um campo.
+
+    O que essa tela automatiza é justamente o que o `BriefingForm` pede em
+    pedaços: o número de imagens e a distribuição do texto entre elas saem do
+    próprio painel (`goviral_parser`), então aqui só sobra o que o painel não
+    tem — o tema da busca de fotos e o estilo visual. Nem `slides_count` nem
+    `script_mode` aparecem: escolher um número que contradiga o painel seria a
+    forma mais fácil de errar o carrossel.
+    """
+
+    raw_text = TextAreaField(
+        "Painel do goviral (Hook + Scripts) *",
+        validators=[
+            DataRequired(message="Cole o painel do goviral."),
+            Length(max=12000),
+        ],
+        render_kw={
+            "placeholder": (
+                "Selecione o painel inteiro no goviral.ai (Ctrl+A, Ctrl+C) e cole "
+                "aqui:\n\n"
+                "Hook\n"
+                "a frase que para o scroll\n"
+                "Script 1\n"
+                "Position 1\n"
+                "Paragraph 1:\n"
+                "a caixa de cima\n"
+                "Paragraph 2:\n"
+                "a caixa de baixo"
+            ),
+            "rows": 14,
+            "autofocus": True,
+        },
+    )
+    theme = StringField(
+        "Tema da busca de fotos",
+        validators=[Optional(), Length(max=200)],
+        render_kw={"placeholder": "Ex.: rotina matinal produtiva"},
+    )
+    style = SelectField(
+        "Estilo visual *",
+        choices=STYLE_CHOICES,
+        default="sticker",
+        validators=[DataRequired(message="Selecione um estilo.")],
+    )
+    keywords = StringField(
+        "Palavras-chave",
+        validators=[Optional(), Length(max=200)],
+        render_kw={"placeholder": "separadas por vírgula: foco, hábitos"},
+    )
+
+    def keyword_list(self) -> list[str]:
+        """As palavras-chave num campo só, separadas por vírgula.
+
+        A FieldList do briefing existe para o formulário completo; aqui um campo
+        de texto entrega o mesmo resultado sem JS de adicionar/remover linha. O
+        teto de 8 é o mesmo do `BriefingForm`.
+        """
+        return [
+            part.strip()
+            for part in (self.keywords.data or "").split(",")
+            if part.strip()
+        ][:8]
+
+
 class SlideEditForm(FlaskForm):
     """Formulário de edição de cada slide do carrossel."""
 
@@ -330,6 +395,7 @@ class SlideEditForm(FlaskForm):
 
 __all__ = [
     "BriefingForm",
+    "GoviralForm",
     "SlideEditForm",
     "STYLE_CHOICES",
     "SLIDES_CHOICES",

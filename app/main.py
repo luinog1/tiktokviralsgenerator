@@ -78,12 +78,14 @@ def create_app(settings: Settings | None = None) -> Flask:
     from app.routes.main import bp as main_bp
     from app.routes.create import bp as create_bp
     from app.routes.generate import bp as generate_bp
+    from app.routes.goviral import bp as goviral_bp
     from app.routes.preview import bp as preview_bp
     from app.routes.health import bp as health_bp
 
     app.register_blueprint(main_bp)
     app.register_blueprint(create_bp)
     app.register_blueprint(generate_bp)
+    app.register_blueprint(goviral_bp)
     app.register_blueprint(preview_bp)
     app.register_blueprint(health_bp)
 

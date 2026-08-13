@@ -45,6 +45,13 @@ from .script_parser import (
     parse_manual_script,
     split_blocks,
 )
+from .goviral_parser import (
+    GoviralPaste,
+    GoviralScript,
+    goviral_blocks,
+    is_goviral_paste,
+    parse_goviral,
+)
 
 __all__ = [
     # TextComposer
@@ -72,4 +79,15 @@ __all__ = [
     "VisionRankingProvider",
     "VisionVerdict",
     "build_vision_provider",
+    # Roteiro por imagem — blocos sem LLM
+    "blocks_from_slides",
+    "compose_from_blocks",
+    "parse_manual_script",
+    "split_blocks",
+    # Painel do goviral colado inteiro (Hook + Script N + Paragraph 1/2)
+    "GoviralPaste",
+    "GoviralScript",
+    "goviral_blocks",
+    "is_goviral_paste",
+    "parse_goviral",
 ]

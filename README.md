@@ -2,9 +2,34 @@
 
 Aplicação Flask que transforma o texto gerado pelo **goviral.ai** em um carrossel visual pronto para publicar — combinando o texto colado com fotos do Pinterest (API oficial **ou** busca sem token) ou do Unsplash, composição opcional via LLM e renderização estilo **TikTok photo post** (1080×1350, 4:5).
 
-> **Status:** MVP v0.8 — Ready for building
+> **Status:** MVP v0.9 — Ready for building
 > **Stack:** Python 3.11 · Flask 3 · Jinja2 · WTForms · Pillow · Docker
 > **Idioma inicial:** Português (pt-BR)
+
+---
+
+## 🎯 O que mudou na v0.9
+
+- ✅ **O painel do goviral colado inteiro vira carrossel** — a nova tela **`/goviral`** ("Colar do painel", no menu) recebe o dashboard como o `Ctrl+A`/`Ctrl+C` entrega: `Hook`, `Script N`, `Position N`, `Paragraph 1/2`. O hook vira a imagem 1 (uma caixa só), cada script vira uma imagem — parágrafo 1 na caixa de cima, parágrafo 2 na de baixo — e o **número de imagens sai do próprio painel**, sem seletor de slides. Antes, chegar nesse resultado eram onze cliques de copiar (um por caixa do painel) e um paste por campo; colar tudo na caixa única também não servia, porque sem os rótulos `Imagem N:` o texto seguia para o LLM redistribuir. Só tema/palavras-chave (busca de fotos) e estilo continuam sendo perguntas — o painel não as responde.
+- ✅ **O painel é reconhecido nos caminhos que já existiam** — colado na caixa única do modo automático, entra na mesma regra dos rótulos `Imagem N:`: composição determinística, **sem LLM**, com aviso na prévia. No botão "distribuir" do briefing completo, cada script preenche seu campo (o status diz "Painel do goviral: N imagens"). O formato mais específico é tentado primeiro: "Script 1 / Paragraph 1" não casa com nenhum separador genérico e, sem isso, cada rótulo do painel viraria um slide.
+- ✅ **"Conferir o que foi entendido"** — antes de gerar, a tela mostra a distribuição (imagem por imagem, com as duas caixas). O painel é HTML de terceiro: quando o goviral mudar o layout, o parser vai errar — e o erro tem que aparecer aqui, não como um carrossel com texto no slide errado. Reconhecido pela metade não conta: sem o rótulo `Hook` com texto e pelo menos um script com texto, a resposta é "não é painel" e os caminhos de sempre continuam valendo.
+- ✅ **Tolerâncias do clipboard** — preâmbulo antes do `Hook` (cabeçalho, "Last updated", "Sign Out") é descartado por posição, sem lista de textos de interface; `Position N` decide a ordem quando presente em todos os scripts; painel sem cabeçalhos `Script N` é dividido pelo `Paragraph 1` (a numeração reinicia a cada script); parágrafo quebrado em várias linhas continua na mesma caixa; um `Paragraph 3` excedente entra na caixa de baixo em vez de criar imagem que o painel não tem.
+
+### O painel na prática
+
+```
+Content Dashboard          ← preâmbulo: descartado
+Hook
+i regret posting consistently and here is why...
+Script 1                   ← imagem 2
+Position 1
+Paragraph 1:
+i was consistent, but i was still guessing.        ← caixa de cima
+Paragraph 2:
+i posted every day with no plan...                 ← caixa de baixo
+```
+
+`Hook`/`Gancho`, `Script`/`Roteiro`, `Paragraph`/`Parágrafo` e `Position`/`Posição` são aceitos, com o texto na mesma linha (`Hook: frase`) ou na seguinte. Os rótulos são orientação de montagem — nunca aparecem na imagem.
 
 ---
 
@@ -259,8 +284,9 @@ Reaproveitar essa sessão no servidor significaria repassar seus cookies, ou sej
 ## ✨ Funcionalidades do MVP
 
 - Landing page com link direto para o goviral.ai (login Discord manual).
+- **Tela "Colar do painel" (`/goviral`)** — o dashboard do goviral colado inteiro vira o carrossel: hook + um script por imagem, nº de imagens decidido pelo painel, prévia da distribuição antes de gerar.
 - Formulário com **um campo de roteiro por imagem** (rotulado pelo papel do slide) ou textarea única, mais tema, estilo, nº de slides, idioma e keywords.
-- **Rótulo `Imagem N:` no texto colado dispensa o LLM** — vale nas duas caixas de texto; a linha em branco dentro do trecho separa as duas caixas da imagem.
+- **Rótulo `Imagem N:` no texto colado dispensa o LLM** — vale nas duas caixas de texto; a linha em branco dentro do trecho separa as duas caixas da imagem. O **painel do goviral** (Hook + Script + Paragraph) é reconhecido do mesmo jeito, sem rótulo nenhum.
 - Botão "distribuir" que divide um roteiro colado entre os campos, entendendo `Imagem N:` (com nota entre parênteses ou sozinho na linha), `2.`, `---`, o intervalo de duas linhas em branco e parágrafos.
 - **Casting por papel**: imagem 1 sempre com pessoa (hook), demais com cenário — via busca separada, metadado da foto e visão.
 - Composição de carrossel via TextComposer (mock determinístico ou LLM); no modo por imagem — e em qualquer texto colado com rótulos —, sem LLM no caminho do texto.
@@ -395,6 +421,7 @@ curl -s http://localhost:5000/health | python -m json.tool
 │   ├── adapters/
 │   │   ├── text_composer.py    # TextComposer (mock + LLM)
 │   │   ├── script_parser.py    # Roteiro por imagem — blocos → slides (sem LLM)
+│   │   ├── goviral_parser.py   # Painel do goviral (Hook/Script/Paragraph) → blocos
 │   │   ├── pinterest_client.py # Pinterest v5 + Pinterest sem token + Unsplash + Mock
 │   │   ├── ranking_provider.py # Inference (LLM) + Mock
 │   │   └── vision_provider.py  # VLM — nota + posição do texto + assunto da foto
@@ -406,6 +433,7 @@ curl -s http://localhost:5000/health | python -m json.tool
 │   └── routes/
 │       ├── main.py            # /
 │       ├── create.py          # /create, /script/split
+│       ├── goviral.py         # /goviral, /goviral/parse — colar o painel inteiro
 │       ├── generate.py        # /generate, /rank
 │       ├── preview.py         # /preview/<id>, /edit, /export
 │       └── health.py         # /health
@@ -431,7 +459,8 @@ pip install -r requirements-dev.txt
 pytest -v tests/
 ```
 
-Cobertura (324 testes):
+Cobertura (352 testes):
+- **Painel do goviral** — o dashboard colado com `Ctrl+A` vira um bloco por imagem (hook numa linha só, parágrafos nas duas caixas); preâmbulo antes do `Hook` descartado sem lista de interface; rótulos nunca chegam ao slide; texto na mesma linha do rótulo ou na seguinte; rótulos das duas colunas antes dos dois textos; `Position` decidindo a ordem; painel sem cabeçalho `Script` dividido pelo `Paragraph 1`; parágrafo multi-linha na mesma caixa; `Paragraph 3` na caixa de baixo; reconhecido pela metade (sem `Hook`, sem texto, só scripts) responde "não é painel"; `Imagem N:` continua sendo do `labeled_blocks`; e as rotas — `/goviral` gera sem perguntar nº de slides, 422 com motivo quando não é painel, `/goviral/parse` mostra a distribuição, o "distribuir" do briefing entende o painel e o painel na caixa única pula o composer.
 - **TextComposer** — split em slides, hashtags, texto curto, texto vazio, e as linhas em branco do texto colado sobrevivendo à limpeza das hashtags (colapsá-las fazia todos os slides saírem com o roteiro inteiro).
 - **Rótulo `Imagem N`** — nota entre parênteses e rótulo sozinho na linha continuam sendo rótulo; hora no começo da linha (`5:30 da manhã`) não é rótulo; `labeled_blocks` só responde quando os rótulos existem; rótulo digitado dentro do campo não chega ao slide; texto colado com rótulos pula o composer, mantém a ordem e avisa quantos rótulos foram obedecidos, e texto sem rótulo continua indo para o composer.
 - **Caixa vs. imagem** — linha em branco dentro do bloco separa as duas caixas daquela imagem, duas linhas em branco separam as imagens, uma caixa de duas linhas sai como uma frase, e no bloco da imagem 1 a linha em branco não cria segunda caixa.
@@ -468,6 +497,9 @@ Cobertura (324 testes):
 | Método | Rota | Descrição |
 |--------|------|-----------|
 | GET | `/` | Landing page + status |
+| GET | `/goviral` | Colar o painel do goviral inteiro — hook + scripts viram as imagens |
+| POST | `/goviral` | Gera o carrossel a partir do painel (nº de imagens vem do painel) |
+| POST | `/goviral/parse` | Prévia da distribuição: o que o parser entendeu do painel (JSON) |
 | GET | `/create` | Formulário de briefing (roteiro por imagem ou texto corrido) |
 | POST | `/script/split` | Divide um roteiro colado em blocos por imagem (JSON) |
 | POST | `/generate` | Executa composição do carrossel |

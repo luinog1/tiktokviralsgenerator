@@ -72,7 +72,9 @@ def test_index_returns_landing(client):
     body = response.data.decode("utf-8")
     assert "ViralPost Studio" in body
     assert "goviral.ai" in body
-    assert "Criar carrossel" in body
+    # Os dois caminhos de entrada: colar o painel (atalho) e o briefing completo.
+    assert "Colar o painel do goviral" in body
+    assert "Briefing completo" in body
 
 
 def test_create_form_renders(client):
@@ -468,3 +470,120 @@ def test_the_hook_image_renders_a_single_box_end_to_end(client):
     # A caixa de apoio do hook fica vazia — o CSS :empty a esconde na prévia.
     hook_body = re.search(r'<textarea[^>]*name="bodies-0"[^>]*>\s*</textarea>', body)
     assert hook_body
+
+
+# --------------------------------- painel do goviral: colar inteiro e gerar
+GOVIRAL_PANEL = (
+    "Content Dashboard\n"
+    "Last updated: 6/25/2026, 2:35:03 PM\n"
+    "Hook\n"
+    "i regret posting consistently and here is why...\n"
+    "Scripts\n"
+    "Script 1\n"
+    "Position 1\n"
+    "Paragraph 1:\n"
+    "i was consistent, but i was still guessing.\n"
+    "Paragraph 2:\n"
+    "i posted every day with no plan and no clear promise.\n"
+    "Script 2\n"
+    "Position 2\n"
+    "Paragraph 1:\n"
+    "the quiet phase fooled me into panic changes.\n"
+    "Paragraph 2:\n"
+    "i switched topics and styles instead of stacking signals.\n"
+)
+
+
+def test_goviral_page_renders(client):
+    body = client.get("/goviral").data.decode("utf-8")
+    assert "Painel do goviral" in body
+    assert "raw_text" in body
+
+
+def test_goviral_panel_generates_the_carousel_without_asking_slide_count(client):
+    """O fluxo inteiro da ferramenta: colar o painel e gerar. O nº de imagens
+    vem do painel (hook + 2 scripts = 3), e o texto chega à prévia como
+    escrito — hook numa caixa só, parágrafos nas duas caixas."""
+    response = client.post("/goviral", data={
+        "raw_text": GOVIRAL_PANEL,
+        "theme": "consistência",
+        "style": "sticker",
+    }, follow_redirects=True)
+
+    assert response.status_code == 200
+    body = response.data.decode("utf-8")
+    assert "i regret posting consistently and here is why..." in body
+    assert "i was consistent, but i was still guessing." in body
+    assert "the quiet phase fooled me into panic changes." in body
+    # Os rótulos do painel são orientação — nunca texto de slide.
+    assert "Paragraph 1" not in body
+    assert "Position 1" not in body
+    # 3 imagens: os campos da prévia param no índice 2.
+    assert "text_positions-2" in body
+    assert "text_positions-3" not in body
+
+
+def test_goviral_rejects_text_that_is_not_the_panel(client):
+    response = client.post("/goviral", data={
+        "raw_text": "um texto qualquer, sem os rótulos do painel do goviral",
+        "style": "sticker",
+    })
+    assert response.status_code == 422
+    assert "Não reconheci o painel" in response.data.decode("utf-8")
+
+
+def test_goviral_parse_endpoint_previews_the_distribution(client):
+    response = client.post("/goviral/parse", json={"raw_text": GOVIRAL_PANEL})
+    data = response.get_json()
+
+    assert response.status_code == 200
+    assert data["recognized"] is True
+    assert data["hook"] == "i regret posting consistently and here is why..."
+    assert len(data["blocks"]) == 3
+    assert data["blocks"][1] == (
+        "i was consistent, but i was still guessing."
+        "\n\n"
+        "i posted every day with no plan and no clear promise."
+    )
+
+
+def test_goviral_parse_endpoint_says_when_it_is_not_a_panel(client):
+    response = client.post("/goviral/parse", json={"raw_text": "texto corrido"})
+    data = response.get_json()
+
+    assert data["recognized"] is False
+    assert data["blocks"] == []
+
+
+def test_script_split_recognizes_the_goviral_panel(client):
+    """O botão "distribuir" do briefing completo também entende o painel: cada
+    script vira um campo, com a linha em branco separando as duas caixas."""
+    response = client.post("/script/split", json={
+        "raw_text": GOVIRAL_PANEL,
+        "slides_count": "6",
+    })
+    data = response.get_json()
+
+    assert data["source"] == "goviral"
+    assert data["found"] == 3
+    assert data["blocks"][0] == "i regret posting consistently and here is why..."
+    assert "\n\n" in data["blocks"][1]
+
+
+def test_generate_with_pasted_panel_in_raw_text_skips_the_llm(client):
+    """O painel colado na caixa única do modo automático: mesma regra dos
+    rótulos `Imagem N:` — composição determinística, sem composer no meio."""
+    response = client.post("/generate", data={
+        "raw_text": GOVIRAL_PANEL,
+        "theme": "consistência",
+        "language": "pt-BR",
+        "style": "sticker",
+        "slides_count": "6",
+    }, follow_redirects=True)
+
+    assert response.status_code == 200
+    body = response.data.decode("utf-8")
+    assert "Painel do goviral reconhecido" in body
+    # Sem aviso de composer mock: o composer não rodou.
+    assert "Composição em modo mock" not in body
+    assert "i was consistent, but i was still guessing." in body

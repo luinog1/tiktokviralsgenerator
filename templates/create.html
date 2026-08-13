@@ -87,6 +87,10 @@
           <code>2.</code>, <code>---</code> e o intervalo de duas linhas em
           branco entre as imagens. Depois de distribuir, os campos abaixo
           continuam editáveis.
+          O <strong>painel do goviral</strong> (Hook + Script N + Paragraph 1/2)
+          é reconhecido como está, sem rótulo nenhum — ou use a tela
+          <a href="{{ url_for('goviral.paste') }}">Colar do painel</a>, que já
+          decide o nº de imagens pelo painel.
         </p>
         <textarea id="script-paste-input" class="input textarea" rows="8"
                   placeholder="Imagem 1: a frase do hook&#10;&#10;Imagem 2: a primeira caixa&#10;&#10;a segunda caixa&#10;&#10;Imagem 3: ..."></textarea>
@@ -275,7 +279,11 @@
           const extra = data.found > blocks.length
             ? ` (${data.found - blocks.length} sobraram — aumente o nº de slides)`
             : "";
-          pasteStatus.textContent = `${blocks.length} imagem(ns) preenchida(s)${extra}.`;
+          // O painel do goviral é dito em voz alta: quem colou o painel inteiro
+          // precisa saber que o hook e os parágrafos foram lidos como tais, e
+          // não separados por parágrafo como um texto qualquer.
+          const from = data.source === "goviral" ? "Painel do goviral: " : "";
+          pasteStatus.textContent = `${from}${blocks.length} imagem(ns) preenchida(s)${extra}.`;
         }
       } catch (err) {
         if (pasteStatus) pasteStatus.textContent = "Não foi possível distribuir.";

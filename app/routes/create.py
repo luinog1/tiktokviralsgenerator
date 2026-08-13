@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from flask import Blueprint, current_app, jsonify, render_template, request
 
+from app.adapters.goviral_parser import goviral_blocks
 from app.adapters.script_parser import split_blocks
 from app.forms import (
     MAX_SCRIPT_BLOCKS,
@@ -62,13 +63,26 @@ def script_split():
     O botão "distribuir" no formulário chama aqui em vez de refazer a divisão em
     JavaScript: `split_blocks` já entende "Imagem 2:", "3.", "---" e parágrafos,
     e duas implementações da mesma regra divergem na primeira correção.
+
+    O painel do goviral é tentado primeiro porque ele é o formato mais
+    específico: "Script 1 / Paragraph 1 / Paragraph 2" não casa com nenhum
+    separador genérico, então cairia em "uma imagem por linha" — cada rótulo do
+    painel viraria um slide.
     """
     payload = request.get_json(silent=True) or {}
-    blocks = split_blocks(str(payload.get("raw_text") or ""))
+    raw_text = str(payload.get("raw_text") or "")
+    blocks = goviral_blocks(raw_text)
+    source = "goviral" if blocks else "generic"
+    if not blocks:
+        blocks = split_blocks(raw_text)
 
     limit = MAX_SCRIPT_BLOCKS
     requested = payload.get("slides_count")
     if isinstance(requested, (int, str)) and str(requested).isdigit():
         limit = min(max(int(requested), 1), MAX_SCRIPT_BLOCKS)
 
-    return jsonify({"blocks": blocks[:limit], "found": len(blocks)})
+    return jsonify({
+        "blocks": blocks[:limit],
+        "found": len(blocks),
+        "source": source,
+    })

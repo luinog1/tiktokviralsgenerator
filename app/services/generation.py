@@ -21,6 +21,7 @@ from app.adapters import (
     build_text_composer,
 )
 from app.adapters.pinterest_client import is_mock_image
+from app.adapters.goviral_parser import goviral_blocks
 from app.adapters.script_parser import compose_from_blocks, labeled_blocks
 from app.adapters.vision_provider import VisionRankingProvider, build_vision_provider
 from app.config import Settings
@@ -102,9 +103,26 @@ class GenerationService:
         mandar isso para um LLM redistribuir só cria a chance de ele redistribuir
         diferente — e o sintoma disso é o hook aparecendo colado no texto de
         outro slide.
+
+        O painel do goviral colado inteiro (Hook + Script N + Paragraph 1/2) é
+        lido pelo mesmo princípio: os rótulos do painel já dizem o que é hook e o
+        que são as duas caixas de cada imagem, então não há o que redistribuir.
         """
         warnings: list[str] = []
         manual = [b for b in (script_blocks or []) if b and b.strip()]
+
+        if not manual:
+            manual = goviral_blocks(raw_text)
+            if manual:
+                logger.info(
+                    "Texto colado é o painel do goviral (hook + %d scripts) — "
+                    "composição determinística, sem LLM.",
+                    len(manual) - 1,
+                )
+                warnings.append(
+                    f"Painel do goviral reconhecido: o hook e {len(manual) - 1} "
+                    "script(s) viraram as imagens, sem LLM no caminho."
+                )
 
         if not manual:
             manual = labeled_blocks(raw_text)
