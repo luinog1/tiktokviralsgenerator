@@ -83,25 +83,49 @@ def enhance_paragraphs(
             },
         ],
         "temperature": 0.4,
+        # JSON mode: no Groq, garante JSON válido e tira o raciocínio de
+        # `content` — um modelo de raciocínio em `reasoning_format=raw` (o
+        # default) devolvia o <think> no lugar do JSON e a resposta inteira
+        # era descartada como "NoneType".
+        "response_format": {"type": "json_object"},
         # ~60 tokens por parágrafo encurtado, com folga para o invólucro JSON.
-        "max_tokens": 200 + 90 * len(paragraphs),
+        # A base é generosa porque um modelo de raciocínio gasta o orçamento
+        # pensando ANTES do JSON — com 200 de base, 10 parágrafos voltavam
+        # cortados no meio (finish_reason=length) e nada era aproveitado.
+        "max_tokens": 2048 + 90 * len(paragraphs),
     }
-    try:
-        response = requests.post(
+
+    def _post(body: dict):
+        return requests.post(
             f"{settings.llm_api_base_url.rstrip('/')}/chat/completions",
-            json=payload,
+            json=body,
             headers={
                 "Authorization": f"Bearer {settings.llm_api_key}",
                 "Content-Type": "application/json",
             },
             timeout=settings.request_timeout_seconds,
         )
+
+    try:
+        response = _post(payload)
+        # Nem todo endpoint OpenAI-compatible aceita response_format — um 400
+        # imediato repete sem o campo, como o vision faz com enable_thinking.
+        if response.status_code in (400, 422):
+            logger.warning(
+                "Simplificação: endpoint rejeitou json_mode (HTTP %d) — repetindo sem ele.",
+                response.status_code,
+            )
+            payload.pop("response_format", None)
+            response = _post(payload)
         response.raise_for_status()
-        content = (
-            (response.json().get("choices") or [{}])[0]
-            .get("message", {})
-            .get("content", "")
-        )
+        choice = (response.json().get("choices") or [{}])[0]
+        finish_reason = choice.get("finish_reason")
+        message = choice.get("message") or {}
+        content = message.get("content") or ""
+        if not content.strip():
+            # Modelo de raciocínio com `content` vazio pode ter posto a
+            # resposta no campo de raciocínio (Groq: `reasoning`).
+            content = message.get("reasoning") or message.get("reasoning_content") or ""
     except requests.RequestException as exc:
         logger.warning("Simplificação falhou: %s", type(exc).__name__)
         return None
@@ -117,9 +141,12 @@ def enhance_paragraphs(
         result = {str(i + 1): p for i, p in enumerate(result)}
     if not isinstance(result, dict):
         logger.warning(
-            "Simplificação: esperava %d parágrafos numerados, veio %s — descartada.",
+            "Simplificação: esperava %d parágrafos numerados, veio %s "
+            "(finish_reason=%s; resposta: %.120s) — descartada.",
             len(paragraphs),
             f"lista de {len(result)}" if isinstance(result, list) else type(result).__name__,
+            finish_reason,
+            content.strip() or "(vazia)",
         )
         return None
     cleaned: list[str] = []

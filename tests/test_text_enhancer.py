@@ -36,16 +36,23 @@ PANEL = (
 
 
 class _Response:
-    status_code = 200
-
-    def __init__(self, content: str):
+    def __init__(self, content: str, status_code: int = 200, message_extra: dict | None = None):
         self._content = content
+        self.status_code = status_code
+        self._message_extra = message_extra or {}
 
     def raise_for_status(self) -> None:
         pass
 
     def json(self) -> dict:
-        return {"choices": [{"message": {"content": self._content}}]}
+        return {
+            "choices": [
+                {
+                    "message": {"content": self._content, **self._message_extra},
+                    "finish_reason": "stop",
+                }
+            ]
+        }
 
 
 def _post_returning(monkeypatch, content: str):
@@ -112,6 +119,51 @@ def test_empty_paragraph_discards_the_whole_answer(monkeypatch):
 def test_non_json_answer_returns_none(monkeypatch):
     _post_returning(monkeypatch, "claro! aqui vão os parágrafos mais curtos…")
     assert enhance_paragraphs(Settings.from_env(_LLM_ENV), ["a"]) is None
+
+
+def test_asks_for_json_mode_with_room_for_reasoning(monkeypatch):
+    """O pedido vai em JSON mode (no Groq, tira o raciocínio de `content`) e
+    com orçamento de tokens que um modelo de raciocínio não estoura pensando."""
+    calls = _post_returning(monkeypatch, json.dumps({"paragraphs": {"1": "curto"}}))
+    assert enhance_paragraphs(Settings.from_env(_LLM_ENV), ["a"]) == ["curto"]
+    payload = calls[0]["payload"]
+    assert payload["response_format"] == {"type": "json_object"}
+    assert payload["max_tokens"] >= 2048
+
+
+def test_endpoint_that_rejects_json_mode_gets_a_retry_without_it(monkeypatch):
+    """Endpoint OpenAI-compatible sem json_mode responde 400 na hora — a
+    chamada é repetida sem o campo, e a simplificação ainda acontece."""
+    calls: list[dict] = []
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        calls.append({"payload": json})
+        if "response_format" in json:
+            return _Response("", status_code=400)
+        import json as jsonlib
+
+        return _Response(jsonlib.dumps({"paragraphs": {"1": "curto"}}))
+
+    monkeypatch.setattr(text_enhancer.requests, "post", fake_post)
+    assert enhance_paragraphs(Settings.from_env(_LLM_ENV), ["a"]) == ["curto"]
+    assert len(calls) == 2
+    assert "response_format" not in calls[1]["payload"]
+
+
+def test_json_in_reasoning_field_with_empty_content_is_used(monkeypatch):
+    """Modelo de raciocínio pode deixar `content` vazio e pôr a resposta no
+    campo `reasoning` (Groq) — ela ainda é aproveitada."""
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        import json as jsonlib
+
+        return _Response(
+            "",
+            message_extra={"reasoning": jsonlib.dumps({"paragraphs": {"1": "curto"}})},
+        )
+
+    monkeypatch.setattr(text_enhancer.requests, "post", fake_post)
+    assert enhance_paragraphs(Settings.from_env(_LLM_ENV), ["a"]) == ["curto"]
 
 
 # ------------------------------------------------------- rota /goviral/enhance
