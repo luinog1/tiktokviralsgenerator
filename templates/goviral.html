@@ -41,6 +41,13 @@
       <button type="button" class="btn btn-ghost" id="goviral-check">
         Conferir o que foi entendido
       </button>
+      <button type="button" class="btn btn-ghost" id="goviral-enhance"
+              title="Opcional: um LLM encurta os parágrafos dos scripts — o hook não muda e você revisa antes de gerar.">
+        ✨ Simplificar textos (opcional)
+      </button>
+      <button type="button" class="btn btn-ghost" id="goviral-enhance-undo" hidden>
+        Desfazer simplificação
+      </button>
       <span class="small muted" id="goviral-status" role="status" aria-live="polite"></span>
       <ol class="goviral-blocks" id="goviral-blocks" hidden></ol>
     </div>
@@ -135,6 +142,53 @@
       } finally {
         button.disabled = false;
       }
+    });
+
+    // Simplificação opcional: o LLM encurta os parágrafos e o painel volta
+    // REMONTADO para a própria caixa — revisável, editável e desfazível. A
+    // geração continua determinística: este é o único ponto do fluxo do painel
+    // em que um LLM toca no texto, e só quando o botão é clicado.
+    const enhanceBtn = document.getElementById("goviral-enhance");
+    const undoBtn = document.getElementById("goviral-enhance-undo");
+    let beforeEnhance = null;
+
+    enhanceBtn?.addEventListener("click", async () => {
+      const rawText = (input?.value || "").trim();
+      if (!rawText) {
+        status.textContent = "Cole o painel primeiro.";
+        return;
+      }
+      enhanceBtn.disabled = true;
+      status.textContent = "Simplificando os textos…";
+      try {
+        const response = await fetch("{{ url_for('goviral.enhance') }}", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-CSRFToken": csrf },
+          body: JSON.stringify({ raw_text: rawText }),
+        });
+        const data = await response.json();
+        if (!data.enhanced) {
+          status.textContent = data.reason || "Não foi possível simplificar.";
+          return;
+        }
+        beforeEnhance = input.value;
+        input.value = data.raw_text;
+        undoBtn.hidden = false;
+        list.hidden = true;
+        status.textContent =
+          "Textos simplificados — revise na caixa (o hook não mudou) e gere.";
+      } catch (err) {
+        status.textContent = "Não foi possível simplificar.";
+      } finally {
+        enhanceBtn.disabled = false;
+      }
+    });
+
+    undoBtn?.addEventListener("click", () => {
+      if (beforeEnhance !== null) input.value = beforeEnhance;
+      beforeEnhance = null;
+      undoBtn.hidden = true;
+      status.textContent = "Texto original restaurado.";
     });
   });
 </script>

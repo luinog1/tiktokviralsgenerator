@@ -23,10 +23,16 @@ import requests
 from app.config import Settings
 from app.adapters.pinterest_client import PinterestImage
 from app.adapters.text_composer import SlideContent
+from app.services.goviral_assets import GOVIRAL_URL_PREFIX, resolve_asset
 
 logger = logging.getLogger(__name__)
 
-SlideStyle = Literal["sticker", "quote", "list", "tutorial", "story"]
+SlideStyle = Literal["sticker", "sticker_outline", "quote", "list", "tutorial", "story"]
+
+# Os dois cortes de legenda nativos do TikTok: caixa branca ("white background")
+# e contorno preto ("black outline"). Mesma geometria, tinta diferente — é o que
+# permite ao layout sticker servir os dois sem duplicar o posicionamento.
+STICKER_STYLES = ("sticker", "sticker_outline")
 
 
 @dataclass
@@ -55,6 +61,14 @@ class SlideRenderer:
         "sticker": {
             # Sticker não escurece a foto: o contraste vem da caixa branca.
             "text": (17, 17, 17),
+            "accent": (255, 255, 255),
+            "overlay_top": (0, 0, 0, 0),
+            "overlay_bottom": (0, 0, 0, 0),
+        },
+        "sticker_outline": {
+            # Black outline: texto branco com contorno preto, sem caixa. O
+            # contraste vem do contorno, então a foto também fica limpa.
+            "text": (255, 255, 255),
             "accent": (255, 255, 255),
             "overlay_top": (0, 0, 0, 0),
             "overlay_bottom": (0, 0, 0, 0),
@@ -176,9 +190,9 @@ class SlideRenderer:
             self._draw_gradient(draw, self._w, self._h, palette)
 
         # 2. Overlay para legibilidade.
-        # No estilo sticker a foto fica limpa: o contraste vem das caixas
-        # brancas, então pular o escurecimento.
-        if style != "sticker":
+        # Nos estilos sticker a foto fica limpa: o contraste vem das caixas
+        # brancas ou do contorno preto, então pular o escurecimento.
+        if style not in STICKER_STYLES:
             overlay = Image.new("RGBA", (self._w, self._h), (0, 0, 0, 0))
             overlay_draw = ImageDraw.Draw(overlay)
             # Gradient overlay: topo + base
@@ -200,7 +214,7 @@ class SlideRenderer:
         cta = _safe_text(slide.call_to_action or "")
 
         # Layout por estilo
-        if style == "sticker":
+        if style in STICKER_STYLES:
             # Sticker desenha suas próprias caixas e não usa numeração nem
             # rodapé de atribuição — a atribuição fica na prévia e no Markdown.
             self._draw_sticker_layout(
@@ -208,6 +222,7 @@ class SlideRenderer:
                 pos_x=slide.pos_x, pos_y=slide.pos_y,
                 box_positions=slide.box_positions,
                 box_scales=slide.box_scales,
+                outline=style == "sticker_outline",
             )
             buffer = io.BytesIO()
             canvas.save(buffer, format="PNG", optimize=True)
@@ -271,6 +286,7 @@ class SlideRenderer:
         pos_y: float | None = None,
         box_positions: dict[str, tuple[float, float]] | None = None,
         box_scales: dict[str, float] | None = None,
+        outline: bool = False,
     ) -> None:
         """Estilo TikTok: cada bloco vira uma pilha de caixas brancas, uma por
         linha, cada uma do tamanho da própria linha.
@@ -319,7 +335,7 @@ class SlideRenderer:
             top = max(margin_y, min(top, self._h - height - margin_y))
             cx = int(self._w * bx)
             cx = max(margin_x + half_w, min(cx, self._w - margin_x - half_w))
-            self._draw_sticker_block(draw, lines, font, top, cx)
+            self._draw_sticker_block(draw, lines, font, top, cx, outline=outline)
 
         if not blocks:
             return
@@ -352,7 +368,7 @@ class SlideRenderer:
 
         y = top
         for lines, font in blocks:
-            y = self._draw_sticker_block(draw, lines, font, y, cx) + gap
+            y = self._draw_sticker_block(draw, lines, font, y, cx, outline=outline) + gap
 
     # Corpo de fonte único de todas as caixas do sticker, na base de 1080px de
     # largura. Vem do photo post de referência, onde a legenda tem um tamanho só.
@@ -376,6 +392,10 @@ class SlideRenderer:
     _STICKER_PAD_X_RATIO = 0.45
     _STICKER_PAD_Y_RATIO = 0.09
     _STICKER_RADIUS_RATIO = 0.22
+    # Espessura do contorno preto do estilo "black outline", em fração do corpo
+    # da fonte. O Pillow desenha o stroke para FORA do glifo, então 0.08 vira
+    # ~5px numa fonte de 64 — o peso da legenda clássica do TikTok.
+    _STICKER_OUTLINE_RATIO = 0.08
     # Respiro entre caixas (headline → corpo → CTA).
     _STICKER_BLOCK_GAP_RATIO = 0.045
     # Fatia da altura do slide que o texto pode ocupar. É o ÚNICO gatilho do
@@ -488,7 +508,9 @@ class SlideRenderer:
             return 0
         return max(self._sticker_line_width(draw, line, font) for line in lines)
 
-    def _draw_sticker_block(self, draw, lines, font, top: int, cx: int | None = None) -> int:
+    def _draw_sticker_block(
+        self, draw, lines, font, top: int, cx: int | None = None, *, outline: bool = False
+    ) -> int:
         """Desenha UMA caixa branca arredondada POR LINHA, empilhadas.
 
         É o que o photo post nativo faz (ver a referência): cada linha ganha uma
@@ -501,6 +523,12 @@ class SlideRenderer:
         caixa), então a pilha sai como uma mancha branca contínua: nada de
         listras da foto aparecendo entre uma linha e outra.
 
+        `outline=True` é o segundo corte de legenda do TikTok ("black outline"):
+        nenhuma caixa — texto branco com contorno preto, na MESMA geometria. As
+        duas passadas continuam (contorno de todas as linhas primeiro, letras
+        depois): o stroke cresce para fora do glifo e, desenhado linha a linha,
+        cobriria o rabo dos "g" da linha de cima, igual às etiquetas.
+
         Devolve o y do rodapé da última caixa.
         """
         if not lines:
@@ -511,31 +539,43 @@ class SlideRenderer:
         if cx is None:
             cx = self._w // 2
 
-        # Duas passadas: TODAS as caixas primeiro, o texto depois. Desenhar
-        # caixa+texto por linha faria a caixa seguinte cobrir o rabo dos "g" e
-        # "p" da linha anterior, já que elas se sobrepõem.
-        for i, line in enumerate(lines):
-            # Largura pela tinta, não pelo avanço: o avanço inclui a folga
-            # lateral do último glifo e deixava um vão dentro da caixa.
-            box_w = self._sticker_line_width(draw, line, font)
-            x0 = cx - box_w // 2
-            y0 = top + pitch * i
-            draw.rounded_rectangle(
-                [x0, y0, x0 + box_w, y0 + box_h],
-                radius=radius,
-                fill=(255, 255, 255),
-            )
+        # Duas passadas: TODAS as caixas (ou contornos) primeiro, o texto
+        # depois. Desenhar caixa+texto por linha faria a caixa seguinte cobrir
+        # o rabo dos "g" e "p" da linha anterior, já que elas se sobrepõem.
+        stroke = max(2, int(round(getattr(font, "size", 30) * self._STICKER_OUTLINE_RATIO)))
+        if not outline:
+            for i, line in enumerate(lines):
+                # Largura pela tinta, não pelo avanço: o avanço inclui a folga
+                # lateral do último glifo e deixava um vão dentro da caixa.
+                box_w = self._sticker_line_width(draw, line, font)
+                x0 = cx - box_w // 2
+                y0 = top + pitch * i
+                draw.rounded_rectangle(
+                    [x0, y0, x0 + box_w, y0 + box_h],
+                    radius=radius,
+                    fill=(255, 255, 255),
+                )
         for i, line in enumerate(lines):
             ink_w = _ink_width(draw, line, font)
             ink_left = _ink_left(draw, line, font)
             # Âncora "la": o y passado é o topo do ascender, que é onde a
             # content area da linha começa — logo abaixo da folga da caixa.
-            draw.text(
-                (cx - int(ink_w) // 2 - ink_left, top + pitch * i + pad_y),
-                line,
-                font=font,
-                fill=(17, 17, 17),
-            )
+            pos = (cx - int(ink_w) // 2 - ink_left, top + pitch * i + pad_y)
+            if outline:
+                draw.text(pos, line, font=font, fill=(0, 0, 0),
+                          stroke_width=stroke, stroke_fill=(0, 0, 0))
+            else:
+                draw.text(pos, line, font=font, fill=(17, 17, 17))
+        if outline:
+            for i, line in enumerate(lines):
+                ink_w = _ink_width(draw, line, font)
+                ink_left = _ink_left(draw, line, font)
+                draw.text(
+                    (cx - int(ink_w) // 2 - ink_left, top + pitch * i + pad_y),
+                    line,
+                    font=font,
+                    fill=(255, 255, 255),
+                )
         return top + pitch * (len(lines) - 1) + box_h
 
     def _draw_quote_layout(self, draw, headline, body, cta, fonts, text_color, accent):
@@ -748,6 +788,17 @@ class SlideRenderer:
         from PIL import Image
         if not url:
             return None
+        # Print do GoViral app: a URL é relativa (servida pelo Flask) e o
+        # arquivo está no disco — um requests.get aqui não teria host.
+        if url.startswith(GOVIRAL_URL_PREFIX):
+            path = resolve_asset(url.rsplit("/", 1)[-1])
+            if not path:
+                return None
+            try:
+                return Image.open(path)
+            except Exception as exc:
+                logger.warning("Não foi possível abrir asset local: %s", type(exc).__name__)
+                return None
         if url.startswith("data:"):
             if "svg" in url.lower():
                 # SVG não é suportado por Pillow — desenhar um gradiente no lugar
@@ -960,4 +1011,4 @@ def _file_exists(path: str) -> bool:
     return os.path.isfile(path)
 
 
-__all__ = ["SlideRenderer", "RenderedSlide", "SlideStyle"]
+__all__ = ["SlideRenderer", "RenderedSlide", "SlideStyle", "STICKER_STYLES"]

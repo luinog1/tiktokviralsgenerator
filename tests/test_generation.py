@@ -23,6 +23,16 @@ def _clean_store():
     reset_store()
 
 
+@pytest.fixture(autouse=True)
+def _no_promo_assets(monkeypatch):
+    """A pasta goviral_assets/ do repo colocaria um print do app no último
+    slide de TODO teste daqui. O comportamento tem testes próprios em
+    test_goviral_assets.py; nestes, a pasta se comporta como vazia."""
+    monkeypatch.setattr(
+        "app.services.goviral_assets.list_asset_files", lambda: []
+    )
+
+
 class _FakeClient:
     """Registra as queries e devolve fotos distintas por busca."""
 

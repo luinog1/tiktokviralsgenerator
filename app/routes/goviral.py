@@ -23,15 +23,28 @@ from flask import (
     redirect,
     render_template,
     request,
+    send_from_directory,
     url_for,
 )
 
 from app.adapters.goviral_parser import goviral_blocks, parse_goviral
+from app.adapters.text_enhancer import enhance_paragraphs
 from app.forms import MAX_SCRIPT_BLOCKS, GoviralForm
 from app.services.generation import GenerationService
+from app.services.goviral_assets import GOVIRAL_ASSETS_DIR
 
 bp = Blueprint("goviral", __name__)
 logger = logging.getLogger(__name__)
+
+
+@bp.route("/goviral-assets/<path:filename>")
+def asset(filename: str):
+    """Serve os prints do GoViral app (pasta `goviral_assets/` na raiz).
+
+    É a URL que a galeria da prévia e o `image_url` do slide de fecho usam —
+    o PNG exportado não passa por aqui (o renderer abre direto do disco).
+    """
+    return send_from_directory(GOVIRAL_ASSETS_DIR, filename)
 
 
 @bp.route("/goviral", methods=["GET"])
@@ -57,6 +70,50 @@ def parse():
         "found": len(blocks),
         "limit": MAX_SCRIPT_BLOCKS,
     })
+
+
+@bp.route("/goviral/enhance", methods=["POST"])
+def enhance():
+    """Simplifica os parágrafos do painel via LLM — opcional, antes de gerar.
+
+    O resultado volta como um painel remontado no formato canônico (Hook /
+    Script N / Paragraph N), que o JS põe DE VOLTA na caixa de colar: o usuário
+    revisa, edita e gera pelo caminho de sempre — a geração continua sem LLM. O
+    hook não é tocado; a distribuição pelas imagens tampouco (o enhancer devolve
+    a mesma contagem de parágrafos ou nada).
+    """
+    payload = request.get_json(silent=True) or {}
+    parsed = parse_goviral(str(payload.get("raw_text") or ""))
+    if not parsed.recognized:
+        return jsonify({
+            "enhanced": False,
+            "reason": "Não reconheci o painel — cole o dashboard inteiro antes.",
+        }), 422
+
+    settings = current_app.config["SETTINGS"]
+    scripts = parsed.ordered_scripts()
+    chunks_per_script = [[c for c in s.chunks if c] for s in scripts]
+    paragraphs = [c for chunks in chunks_per_script for c in chunks]
+
+    simplified = enhance_paragraphs(settings, paragraphs)
+    if simplified is None:
+        reason = (
+            "LLM não configurado — defina LLM_API_BASE_URL e LLM_API_KEY."
+            if settings.llm_provider == "mock" or not settings.llm_configured
+            else "O LLM não devolveu uma simplificação utilizável. Tente de novo."
+        )
+        return jsonify({"enhanced": False, "reason": reason})
+
+    # Remonta o painel no formato canônico, consumindo os parágrafos na mesma
+    # ordem em que foram enviados. `Position` some de propósito: os scripts já
+    # saem na ordem final, e renumerar é o que mantém o texto re-colável.
+    cursor = iter(simplified)
+    lines = [f"Hook: {parsed.hook}"]
+    for number, chunks in enumerate(chunks_per_script, start=1):
+        lines.append(f"Script {number}")
+        for para_number, _ in enumerate(chunks, start=1):
+            lines.append(f"Paragraph {para_number}: {next(cursor)}")
+    return jsonify({"enhanced": True, "raw_text": "\n".join(lines)})
 
 
 @bp.route("/goviral", methods=["POST"])

@@ -21,6 +21,7 @@ from app.adapters.text_composer import viral_script_roles
 
 STYLE_CHOICES = [
     ("sticker", "Sticker TikTok — caixas brancas sobre a foto (recomendado)"),
+    ("sticker_outline", "Sticker TikTok — texto branco com contorno preto (black outline)"),
     ("quote", "Citação — texto centralizado, aspas decorativas"),
     ("list", "Lista — bullets à esquerda, headline no topo"),
     ("tutorial", "Tutorial — passo a passo com CTA em caixa"),

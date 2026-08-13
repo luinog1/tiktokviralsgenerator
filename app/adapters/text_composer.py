@@ -269,6 +269,7 @@ def enforce_hook_slide(slide: SlideContent, *, merge_body: bool = True) -> Slide
 # CTA padrão por estilo — usado só no slide de fecho (role="cta").
 _STYLE_CTA = {
     "sticker": "salva esse post pra não esquecer 🤍",
+    "sticker_outline": "salva esse post pra não esquecer 🤍",
     "quote": "salva pra reler depois 🤍",
     "list": "salva esse post 🔖",
     "tutorial": "comenta qual passo você vai aplicar 👇",

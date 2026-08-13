@@ -2,6 +2,10 @@
 {% block title %}Carrossel — {{ project.briefing.theme|truncate(40) }}{% endblock %}
 
 {% block content %}
+{# Os dois cortes de legenda do TikTok compartilham o layout sticker: caixas
+   brancas ("sticker") ou contorno preto ("sticker_outline"). O que muda entre
+   eles é só a tinta — a classe `slide-visual-outline` no CSS. #}
+{% set stickerish = style in ('sticker', 'sticker_outline') %}
 <section class="preview-section">
   <header class="section-head">
     <h1>Prévia do carrossel</h1>
@@ -64,8 +68,8 @@
         </header>
 
         <!-- Prévia visual do slide -->
-        <div class="slide-visual{% if style == 'sticker' %} slide-visual-sticker{% endif %}" style="background-image: url('{{ image_for_slide[i].image_url if image_for_slide[i] else '' }}');">
-          {% if style != 'sticker' %}<div class="slide-overlay"></div>{% endif %}
+        <div class="slide-visual{% if stickerish %} slide-visual-sticker{% endif %}{% if style == 'sticker_outline' %} slide-visual-outline{% endif %}" style="background-image: url('{{ image_for_slide[i].image_url if image_for_slide[i] else '' }}');">
+          {% if not stickerish %}<div class="slide-overlay"></div>{% endif %}
           {# Cada caixa tem seu próprio contêiner: é o que permite arrastar uma
              de cada vez. As caixas brancas são pintadas por LINHA, no texto
              inline (ver `box-decoration-break` no CSS).
@@ -77,34 +81,34 @@
              seguinte cobre o rabo dos "g"/"y" da linha anterior, porque as
              etiquetas se sobrepõem de propósito. A cópia é `aria-hidden` para o
              leitor de tela ouvir a frase uma vez só. #}
-          <div class="slide-text-stack{% if style == 'sticker' %} js-box-stack{% endif %}"
+          <div class="slide-text-stack{% if stickerish %} js-box-stack{% endif %}"
                data-role="{{ slide.role or 'value' }}"
                data-position="{{ form.text_positions[i].data or '' }}"
                data-box-positions="{{ form.box_positions[i].data or '' }}"
                data-box-scales="{{ form.box_scales[i].data or '' }}">
             <div class="slide-text-box" data-box="headline"
-                 {% if style == 'sticker' %}title="Arraste esta caixa · duplo clique volta ao padrão"{% endif %}>
+                 {% if stickerish %}title="Arraste esta caixa · duplo clique volta ao padrão"{% endif %}>
               <h3 class="slide-headline">{{ form.headlines[i].data or slide.headline }}</h3>
-              {% if style == 'sticker' %}<span class="sticker-ink-layer" aria-hidden="true"><span class="sticker-ink-text">{{ form.headlines[i].data or slide.headline }}</span></span>{% endif %}
+              {% if stickerish %}<span class="sticker-ink-layer" aria-hidden="true"><span class="sticker-ink-text">{{ form.headlines[i].data or slide.headline }}</span></span>{% endif %}
             </div>
             {# Sempre no DOM (o editor ao vivo escreve aqui); CSS :empty esconde
                a caixa branca enquanto não houver texto. Texto inteiro, sem
                corte: a caixa da prévia só espelha o PNG se quebrar nas mesmas
                linhas. #}
             <div class="slide-text-box" data-box="body"
-                 {% if style == 'sticker' %}title="Arraste esta caixa · duplo clique volta ao padrão"{% endif %}>
+                 {% if stickerish %}title="Arraste esta caixa · duplo clique volta ao padrão"{% endif %}>
               <p class="slide-body-snippet">{{ form.bodies[i].data or slide.body }}</p>
-              {% if style == 'sticker' %}<span class="sticker-ink-layer" aria-hidden="true"><span class="sticker-ink-text">{{ form.bodies[i].data or slide.body }}</span></span>{% endif %}
+              {% if stickerish %}<span class="sticker-ink-layer" aria-hidden="true"><span class="sticker-ink-text">{{ form.bodies[i].data or slide.body }}</span></span>{% endif %}
             </div>
             <div class="slide-text-box" data-box="cta"
-                 {% if style == 'sticker' %}title="Arraste esta caixa · duplo clique volta ao padrão"{% endif %}>
+                 {% if stickerish %}title="Arraste esta caixa · duplo clique volta ao padrão"{% endif %}>
               <p class="slide-cta-snippet">{{ form.ctas[i].data or slide.call_to_action }}</p>
-              {% if style == 'sticker' %}<span class="sticker-ink-layer" aria-hidden="true"><span class="sticker-ink-text">{{ form.ctas[i].data or slide.call_to_action }}</span></span>{% endif %}
+              {% if stickerish %}<span class="sticker-ink-layer" aria-hidden="true"><span class="sticker-ink-text">{{ form.ctas[i].data or slide.call_to_action }}</span></span>{% endif %}
             </div>
           </div>
         </div>
 
-        {% if style == 'sticker' %}
+        {% if stickerish %}
         <p class="drag-hint small muted">
           Arraste cada caixa separadamente sobre a foto · duplo clique volta ao padrão
         </p>

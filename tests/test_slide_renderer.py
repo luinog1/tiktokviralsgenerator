@@ -220,6 +220,39 @@ def test_sticker_does_not_darken_the_photo(renderer):
     )
 
 
+# ---------- Estilo sticker_outline (black outline) ----------
+
+
+def _count_color(png_bytes: bytes, color: tuple[int, int, int]) -> int:
+    colors = _open(png_bytes).convert("RGB").getcolors(maxcolors=1_000_000)
+    return sum(count for count, c in colors if c == color)
+
+
+def test_outline_draws_white_letters_with_black_stroke_and_no_boxes(renderer):
+    """O segundo corte de legenda do TikTok: letra branca, contorno preto puro,
+    nenhuma etiqueta branca — o branco que sobra é só a tinta dos glifos."""
+    slide = SlideContent(headline="contorno preto aqui", role="hook", order=0)
+    sticker = renderer.render_single(slide, None, style="sticker", index=0)
+    outline = renderer.render_single(slide, None, style="sticker_outline", index=0)
+
+    assert _open(outline.png_bytes).size == (1080, 1350)
+    # O contorno existe (o gradiente de fundo nunca chega ao preto puro)…
+    assert _count_color(outline.png_bytes, (0, 0, 0)) > 1000
+    # …as letras são brancas…
+    assert _count_color(outline.png_bytes, (255, 255, 255)) > 500
+    # …e não há caixa: o branco é uma fração do que o sticker pinta.
+    assert (
+        _count_color(outline.png_bytes, (255, 255, 255))
+        < _count_color(sticker.png_bytes, (255, 255, 255)) // 2
+    )
+
+
+def test_outline_does_not_darken_the_photo(renderer):
+    slide = SlideContent(headline="oi", role="value", order=0)
+    out = _open(renderer.render_single(slide, None, style="sticker_outline").png_bytes)
+    assert out.convert("RGB").getpixel((5, 5)) != (0, 0, 0)
+
+
 @pytest.mark.parametrize(
     "role", ["hook", "problem", "agitation", "value", "proof", "cta"]
 )

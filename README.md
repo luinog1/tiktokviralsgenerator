@@ -8,6 +8,14 @@ Aplicação Flask que transforma o texto gerado pelo **goviral.ai** em um carros
 
 ---
 
+## 🎯 O que mudou na v0.10
+
+- ✅ **Legenda "black outline"** — segundo corte de legenda nativo do TikTok, como estilo `sticker_outline`: texto branco com contorno preto, sem caixa. Mesma geometria do sticker (largura, passo entre linhas, arraste e resize por caixa, prévia em duas camadas) — só a tinta muda. No PNG o contorno é `stroke_width` do Pillow (8% do corpo da fonte, crescendo para fora do glifo), desenhado em duas passadas como as etiquetas: todos os contornos primeiro, todas as letras depois, senão o traço da linha de baixo comeria o rabo dos "g" da linha de cima. Na prévia, a camada de baixo troca a etiqueta branca por `-webkit-text-stroke` (0.16em, porque o CSS centra o traço na borda — metade fica visível) e a de cima pinta a letra branca.
+- ✅ **O carrossel fecha mostrando o GoViral app** — a última imagem (o slide de CTA) recebe um print do app, sorteado da pasta `goviral_assets/` na raiz do repo, com mais 4 alternativas na galeria da prévia — a mesma mecânica das fotos de busca: palpite inicial, trocável com um clique. A pasta é o liga/desliga (sem ela, nada muda), os prints entram DEPOIS do casting (senão virariam "cenário" dos outros slides) e nunca no carrossel de 1 slide, onde o "último" seria o hook. Os arquivos são servidos em `/goviral-assets/<nome>` para a prévia; o renderer os abre direto do disco.
+- ✅ **Botão "Simplificar textos" no `/goviral` (opcional)** — um LLM encurta os parágrafos dos scripts (máx ~120 caracteres, mesma ideia, mesma voz) e o painel volta REMONTADO para a caixa de colar, revisável e com "desfazer". O hook não é tocado — hook bom já é curto — e a distribuição pelas imagens tampouco: o enhancer devolve a mesma contagem de parágrafos ou a resposta inteira é descartada. A geração continua determinística e sem LLM; este é o único ponto do fluxo do painel em que um modelo toca no texto, e só quando o botão é clicado. Sem `LLM_API_*` configurado, o botão explica o que falta em vez de fingir que simplificou.
+
+---
+
 ## 🎯 O que mudou na v0.9
 
 - ✅ **O painel do goviral colado inteiro vira carrossel** — a nova tela **`/goviral`** ("Colar do painel", no menu) recebe o dashboard como o `Ctrl+A`/`Ctrl+C` entrega: `Hook`, `Script N`, `Position N`, `Paragraph 1/2`. O hook vira a imagem 1 (uma caixa só), cada script vira uma imagem — parágrafo 1 na caixa de cima, parágrafo 2 na de baixo — e o **número de imagens sai do próprio painel**, sem seletor de slides. Antes, chegar nesse resultado eram onze cliques de copiar (um por caixa do painel) e um paste por campo; colar tudo na caixa única também não servia, porque sem os rótulos `Imagem N:` o texto seguia para o LLM redistribuir. Só tema/palavras-chave (busca de fotos) e estilo continuam sendo perguntas — o painel não as responde.
@@ -500,6 +508,8 @@ Cobertura (352 testes):
 | GET | `/goviral` | Colar o painel do goviral inteiro — hook + scripts viram as imagens |
 | POST | `/goviral` | Gera o carrossel a partir do painel (nº de imagens vem do painel) |
 | POST | `/goviral/parse` | Prévia da distribuição: o que o parser entendeu do painel (JSON) |
+| POST | `/goviral/enhance` | Opcional: simplifica os parágrafos do painel via LLM e devolve o painel remontado (JSON) |
+| GET | `/goviral-assets/<nome>` | Serve os prints do GoViral app usados no slide de fecho |
 | GET | `/create` | Formulário de briefing (roteiro por imagem ou texto corrido) |
 | POST | `/script/split` | Divide um roteiro colado em blocos por imagem (JSON) |
 | POST | `/generate` | Executa composição do carrossel |
@@ -518,6 +528,7 @@ Cada estilo produz um layout distinto no PNG renderizado:
 | Estilo | Layout | Caso de uso |
 |--------|--------|-------------|
 | `sticker` | **(padrão)** Uma caixa branca arredondada por **linha**, do tamanho daquela linha, texto preto, foto sem escurecimento. As caixas se sobrepõem e a pilha lê como uma mancha contínua. O texto corre até perto da margem antes de quebrar. Um tamanho de fonte só para headline/corpo/CTA; cada bloco arrasta e redimensiona sozinho na prévia | Photo post nativo do TikTok |
+| `sticker_outline` | Mesma geometria do sticker, tinta diferente: texto **branco com contorno preto**, sem caixa ("black outline" do TikTok) | Photo post nativo, foto clara demais para caixa branca |
 | `quote` | Aspas decorativas + headline centralizada + body + CTA inferior | Frases inspiradoras, quotes |
 | `list` | Headline à esquerda com barra de destaque + bullets + CTA centralizado | Listas de dicas, passos numerados |
 | `tutorial` | Tag "PASSO A PASSO" + headline + body + CTA em caixa colorida | Tutoriais, como-fazer |

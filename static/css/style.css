@@ -735,6 +735,25 @@ a:hover { text-decoration: underline; }
   color: #111;
 }
 
+/* --- Variante "black outline" ---
+   O segundo corte de legenda do TikTok: texto branco com contorno preto, sem
+   caixa. Mesmíssima geometria do sticker (largura, passo, duas camadas) — só a
+   tinta muda. A camada de baixo deixa de pintar a etiqueta branca e passa a
+   pintar o CONTORNO: `-webkit-text-stroke` centra o traço na borda do glifo,
+   então 0.16em aqui deixam ~0.08em visíveis por fora — a mesma fração que o
+   PNG usa (`_STICKER_OUTLINE_RATIO`), cujo stroke cresce só para fora. A
+   camada de cima pinta a letra branca por cima da metade interna do traço. */
+.slide-visual-outline .slide-headline,
+.slide-visual-outline .slide-body-snippet,
+.slide-visual-outline .slide-cta-snippet {
+  background: none;
+  -webkit-text-stroke: 0.16em #000;
+}
+
+.slide-visual-outline .sticker-ink-text {
+  color: #fff;
+}
+
 .slide-visual-sticker .slide-body-snippet {
   opacity: 1;
 }

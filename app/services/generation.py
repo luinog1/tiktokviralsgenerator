@@ -26,6 +26,7 @@ from app.adapters.script_parser import compose_from_blocks, labeled_blocks
 from app.adapters.vision_provider import VisionRankingProvider, build_vision_provider
 from app.config import Settings
 from app.services.casting import POOL_HOOK, POOL_SCENE, apply_casting, cast_carousel
+from app.services.goviral_assets import assign_promo_slide
 from app.services.session_store import SessionStore, StoredProject, get_store
 
 logger = logging.getLogger(__name__)
@@ -197,6 +198,10 @@ class GenerationService:
             self._apply_vision_positions(
                 carousel_dict["slides"], ordered_images, vision_verdicts
             )
+
+        # 4b. O slide de fecho mostra o GoViral app — depois do casting, para os
+        # prints não entrarem no pool de cenário dos outros slides.
+        assign_promo_slide(carousel_dict["slides"], ordered_images, warnings)
 
         # 5. Persistir
         project = self._store.create(
