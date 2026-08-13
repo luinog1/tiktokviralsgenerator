@@ -42,11 +42,11 @@
         Conferir o que foi entendido
       </button>
       <button type="button" class="btn btn-ghost" id="goviral-enhance"
-              title="Opcional: um LLM encurta os parágrafos dos scripts — o hook não muda e você revisa antes de gerar.">
-        ✨ Simplificar textos (opcional)
+              title="Opcional: um LLM reescreve hook e parágrafos mais curtos e fortes, e fecha o carrossel com um script promovendo o goviral app — você revisa antes de gerar.">
+        ✨ Melhorar textos (opcional)
       </button>
       <button type="button" class="btn btn-ghost" id="goviral-enhance-undo" hidden>
-        Desfazer simplificação
+        Desfazer melhoria
       </button>
       <span class="small muted" id="goviral-status" role="status" aria-live="polite"></span>
       <ol class="goviral-blocks" id="goviral-blocks" hidden></ol>
@@ -144,10 +144,12 @@
       }
     });
 
-    // Simplificação opcional: o LLM encurta os parágrafos e o painel volta
-    // REMONTADO para a própria caixa — revisável, editável e desfazível. A
-    // geração continua determinística: este é o único ponto do fluxo do painel
-    // em que um LLM toca no texto, e só quando o botão é clicado.
+    // Melhoria opcional: o LLM reescreve hook e parágrafos (mais curtos,
+    // mesma linha), acrescenta um script de fecho promovendo o goviral app e
+    // o painel volta REMONTADO para a própria caixa — revisável, editável e
+    // desfazível. A geração continua determinística: este é o único ponto do
+    // fluxo do painel em que um LLM toca no texto, e só quando o botão é
+    // clicado.
     const enhanceBtn = document.getElementById("goviral-enhance");
     const undoBtn = document.getElementById("goviral-enhance-undo");
     let beforeEnhance = null;
@@ -159,7 +161,7 @@
         return;
       }
       enhanceBtn.disabled = true;
-      status.textContent = "Simplificando os textos…";
+      status.textContent = "Melhorando os textos…";
       try {
         const response = await fetch("{{ url_for('goviral.enhance') }}", {
           method: "POST",
@@ -168,7 +170,7 @@
         });
         const data = await response.json();
         if (!data.enhanced) {
-          status.textContent = data.reason || "Não foi possível simplificar.";
+          status.textContent = data.reason || "Não foi possível melhorar.";
           return;
         }
         beforeEnhance = input.value;
@@ -176,9 +178,9 @@
         undoBtn.hidden = false;
         list.hidden = true;
         status.textContent =
-          "Textos simplificados — revise na caixa (o hook não mudou) e gere.";
+          "Textos melhorados — revise na caixa (o último script promove o goviral app) e gere.";
       } catch (err) {
-        status.textContent = "Não foi possível simplificar.";
+        status.textContent = "Não foi possível melhorar.";
       } finally {
         enhanceBtn.disabled = false;
       }

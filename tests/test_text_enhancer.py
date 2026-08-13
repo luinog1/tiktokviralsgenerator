@@ -1,4 +1,4 @@
-"""Testes da simplificação opcional dos parágrafos (botão do /goviral)."""
+"""Testes da melhoria opcional do painel (botão do /goviral)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 import pytest
 
 from app.adapters import text_enhancer
-from app.adapters.text_enhancer import enhance_paragraphs
+from app.adapters.text_enhancer import GOVIRAL_PROMO_FALLBACK, enhance_panel
 from app.config import Settings
 from app.main import create_app
 from app.services.session_store import reset_store
@@ -39,6 +39,7 @@ class _Response:
     def __init__(self, content: str, status_code: int = 200, message_extra: dict | None = None):
         self._content = content
         self.status_code = status_code
+        self.text = content
         self._message_extra = message_extra or {}
 
     def raise_for_status(self) -> None:
@@ -55,6 +56,10 @@ class _Response:
         }
 
 
+def _answer(paragraphs: dict | list, hook: str = "hook novo", **extra) -> str:
+    return json.dumps({"hook": hook, "paragraphs": paragraphs, **extra})
+
+
 def _post_returning(monkeypatch, content: str):
     calls: list[dict] = []
 
@@ -67,87 +72,72 @@ def _post_returning(monkeypatch, content: str):
 
 
 # ------------------------------------------------------------ enhancer puro
-def test_returns_simplified_paragraphs_in_order(monkeypatch):
+def test_returns_hook_and_paragraphs_in_order(monkeypatch):
     calls = _post_returning(
-        monkeypatch, json.dumps({"paragraphs": {"1": "curto 1", "2": "curto 2"}})
+        monkeypatch,
+        _answer({"1": "curto 1", "2": "curto 2"}, goviral=["promo 1", "promo 2"]),
     )
-    result = enhance_paragraphs(
-        Settings.from_env(_LLM_ENV), ["parágrafo longo 1", "parágrafo longo 2"]
+    result = enhance_panel(
+        Settings.from_env(_LLM_ENV), "hook antigo", ["parágrafo longo 1", "parágrafo longo 2"]
     )
-    assert result == ["curto 1", "curto 2"]
-    # Os parágrafos vão para o LLM NUMERADOS: é o que torna o alinhamento
-    # verificável e impede o modelo de imitar o exemplo de 2 itens do prompt.
+    assert result == {
+        "hook": "hook novo",
+        "paragraphs": ["curto 1", "curto 2"],
+        "promo": ["promo 1", "promo 2"],
+    }
+    # O hook e os parágrafos NUMERADOS vão juntos para o LLM: é o que torna o
+    # alinhamento verificável e impede o modelo de imitar o exemplo do prompt.
     sent = calls[0]["payload"]["messages"][1]["content"]
-    assert json.loads(sent) == {"1": "parágrafo longo 1", "2": "parágrafo longo 2"}
+    assert json.loads(sent) == {
+        "hook": "hook antigo",
+        "1": "parágrafo longo 1",
+        "2": "parágrafo longo 2",
+    }
     system = calls[0]["payload"]["messages"][0]["content"]
     assert "2 parágrafos" in system
+    assert "goviral" in system
 
 
-def test_accepts_a_plain_list_with_the_exact_count(monkeypatch):
-    """Modelo que ignore os números e devolva lista crua ainda serve — desde
-    que venha a contagem exata, que é o que garante o alinhamento."""
-    _post_returning(monkeypatch, json.dumps({"paragraphs": ["curto 1", "curto 2"]}))
-    result = enhance_paragraphs(Settings.from_env(_LLM_ENV), ["a", "b"])
-    assert result == ["curto 1", "curto 2"]
-
-
-def test_mock_provider_returns_none_without_calling_anything(monkeypatch):
-    def boom(*args, **kwargs):  # pragma: no cover - não deve rodar
-        raise AssertionError("não deveria chamar o LLM em modo mock")
-
-    monkeypatch.setattr(text_enhancer.requests, "post", boom)
-    assert enhance_paragraphs(Settings.from_env({"LLM_PROVIDER": "mock"}), ["a"]) is None
-
-
-def test_wrong_count_discards_the_whole_answer(monkeypatch):
-    """Contagem diferente mudaria a distribuição pelas imagens — a única coisa
-    que o botão promete não mexer."""
-    _post_returning(monkeypatch, json.dumps({"paragraphs": ["só um"]}))
-    assert enhance_paragraphs(Settings.from_env(_LLM_ENV), ["a", "b"]) is None
-
-
-def test_missing_number_discards_the_whole_answer(monkeypatch):
-    _post_returning(monkeypatch, json.dumps({"paragraphs": {"1": "ok"}}))
-    assert enhance_paragraphs(Settings.from_env(_LLM_ENV), ["a", "b"]) is None
-
-
-def test_empty_paragraph_discards_the_whole_answer(monkeypatch):
-    _post_returning(monkeypatch, json.dumps({"paragraphs": {"1": "ok", "2": "  "}}))
-    assert enhance_paragraphs(Settings.from_env(_LLM_ENV), ["a", "b"]) is None
-
-
-def test_non_json_answer_returns_none(monkeypatch):
-    _post_returning(monkeypatch, "claro! aqui vão os parágrafos mais curtos…")
-    assert enhance_paragraphs(Settings.from_env(_LLM_ENV), ["a"]) is None
-
-
-def test_asks_for_json_mode_with_room_for_reasoning(monkeypatch):
+def test_asks_for_json_mode_without_reasoning(monkeypatch):
     """O pedido vai em JSON mode (no Groq, tira o raciocínio de `content`) e
-    com orçamento de tokens que um modelo de raciocínio não estoura pensando."""
-    calls = _post_returning(monkeypatch, json.dumps({"paragraphs": {"1": "curto"}}))
-    assert enhance_paragraphs(Settings.from_env(_LLM_ENV), ["a"]) == ["curto"]
+    com reasoning_effort=none (senão o Qwen gastava o orçamento pensando e o
+    JSON nem começava — finish_reason=length dentro de <think>)."""
+    calls = _post_returning(monkeypatch, _answer({"1": "curto"}))
+    assert enhance_panel(Settings.from_env(_LLM_ENV), "h", ["a"]) is not None
     payload = calls[0]["payload"]
     assert payload["response_format"] == {"type": "json_object"}
-    assert payload["max_tokens"] >= 2048
+    assert payload["reasoning_effort"] == "none"
+    assert payload["max_tokens"] >= 4096
 
 
-def test_endpoint_that_rejects_json_mode_gets_a_retry_without_it(monkeypatch):
-    """Endpoint OpenAI-compatible sem json_mode responde 400 na hora — a
-    chamada é repetida sem o campo, e a simplificação ainda acontece."""
+def test_endpoint_that_rejects_the_payload_gets_a_minimal_retry(monkeypatch):
+    """Endpoint que não aceite json_mode/reasoning_effort responde 400 na hora
+    — a chamada é repetida sem os dois, e a melhoria ainda acontece."""
     calls: list[dict] = []
 
     def fake_post(url, json=None, headers=None, timeout=None):
         calls.append({"payload": json})
-        if "response_format" in json:
-            return _Response("", status_code=400)
-        import json as jsonlib
-
-        return _Response(jsonlib.dumps({"paragraphs": {"1": "curto"}}))
+        if "response_format" in json or "reasoning_effort" in json:
+            return _Response("param not supported", status_code=400)
+        return _Response(_answer({"1": "curto"}))
 
     monkeypatch.setattr(text_enhancer.requests, "post", fake_post)
-    assert enhance_paragraphs(Settings.from_env(_LLM_ENV), ["a"]) == ["curto"]
+    result = enhance_panel(Settings.from_env(_LLM_ENV), "h", ["a"])
+    assert result is not None and result["paragraphs"] == ["curto"]
     assert len(calls) == 2
     assert "response_format" not in calls[1]["payload"]
+    assert "reasoning_effort" not in calls[1]["payload"]
+
+
+def test_think_block_before_the_json_is_stripped(monkeypatch):
+    """No retry sem reasoning_effort o pensamento vem em <think>…</think> antes
+    do JSON — inclusive com chaves dentro, que enganariam o parser."""
+    _post_returning(
+        monkeypatch,
+        '<think>vou responder {"paragraphs": "exemplo"}…</think>\n' + _answer({"1": "curto"}),
+    )
+    result = enhance_panel(Settings.from_env(_LLM_ENV), "h", ["a"])
+    assert result is not None and result["paragraphs"] == ["curto"]
 
 
 def test_json_in_reasoning_field_with_empty_content_is_used(monkeypatch):
@@ -155,15 +145,69 @@ def test_json_in_reasoning_field_with_empty_content_is_used(monkeypatch):
     campo `reasoning` (Groq) — ela ainda é aproveitada."""
 
     def fake_post(url, json=None, headers=None, timeout=None):
-        import json as jsonlib
-
-        return _Response(
-            "",
-            message_extra={"reasoning": jsonlib.dumps({"paragraphs": {"1": "curto"}})},
-        )
+        return _Response("", message_extra={"reasoning": _answer({"1": "curto"})})
 
     monkeypatch.setattr(text_enhancer.requests, "post", fake_post)
-    assert enhance_paragraphs(Settings.from_env(_LLM_ENV), ["a"]) == ["curto"]
+    result = enhance_panel(Settings.from_env(_LLM_ENV), "h", ["a"])
+    assert result is not None and result["paragraphs"] == ["curto"]
+
+
+def test_accepts_a_plain_list_with_the_exact_count(monkeypatch):
+    """Modelo que ignore os números e devolva lista crua ainda serve — desde
+    que venha a contagem exata, que é o que garante o alinhamento."""
+    _post_returning(monkeypatch, _answer(["curto 1", "curto 2"]))
+    result = enhance_panel(Settings.from_env(_LLM_ENV), "h", ["a", "b"])
+    assert result is not None and result["paragraphs"] == ["curto 1", "curto 2"]
+
+
+def test_empty_hook_in_the_answer_keeps_the_original(monkeypatch):
+    _post_returning(monkeypatch, json.dumps({"paragraphs": {"1": "curto"}}))
+    result = enhance_panel(Settings.from_env(_LLM_ENV), "hook original", ["a"])
+    assert result is not None and result["hook"] == "hook original"
+
+
+def test_missing_promo_falls_back_to_the_fixed_one(monkeypatch):
+    """A promessa do botão — uma das imagens promove o goviral app — não pode
+    depender de o LLM obedecer ao campo "goviral"."""
+    _post_returning(monkeypatch, _answer({"1": "curto"}))
+    result = enhance_panel(Settings.from_env(_LLM_ENV), "h", ["a"])
+    assert result is not None and result["promo"] == list(GOVIRAL_PROMO_FALLBACK)
+
+
+def test_promo_as_a_single_string_still_counts(monkeypatch):
+    _post_returning(monkeypatch, _answer({"1": "curto"}, goviral="testa o goviral"))
+    result = enhance_panel(Settings.from_env(_LLM_ENV), "h", ["a"])
+    assert result is not None and result["promo"] == ["testa o goviral"]
+
+
+def test_mock_provider_returns_none_without_calling_anything(monkeypatch):
+    def boom(*args, **kwargs):  # pragma: no cover - não deve rodar
+        raise AssertionError("não deveria chamar o LLM em modo mock")
+
+    monkeypatch.setattr(text_enhancer.requests, "post", boom)
+    assert enhance_panel(Settings.from_env({"LLM_PROVIDER": "mock"}), "h", ["a"]) is None
+
+
+def test_wrong_count_discards_the_whole_answer(monkeypatch):
+    """Contagem diferente mudaria a distribuição pelas imagens — a única coisa
+    que o botão promete não mexer."""
+    _post_returning(monkeypatch, _answer(["só um"]))
+    assert enhance_panel(Settings.from_env(_LLM_ENV), "h", ["a", "b"]) is None
+
+
+def test_missing_number_discards_the_whole_answer(monkeypatch):
+    _post_returning(monkeypatch, _answer({"1": "ok"}))
+    assert enhance_panel(Settings.from_env(_LLM_ENV), "h", ["a", "b"]) is None
+
+
+def test_empty_paragraph_discards_the_whole_answer(monkeypatch):
+    _post_returning(monkeypatch, _answer({"1": "ok", "2": "  "}))
+    assert enhance_panel(Settings.from_env(_LLM_ENV), "h", ["a", "b"]) is None
+
+
+def test_non_json_answer_returns_none(monkeypatch):
+    _post_returning(monkeypatch, "claro! aqui vão os parágrafos mais curtos…")
+    assert enhance_panel(Settings.from_env(_LLM_ENV), "h", ["a"]) is None
 
 
 # ------------------------------------------------------- rota /goviral/enhance
@@ -177,26 +221,33 @@ def client(request):
     return app.test_client()
 
 
-def test_route_rebuilds_the_panel_with_hook_untouched(client, monkeypatch):
+def test_route_rebuilds_the_panel_with_promo_script_at_the_end(client, monkeypatch):
     monkeypatch.setattr(
-        "app.routes.goviral.enhance_paragraphs",
-        lambda settings, paragraphs: [f"curto {i + 1}" for i in range(len(paragraphs))],
+        "app.routes.goviral.enhance_panel",
+        lambda settings, hook, paragraphs: {
+            "hook": "hook melhor",
+            "paragraphs": [f"curto {i + 1}" for i in range(len(paragraphs))],
+            "promo": ["promo a", "promo b"],
+        },
     )
     response = client.post("/goviral/enhance", json={"raw_text": PANEL})
     assert response.status_code == 200
     data = response.get_json()
     assert data["enhanced"] is True
     text = data["raw_text"]
-    # O hook sai como entrou; os parágrafos saem simplificados, na ordem.
-    assert "Hook: eu postava todo dia e nada acontecia" in text
+    # O hook sai reescrito; os parágrafos saem melhorados, na ordem; e o promo
+    # do goviral fecha o painel como um script novo.
+    assert "Hook: hook melhor" in text
     assert "Script 1\nParagraph 1: curto 1\nParagraph 2: curto 2" in text
     assert "Script 2\nParagraph 1: curto 3\nParagraph 2: curto 4" in text
+    assert text.endswith("Script 3\nParagraph 1: promo a\nParagraph 2: promo b")
     # O texto remontado continua sendo um painel reconhecível — re-colável.
     from app.adapters.goviral_parser import goviral_blocks
 
     blocks = goviral_blocks(text)
-    assert blocks[0] == "eu postava todo dia e nada acontecia"
+    assert blocks[0] == "hook melhor"
     assert blocks[1] == "curto 1\n\ncurto 2"
+    assert blocks[-1] == "promo a\n\npromo b"
 
 
 def test_route_without_llm_says_why(client):
