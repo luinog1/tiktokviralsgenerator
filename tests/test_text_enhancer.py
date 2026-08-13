@@ -7,7 +7,11 @@ import json
 import pytest
 
 from app.adapters import text_enhancer
-from app.adapters.text_enhancer import GOVIRAL_PROMO_FALLBACK, enhance_panel
+from app.adapters.text_enhancer import (
+    GOVIRAL_PROMO_FALLBACK,
+    GOVIRAL_PROMO_FALLBACK_EN,
+    enhance_panel,
+)
 from app.config import Settings
 from app.main import create_app
 from app.services.session_store import reset_store
@@ -96,6 +100,9 @@ def test_returns_hook_and_paragraphs_in_order(monkeypatch):
     system = calls[0]["payload"]["messages"][0]["content"]
     assert "2 parágrafos" in system
     assert "goviral" in system
+    # A regra de idioma é a nº 1 do prompt: um prompt em português induzia o
+    # modelo a TRADUZIR um painel em inglês em vez de só melhorar.
+    assert "NUNCA traduza" in system
 
 
 def test_asks_for_json_mode_without_reasoning(monkeypatch):
@@ -172,6 +179,18 @@ def test_missing_promo_falls_back_to_the_fixed_one(monkeypatch):
     _post_returning(monkeypatch, _answer({"1": "curto"}))
     result = enhance_panel(Settings.from_env(_LLM_ENV), "h", ["a"])
     assert result is not None and result["promo"] == list(GOVIRAL_PROMO_FALLBACK)
+
+
+def test_promo_fallback_follows_the_panel_language(monkeypatch):
+    """Painel em inglês ganha o fallback em inglês — um fecho em português no
+    meio de um carrossel em inglês entregaria a costura."""
+    _post_returning(monkeypatch, _answer({"1": "short"}))
+    result = enhance_panel(
+        Settings.from_env(_LLM_ENV),
+        "i regret posting consistently and here is why",
+        ["i was consistent but i was still guessing what to post"],
+    )
+    assert result is not None and result["promo"] == list(GOVIRAL_PROMO_FALLBACK_EN)
 
 
 def test_promo_as_a_single_string_still_counts(monkeypatch):

@@ -37,13 +37,22 @@ PARAGRAPH_CHAR_TARGET = 120
 HOOK_CHAR_TARGET = 90
 
 # Fecho quando o modelo não devolve o campo "goviral": a promessa do botão —
-# uma das imagens promove o app — não pode depender de o LLM obedecer.
+# uma das imagens promove o app — não pode depender de o LLM obedecer. Em
+# duas línguas porque o fallback também tem de acompanhar o idioma do painel.
 GOVIRAL_PROMO_FALLBACK = [
     "esses scripts saíram prontos do goviral app, em segundos",
     "testa e me conta se o teu alcance não muda",
 ]
+GOVIRAL_PROMO_FALLBACK_EN = [
+    "these scripts came straight out of the goviral app, in seconds",
+    "try it and tell me your reach doesn't change",
+]
 
 _ENHANCE_PROMPT = """Você melhora carrosséis virais de TikTok (photo post) criados no goviral app.
+
+REGRA Nº 1 — IDIOMA: responda no MESMO idioma do texto recebido. Texto em
+inglês volta em inglês; em português volta em português. NUNCA traduza — este
+prompt está em português, mas isso NÃO é motivo para responder em português.
 
 Recebe um JSON com "hook" e {count} parágrafos, numerados de "1" a "{count}".
 Reescreva TUDO melhor e mais curto, seguindo a mesma linha do original:
@@ -51,12 +60,13 @@ Reescreva TUDO melhor e mais curto, seguindo a mesma linha do original:
   saudação e sem pergunta genérica
 - parágrafos: corte palavras e rodeios; mantenha a ideia, os números e a voz
   do autor; máx {target} caracteres, 1 ou 2 frases curtas
-- escreva como fala: minúsculas, "você", sem ponto final no fim
-- mesmo idioma do original; não invente fatos que não estejam no texto
+- escreva como fala: minúsculas, "você"/"you", sem ponto final no fim
+- não invente fatos que não estejam no texto
 - NÃO junte, divida nem pule parágrafos: responda TODOS os {count} números,
   cada um com a versão curta do parágrafo daquele número
 - "goviral": 2 frases curtas promovendo o goviral app — a ferramenta que gerou
-  esses scripts — na mesma voz, convidando quem lê a testar
+  esses scripts — na mesma voz e no MESMO idioma do texto, convidando quem lê
+  a testar
 
 Retorne APENAS JSON válido, sem markdown, com os MESMOS {count} números como
 chaves de "paragraphs":
@@ -191,20 +201,35 @@ def enhance_panel(
         cleaned.append(value)
 
     new_hook = " ".join(str(parsed.get("hook") or "").split()) or hook
-    promo = _clean_promo(parsed.get("goviral"))
+    promo = _clean_promo(
+        parsed.get("goviral"),
+        fallback=_promo_fallback(" ".join([hook, *paragraphs])),
+    )
     return {"hook": new_hook, "paragraphs": cleaned, "promo": promo}
 
 
-def _clean_promo(raw: object) -> list[str]:
+def _promo_fallback(sample: str) -> list[str]:
+    """O fallback do promo no idioma do painel — por marcadores, não por LLM."""
+    words = set(re.findall(r"[a-zà-ÿ']+", sample.lower()))
+    english = len(words & {"the", "and", "you", "i", "it", "was", "is", "my", "to", "but"})
+    portuguese = len(
+        words & {"que", "não", "nao", "você", "voce", "de", "para", "com", "mais", "um", "uma"}
+    )
+    if english > portuguese:
+        return list(GOVIRAL_PROMO_FALLBACK_EN)
+    return list(GOVIRAL_PROMO_FALLBACK)
+
+
+def _clean_promo(raw: object, fallback: list[str]) -> list[str]:
     """Frases do script promo, toleradas em qualquer forma — ou o fallback."""
     if isinstance(raw, str):
         raw = [raw]
     if isinstance(raw, dict):
         raw = [raw[k] for k in sorted(raw)]
     if not isinstance(raw, list):
-        return list(GOVIRAL_PROMO_FALLBACK)
+        return fallback
     cleaned = [" ".join(str(item).split()) for item in raw if str(item).strip()]
-    return cleaned[:2] or list(GOVIRAL_PROMO_FALLBACK)
+    return cleaned[:2] or fallback
 
 
 __all__ = [
@@ -212,4 +237,5 @@ __all__ = [
     "PARAGRAPH_CHAR_TARGET",
     "HOOK_CHAR_TARGET",
     "GOVIRAL_PROMO_FALLBACK",
+    "GOVIRAL_PROMO_FALLBACK_EN",
 ]
