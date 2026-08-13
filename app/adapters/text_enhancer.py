@@ -33,15 +33,18 @@ PARAGRAPH_CHAR_TARGET = 120
 
 _ENHANCE_PROMPT = """Você encurta parágrafos de carrosséis virais de TikTok (photo post).
 
-Recebe uma lista JSON de parágrafos. Reescreva CADA um mais curto e simples:
+Recebe um JSON com {count} parágrafos, numerados de "1" a "{count}". Reescreva
+CADA UM deles mais curto e simples:
 - corte palavras e rodeios; mantenha a ideia, os números e a voz do autor
 - no máximo {target} caracteres por parágrafo, 1 ou 2 frases curtas
 - escreva como fala: minúsculas, "você", sem ponto final no fim
 - mesmo idioma do original; não invente nada que não esteja no texto
-- NÃO junte, divida, reordene nem remova parágrafos: mesma quantidade, mesma ordem
+- NÃO junte, divida nem pule parágrafos: responda TODOS os {count} números,
+  cada um com a versão curta do parágrafo daquele número
 
-Retorne APENAS JSON válido, sem markdown:
-{{"paragraphs": ["", ""]}}
+Retorne APENAS JSON válido, sem markdown, com os MESMOS {count} números como
+chaves:
+{{"paragraphs": {{"1": "versão curta do parágrafo 1", "2": "…", "{count}": "…"}}}}
 """
 
 
@@ -50,9 +53,12 @@ def enhance_paragraphs(
 ) -> list[str] | None:
     """Versão simplificada de cada parágrafo, na mesma ordem. `None` = falha.
 
-    A validação é estrita — contagem diferente ou item vazio descartam a
-    resposta inteira: um parágrafo trocado de lugar mudaria a distribuição
-    pelas imagens, que é a única coisa que o botão promete não mexer.
+    Os parágrafos vão e voltam NUMERADOS ("1"…"N"): é o que torna o alinhamento
+    verificável item a item. Uma lista sem números convidava o modelo a imitar o
+    exemplo do prompt — ele devolvia 2 itens para 10 parágrafos, e a resposta
+    inteira era descartada. A validação continua estrita: número faltando ou
+    parágrafo vazio descartam tudo, porque um parágrafo trocado de lugar mudaria
+    a distribuição pelas imagens — a única coisa que o botão promete não mexer.
     """
     if not paragraphs:
         return None
@@ -61,16 +67,19 @@ def enhance_paragraphs(
 
     import json
 
+    numbered = {str(i + 1): p for i, p in enumerate(paragraphs)}
     payload = {
         "model": settings.llm_model or "llama-3.1-8b-instant",
         "messages": [
             {
                 "role": "system",
-                "content": _ENHANCE_PROMPT.format(target=PARAGRAPH_CHAR_TARGET),
+                "content": _ENHANCE_PROMPT.format(
+                    target=PARAGRAPH_CHAR_TARGET, count=len(paragraphs)
+                ),
             },
             {
                 "role": "user",
-                "content": json.dumps(paragraphs, ensure_ascii=False),
+                "content": json.dumps(numbered, ensure_ascii=False),
             },
         ],
         "temperature": 0.4,
@@ -102,17 +111,26 @@ def enhance_paragraphs(
 
     parsed = _parse_json_loose(content) or {}
     result = parsed.get("paragraphs")
-    if not isinstance(result, list) or len(result) != len(paragraphs):
+    # Modelo que ignore os números e devolva a lista crua ainda é aproveitável —
+    # mas só com a contagem exata, que é o que garante o alinhamento.
+    if isinstance(result, list) and len(result) == len(paragraphs):
+        result = {str(i + 1): p for i, p in enumerate(result)}
+    if not isinstance(result, dict):
         logger.warning(
-            "Simplificação: esperava %d parágrafos, veio %s — descartada.",
+            "Simplificação: esperava %d parágrafos numerados, veio %s — descartada.",
             len(paragraphs),
-            len(result) if isinstance(result, list) else type(result).__name__,
+            f"lista de {len(result)}" if isinstance(result, list) else type(result).__name__,
         )
         return None
-    cleaned = [" ".join(str(p or "").split()) for p in result]
-    if not all(cleaned):
-        logger.warning("Simplificação devolveu parágrafo vazio — descartada.")
-        return None
+    cleaned: list[str] = []
+    for i in range(1, len(paragraphs) + 1):
+        value = " ".join(str(result.get(str(i)) or "").split())
+        if not value:
+            logger.warning(
+                "Simplificação: parágrafo %d ausente ou vazio na resposta — descartada.", i
+            )
+            return None
+        cleaned.append(value)
     return cleaned
 
 

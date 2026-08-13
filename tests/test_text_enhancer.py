@@ -62,15 +62,26 @@ def _post_returning(monkeypatch, content: str):
 # ------------------------------------------------------------ enhancer puro
 def test_returns_simplified_paragraphs_in_order(monkeypatch):
     calls = _post_returning(
-        monkeypatch, json.dumps({"paragraphs": ["curto 1", "curto 2"]})
+        monkeypatch, json.dumps({"paragraphs": {"1": "curto 1", "2": "curto 2"}})
     )
     result = enhance_paragraphs(
         Settings.from_env(_LLM_ENV), ["parágrafo longo 1", "parágrafo longo 2"]
     )
     assert result == ["curto 1", "curto 2"]
-    # Os parágrafos vão para o LLM como JSON, na ordem dada.
+    # Os parágrafos vão para o LLM NUMERADOS: é o que torna o alinhamento
+    # verificável e impede o modelo de imitar o exemplo de 2 itens do prompt.
     sent = calls[0]["payload"]["messages"][1]["content"]
-    assert json.loads(sent) == ["parágrafo longo 1", "parágrafo longo 2"]
+    assert json.loads(sent) == {"1": "parágrafo longo 1", "2": "parágrafo longo 2"}
+    system = calls[0]["payload"]["messages"][0]["content"]
+    assert "2 parágrafos" in system
+
+
+def test_accepts_a_plain_list_with_the_exact_count(monkeypatch):
+    """Modelo que ignore os números e devolva lista crua ainda serve — desde
+    que venha a contagem exata, que é o que garante o alinhamento."""
+    _post_returning(monkeypatch, json.dumps({"paragraphs": ["curto 1", "curto 2"]}))
+    result = enhance_paragraphs(Settings.from_env(_LLM_ENV), ["a", "b"])
+    assert result == ["curto 1", "curto 2"]
 
 
 def test_mock_provider_returns_none_without_calling_anything(monkeypatch):
@@ -88,8 +99,13 @@ def test_wrong_count_discards_the_whole_answer(monkeypatch):
     assert enhance_paragraphs(Settings.from_env(_LLM_ENV), ["a", "b"]) is None
 
 
+def test_missing_number_discards_the_whole_answer(monkeypatch):
+    _post_returning(monkeypatch, json.dumps({"paragraphs": {"1": "ok"}}))
+    assert enhance_paragraphs(Settings.from_env(_LLM_ENV), ["a", "b"]) is None
+
+
 def test_empty_paragraph_discards_the_whole_answer(monkeypatch):
-    _post_returning(monkeypatch, json.dumps({"paragraphs": ["ok", "  "]}))
+    _post_returning(monkeypatch, json.dumps({"paragraphs": {"1": "ok", "2": "  "}}))
     assert enhance_paragraphs(Settings.from_env(_LLM_ENV), ["a", "b"]) is None
 
 
