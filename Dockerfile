@@ -45,6 +45,15 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
 # (VISION_TIMEOUT_SECONDS, default 90s) — com o default o worker morreria antes
 # de a visão responder, e a requisição voltaria como erro em vez de cair no
 # ranking textual. Tem que ser maior que o timeout da visão.
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--threads", "4", \
+#
+# --workers 1: os projetos vivem na memória DO PROCESSO (SessionStore). Com 2
+# workers, o /generate criava o carrossel num processo e o "Salvar edição" e o
+# "Baixar ZIP" abriam conexão nova e caíam no outro processo na metade das
+# vezes — 404 "Projeto não encontrado" com o carrossel recém-gerado na tela.
+# (Requisições em sequência rápida reusam a conexão e acertam o worker; depois
+# de editar por uns minutos, a conexão fecha e o POST sorteia.) A concorrência
+# vem das threads; multi-worker exige store externo (Redis/DB), como o README
+# documenta em "Limitações".
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "8", \
      "--timeout", "180", \
      "--access-logfile", "-", "--error-logfile", "-", "run:app"]
