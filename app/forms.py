@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from flask_wtf import FlaskForm
 from wtforms import (
+    BooleanField,
     FieldList,
     HiddenField,
     SelectField,
@@ -156,6 +157,12 @@ class BriefingForm(FlaskForm):
         min_entries=0,
         max_entries=8,
     )
+    # Só aparece no formulário quando há pessoa fixada (ver template). Desligado
+    # por padrão: repetir a pessoa é escolha por carrossel, não estado global.
+    use_pinned_person = BooleanField(
+        "Buscar mais fotos da pessoa fixada para a imagem 1",
+        default=False,
+    )
 
     @property
     def is_script_mode(self) -> bool:
@@ -227,6 +234,7 @@ class BriefingForm(FlaskForm):
             "keywords": keywords,
             "script_mode": "script" if self.is_script_mode else "auto",
             "script_blocks": blocks,
+            "use_pinned_person": bool(self.use_pinned_person.data),
         }
 
 
@@ -279,6 +287,11 @@ class GoviralForm(FlaskForm):
         "Palavras-chave",
         validators=[Optional(), Length(max=200)],
         render_kw={"placeholder": "separadas por vírgula: foco, hábitos"},
+    )
+    # Mesmo comportamento do checkbox no BriefingForm: opt-in por carrossel.
+    use_pinned_person = BooleanField(
+        "Buscar mais fotos da pessoa fixada para a imagem 1",
+        default=False,
     )
 
     def keyword_list(self) -> list[str]:

@@ -159,6 +159,8 @@
       <button type="button" class="btn btn-ghost btn-sm" id="js-add-keyword">+ Adicionar palavra</button>
     </fieldset>
 
+    {% include "_pinned_person.html" %}
+
     <div class="form-actions">
       <button type="submit" class="btn btn-primary btn-lg">Gerar carrossel</button>
       <a href="{{ url_for('main.index') }}" class="btn btn-ghost">Cancelar</a>

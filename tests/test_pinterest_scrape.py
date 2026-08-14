@@ -44,6 +44,12 @@ class _FakeScraper:
             raise self._error
         return list(self._medias)
 
+    def related(self, url, num, min_resolution, **kwargs):
+        self._calls.append({"url": url, "num": num, "min_resolution": min_resolution})
+        if self._error:
+            raise self._error
+        return list(self._medias)
+
 
 def _fake_library(medias, calls=None, error=None, timeouts=None):
     """Substituto de `PinterestDL` — expõe só o `with_api` que o adapter usa."""
@@ -359,6 +365,64 @@ def test_the_timeout_comes_from_the_settings(install_fake, monkeypatch):
     PinterestScrapeClient(timeout=42).search("tema", limit=2)
 
     assert timeouts == [42]
+
+
+# ---------- pins relacionados (pessoa fixada) ----------
+
+
+_PIN_URL = "https://www.pinterest.com/pin/55169164192029389/"
+
+
+def test_related_maps_pins_into_the_same_image_shape(install_fake):
+    install_fake(_media_batch(4))
+
+    images = PinterestScrapeClient().related(_PIN_URL, limit=4)
+
+    assert len(images) == 4
+    assert all(img.image_id and img.image_url for img in images)
+    assert all(img.thumb_url.startswith("https://i.pinimg.com/474x/") for img in images)
+
+
+def test_related_asks_the_library_for_the_pin_url(install_fake):
+    calls: list[dict] = []
+    install_fake(_media_batch(4), calls=calls)
+
+    PinterestScrapeClient().related(_PIN_URL, limit=4)
+
+    assert calls[0]["url"] == _PIN_URL
+    # O piso continua sendo aplicado no pool recebido, não na biblioteca —
+    # mesmo motivo da busca por query (paginação + sleep dentro do POST).
+    assert calls[0]["min_resolution"] == (0, 0)
+
+
+def test_related_applies_the_resolution_floor(install_fake):
+    install_fake(_lo_res(10) + _hi_res(5))
+
+    images = PinterestScrapeClient(min_resolution=(1080, 1350)).related(_PIN_URL, limit=4)
+
+    assert all(img.image_id.startswith("20") for img in images)
+
+
+def test_related_failure_returns_empty_not_mock(install_fake):
+    """[] em vez de gradiente: quem chama tem um fallback melhor — a busca de
+    retrato por query de sempre."""
+    install_fake([], error=RuntimeError("payload mudou"))
+
+    assert PinterestScrapeClient().related(_PIN_URL, limit=4) == []
+
+
+def test_related_without_the_library_returns_empty(monkeypatch):
+    monkeypatch.setattr(
+        "app.adapters.pinterest_client._load_pinterest_dl", lambda: None
+    )
+
+    assert PinterestScrapeClient().related(_PIN_URL, limit=4) == []
+
+
+def test_related_with_no_results_returns_empty(install_fake):
+    install_fake([])
+
+    assert PinterestScrapeClient().related(_PIN_URL, limit=4) == []
 
 
 # ---------- falhas: sempre com motivo, nunca com exceção ----------

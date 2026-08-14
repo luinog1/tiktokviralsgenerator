@@ -32,6 +32,7 @@ from app.adapters.text_enhancer import enhance_panel
 from app.forms import MAX_SCRIPT_BLOCKS, GoviralForm
 from app.services.generation import GenerationService
 from app.services.goviral_assets import GOVIRAL_ASSETS_DIR
+from app.services.pinned_person import load_pinned
 
 bp = Blueprint("goviral", __name__)
 logger = logging.getLogger(__name__)
@@ -170,6 +171,7 @@ def generate():
             # que esta tela existe para não fazer.
             slides_count=len(blocks),
             script_blocks=blocks,
+            use_pinned_person=bool(form.use_pinned_person.data),
         )
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("Falha de geração pelo painel: %s", type(exc).__name__)
@@ -189,4 +191,6 @@ def _context() -> dict:
         "casting_enabled": settings.casting_enabled,
         "hook_subject": settings.hook_subject,
         "max_images": MAX_SCRIPT_BLOCKS,
+        # Com pessoa fixada, o template mostra o checkbox de reusar a pessoa.
+        "pinned_person": load_pinned(),
     }

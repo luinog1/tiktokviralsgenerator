@@ -8,6 +8,12 @@ Aplicação Flask que transforma o texto gerado pelo **goviral.ai** em um carros
 
 ---
 
+## 🎯 O que mudou na v0.11
+
+- ✅ **Fixar a pessoa do hook e repeti-la nos próximos carrosséis (opcional)** — na prévia, a imagem 1 ganhou o botão **"📌 Fixar esta pessoa"**: ele guarda o pin da foto do hook em `instance/pinned_person.json` (sobrevive a restart; os projetos vivem em memória com TTL). Nos formulários (`/create` e `/goviral`), quando existe pessoa fixada aparece um checkbox — **desligado por padrão** — "Buscar mais fotos da pessoa fixada": com ele marcado, o pool de retrato do hook vem dos **pins relacionados** àquele pin (o "mais como este" do Pinterest, via `related()` da `pinterest-dl`) em vez da query de retrato. Para um pin de retrato os relacionados costumam trazer a mesma pessoa — é similaridade visual do próprio Pinterest, **nenhum reconhecimento facial**, e por isso "costuma", não "sempre": a galeria da prévia continua lá para conferir e trocar. O pool de cenário não muda (a pessoa fixada é do hook; o resto segue b-roll), e o recorte é o mesmo da busca por query: piso de resolução, retrato primeiro, ponto sorteado. Só funciona com `IMAGE_PROVIDER=pinterest_scrape` (Unsplash não tem "fotos relacionadas" na API pública); qualquer falha — ninguém fixado, provider sem `related`, pin sem relacionados, erro de rede — cai na busca de retrato de sempre com o motivo nos avisos da prévia. Fixar uma foto que não é pin do Pinterest responde 422 explicando; "Esquecer a pessoa fixada" apaga o arquivo.
+
+---
+
 ## 🎯 O que mudou na v0.10
 
 - ✅ **Legenda "black outline"** — segundo corte de legenda nativo do TikTok, como estilo `sticker_outline`: texto branco com contorno preto, sem caixa. Mesma geometria do sticker (largura, passo entre linhas, arraste e resize por caixa, prévia em duas camadas) — só a tinta muda. No PNG o contorno é `stroke_width` do Pillow (8% do corpo da fonte, crescendo para fora do glifo), desenhado em duas passadas como as etiquetas: todos os contornos primeiro, todas as letras depois, senão o traço da linha de baixo comeria o rabo dos "g" da linha de cima. Na prévia, a camada de baixo troca a etiqueta branca por `-webkit-text-stroke` (0.16em, porque o CSS centra o traço na borda — metade fica visível) e a de cima pinta a letra branca.
@@ -467,7 +473,8 @@ pip install -r requirements-dev.txt
 pytest -v tests/
 ```
 
-Cobertura (352 testes):
+Cobertura (414 testes):
+- **Pessoa fixada** — round-trip de gravar/ler/esquecer em `instance/pinned_person.json`; URL do pin canonizada (domínio regional e sufixos viram `www.pinterest.com/pin/<id>/`); foto que não é pin (Unsplash, mock, goviral_assets) não é fixável e a rota explica com 422; `related()` do cliente de scrape mapeia os pins para a forma do app, aplica o piso de resolução e devolve `[]` em falha (sem mock — quem chama tem fallback melhor); com o checkbox ligado o pool de hook vem dos relacionados (uma query só, a de cenário) e o slide 1 recebe uma foto deles; ninguém fixado, provider sem `related`, relacionados vazios/erro e casting desligado caem na busca de sempre com o motivo nos avisos; com o checkbox desligado nada muda; o formulário carrega o checkbox até o serviço.
 - **Painel do goviral** — o dashboard colado com `Ctrl+A` vira um bloco por imagem (hook numa linha só, parágrafos nas duas caixas); preâmbulo antes do `Hook` descartado sem lista de interface; rótulos nunca chegam ao slide; texto na mesma linha do rótulo ou na seguinte; rótulos das duas colunas antes dos dois textos; `Position` decidindo a ordem; painel sem cabeçalho `Script` dividido pelo `Paragraph 1`; parágrafo multi-linha na mesma caixa; `Paragraph 3` na caixa de baixo; reconhecido pela metade (sem `Hook`, sem texto, só scripts) responde "não é painel"; `Imagem N:` continua sendo do `labeled_blocks`; e as rotas — `/goviral` gera sem perguntar nº de slides, 422 com motivo quando não é painel, `/goviral/parse` mostra a distribuição, o "distribuir" do briefing entende o painel e o painel na caixa única pula o composer.
 - **TextComposer** — split em slides, hashtags, texto curto, texto vazio, e as linhas em branco do texto colado sobrevivendo à limpeza das hashtags (colapsá-las fazia todos os slides saírem com o roteiro inteiro).
 - **Rótulo `Imagem N`** — nota entre parênteses e rótulo sozinho na linha continuam sendo rótulo; hora no começo da linha (`5:30 da manhã`) não é rótulo; `labeled_blocks` só responde quando os rótulos existem; rótulo digitado dentro do campo não chega ao slide; texto colado com rótulos pula o composer, mantém a ordem e avisa quantos rótulos foram obedecidos, e texto sem rótulo continua indo para o composer.
@@ -514,6 +521,8 @@ Cobertura (352 testes):
 | POST | `/script/split` | Divide um roteiro colado em blocos por imagem (JSON) |
 | POST | `/generate` | Executa composição do carrossel |
 | POST | `/rank` | Reordena imagens (JSON) |
+| POST | `/pin-person` | Fixa a pessoa da foto do hook (guarda o pin para os próximos carrosséis) |
+| POST | `/pin-person/clear` | Esquece a pessoa fixada |
 | GET | `/preview/<id>` | Exibe carrossel com slides editáveis |
 | POST | `/preview/<id>/edit` | Atualiza slides editados |
 | POST | `/preview/<id>/export` | Baixa ZIP / PNG / Markdown |

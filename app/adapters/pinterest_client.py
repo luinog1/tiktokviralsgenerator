@@ -536,6 +536,48 @@ class PinterestScrapeClient:
         )
         return [self._to_image(media, query) for media in selected]
 
+    def related(self, pin_url: str, limit: int = 8) -> list[PinterestImage]:
+        """Pins relacionados a um pin — o "mais como este" do Pinterest.
+
+        É a busca da pessoa fixada: para um pin de retrato, os relacionados
+        costumam trazer a mesma pessoa (similaridade visual do próprio
+        Pinterest — nenhum reconhecimento facial). O recorte é o mesmo da
+        busca por query: piso de resolução, retrato primeiro, ponto sorteado.
+
+        Falha devolve `[]` em vez do mock: quem chama tem um fallback melhor
+        que gradiente — a busca de retrato de sempre.
+        """
+        pinterest_dl = _load_pinterest_dl()
+        if pinterest_dl is None:
+            logger.warning(
+                "Pessoa fixada ignorada: o pacote `pinterest-dl` não está "
+                "instalado (pip install pinterest-dl)."
+            )
+            return []
+        try:
+            medias = pinterest_dl.with_api(timeout=self._timeout).related(
+                pin_url,
+                num=self._POOL_SIZE,
+                min_resolution=(0, 0),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Pins relacionados falharam para %s: %s",
+                pin_url, type(exc).__name__,
+            )
+            return []
+
+        medias = [m for m in medias if str(getattr(m, "src", "") or "")]
+        if not medias:
+            logger.info("Nenhum pin relacionado para %s.", pin_url)
+            return []
+        selected = self._select(medias, limit)
+        logger.info(
+            "Pinterest devolveu %d pin(s) relacionado(s) a %s (pool de %d).",
+            len(selected), pin_url, len(medias),
+        )
+        return [self._to_image(media, "") for media in selected]
+
     def _select(self, medias: list[Any], limit: int) -> list[Any]:
         """Recorta o pool: alta resolução e retrato primeiro, num ponto sorteado.
 

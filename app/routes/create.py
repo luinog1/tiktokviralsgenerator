@@ -12,6 +12,7 @@ from app.forms import (
     BriefingForm,
     script_field_labels,
 )
+from app.services.pinned_person import load_pinned
 
 bp = Blueprint("create", __name__)
 
@@ -42,6 +43,8 @@ def create_view_context(form: BriefingForm, settings) -> dict:
         "script_labels": script_labels_by_count(),
         "current_labels": script_field_labels(slides_count),
         "goviral_url": "https://content.goviralai.app/",
+        # Com pessoa fixada, o template mostra o checkbox de reusar a pessoa.
+        "pinned_person": load_pinned(),
     }
 
 

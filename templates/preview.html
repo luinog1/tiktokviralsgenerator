@@ -172,6 +172,21 @@
               </a>
             </p>
           {% endif %}
+          {% if is_hook %}
+          {# Guarda o pin da foto escolhida para a imagem 1. Nos formulários, um
+             checkbox opcional passa a buscar os pins relacionados a ele — mais
+             fotos da mesma pessoa, pela similaridade do próprio Pinterest. O
+             botão lê o hidden que a galeria atualiza, então trocar a foto e
+             fixar em seguida funciona sem salvar antes. #}
+          <p class="pin-person-row">
+            <button type="button" class="btn btn-ghost btn-sm" id="js-pin-person"
+                    data-project-id="{{ project.project_id }}"
+                    title="Guarda o pin desta foto; no próximo carrossel, uma opção busca pins relacionados — mais fotos da mesma pessoa.">
+              📌 Fixar esta pessoa para os próximos carrosséis
+            </button>
+            <span class="small muted" id="js-pin-person-status" role="status" aria-live="polite"></span>
+          </p>
+          {% endif %}
         </div>
       </article>
       {% endfor %}
@@ -461,6 +476,40 @@
       const tags = document.querySelectorAll(".hashtag");
       const text = Array.from(tags).map(t => t.textContent.trim()).join(" ");
       copy(text);
+    });
+
+    // Fixar a pessoa do hook: manda o image_id ATUAL da imagem 1 (o hidden que
+    // a galeria atualiza) para o servidor guardar o pin. A validação de "é um
+    // pin do Pinterest?" é do servidor — a resposta explica quando não dá.
+    const pinBtn = document.getElementById("js-pin-person");
+    pinBtn?.addEventListener("click", async () => {
+      const status = document.getElementById("js-pin-person-status");
+      const card = pinBtn.closest(".slide-card");
+      const hidden = card ? card.querySelector(".js-slide-image-id") : null;
+      const csrf = document.querySelector('input[name="csrf_token"]')?.value || "";
+      pinBtn.disabled = true;
+      if (status) status.textContent = "Fixando…";
+      try {
+        const response = await fetch("{{ url_for('pinned.pin') }}", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-CSRFToken": csrf },
+          body: JSON.stringify({
+            project_id: pinBtn.dataset.projectId,
+            image_id: hidden ? hidden.value : "",
+          }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && data.pinned) {
+          if (status) status.textContent =
+            "Pessoa fixada — no próximo carrossel, marque a opção de reusar a pessoa.";
+        } else if (status) {
+          status.textContent = data.reason || "Não foi possível fixar esta foto.";
+        }
+      } catch (err) {
+        if (status) status.textContent = "Não foi possível fixar esta foto.";
+      } finally {
+        pinBtn.disabled = false;
+      }
     });
   });
 </script>

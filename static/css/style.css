@@ -1076,3 +1076,44 @@ a:hover { text-decoration: underline; }
   white-space: pre-wrap;
   color: var(--text-muted);
 }
+
+/* Pessoa fixada — o checkbox de reusar a pessoa do hook nos formulários e o
+   botão de fixar na prévia. */
+.pinned-person {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.pinned-person-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.pinned-person-info {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.pinned-person-thumb {
+  width: 48px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+
+.pin-person-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px 0 0;
+}

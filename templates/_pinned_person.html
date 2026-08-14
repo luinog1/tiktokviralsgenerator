@@ -1,0 +1,46 @@
+{# O checkbox "buscar mais fotos da pessoa fixada" — aparece só quando há uma
+   pessoa fixada (botão "Fixar esta pessoa" na prévia, imagem 1). Quem inclui
+   este bloco precisa ter `form.use_pinned_person` e `pinned_person` no
+   contexto. Desligado por padrão: repetir a pessoa é escolha por carrossel. #}
+{% if pinned_person %}
+<div class="field pinned-person" id="pinned-person-block">
+  <label class="pinned-person-check">
+    {{ form.use_pinned_person() }}
+    <span>{{ form.use_pinned_person.label.text }}</span>
+  </label>
+  <div class="pinned-person-info small muted">
+    {% if pinned_person.thumb_url or pinned_person.image_url %}
+      <img src="{{ pinned_person.thumb_url or pinned_person.image_url }}" alt=""
+           class="pinned-person-thumb" loading="lazy" />
+    {% endif %}
+    <span>
+      A busca usa os pins <em>relacionados</em> a
+      <a href="{{ pinned_person.pin_url }}" target="_blank" rel="noopener">{{ (pinned_person.title or 'este pin') | truncate(60) }}</a>
+      — no Pinterest eles costumam trazer a mesma pessoa, sem garantia (confira
+      na galeria da prévia). Só funciona com
+      <code>IMAGE_PROVIDER=pinterest_scrape</code>.
+      <button type="button" class="btn btn-ghost btn-sm" id="js-forget-person">
+        Esquecer a pessoa fixada
+      </button>
+    </span>
+  </div>
+</div>
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    // "Esquecer" apaga o arquivo no servidor e some com o bloco inteiro — o
+    // checkbox sai junto, então não há como usar a pessoa apagada sem querer.
+    document.getElementById("js-forget-person")?.addEventListener("click", async () => {
+      const csrf = document.querySelector('input[name="csrf_token"]')?.value || "";
+      try {
+        await fetch("{{ url_for('pinned.clear') }}", {
+          method: "POST",
+          headers: { "X-CSRFToken": csrf },
+        });
+        document.getElementById("pinned-person-block")?.remove();
+      } catch (err) {
+        /* falhou a rede: o bloco fica e nada mais quebra */
+      }
+    });
+  });
+</script>
+{% endif %}

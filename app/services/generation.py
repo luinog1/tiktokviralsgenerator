@@ -27,6 +27,7 @@ from app.adapters.vision_provider import VisionRankingProvider, build_vision_pro
 from app.config import Settings
 from app.services.casting import POOL_HOOK, POOL_SCENE, apply_casting, cast_carousel
 from app.services.goviral_assets import assign_promo_slide
+from app.services.pinned_person import load_pinned
 from app.services.session_store import SessionStore, StoredProject, get_store
 
 logger = logging.getLogger(__name__)
@@ -92,12 +93,18 @@ class GenerationService:
         slides_count: int = 6,
         language: str = "pt-BR",
         script_blocks: list[str] | None = None,
+        use_pinned_person: bool = False,
     ) -> GenerationOutcome:
         """Gera o carrossel.
 
         `script_blocks` é o modo manual: um bloco de texto por imagem, na ordem
         em que o usuário quer as imagens. Preenchido, ele manda — o texto já é a
         decisão do usuário e nenhum LLM reescreve por cima.
+
+        `use_pinned_person` troca a busca de retrato do hook pelos pins
+        relacionados à pessoa fixada na prévia (ver `pinned_person.py`). É
+        opt-in por carrossel, e qualquer falha volta para a busca de sempre
+        com o motivo nos avisos.
 
         O texto corrido segue a mesma regra quando ele PRÓPRIO traz os rótulos
         "Imagem N:". Escrever o rótulo é dizer em qual foto cada trecho entra;
@@ -159,7 +166,9 @@ class GenerationService:
 
         # 2. Buscar imagens
         query = self._build_query(theme, niche, keywords, raw_text)
-        images = self._search_images(query, slides_count, warnings)
+        images = self._search_images(
+            query, slides_count, warnings, use_pinned_person=use_pinned_person
+        )
 
         # 3. Ranking — visão primeiro (olha a foto), texto como fallback
         briefing = {
@@ -217,7 +226,11 @@ class GenerationService:
 
     # ---- helpers ----
     def _search_images(
-        self, query: str, slides_count: int, warnings: list[str]
+        self,
+        query: str,
+        slides_count: int,
+        warnings: list[str],
+        use_pinned_person: bool = False,
     ) -> list[PinterestImage]:
         """Busca as fotos do carrossel — em dois pools quando há casting.
 
@@ -225,16 +238,29 @@ class GenerationService:
         devolve retrato na primeira página. Com casting ligado, a busca é feita
         duas vezes — retrato e cenário — e cada foto carrega de qual pool veio,
         que é o sinal que sobrevive mesmo sem VLM configurado.
+
+        Com a pessoa fixada ligada, o pool de retrato vem dos pins relacionados
+        ao pin fixado em vez da query — mais fotos da mesma pessoa. O pool de
+        cenário não muda: a pessoa fixada é do hook, o resto continua b-roll.
         """
         if not self._settings.casting_enabled:
+            if use_pinned_person:
+                warnings.append(
+                    "A pessoa fixada precisa do casting ligado (HOOK_SUBJECT) — "
+                    "opção ignorada."
+                )
             return self._search_pool(query, max(slides_count, 6), "", warnings)
 
-        hook_images = self._search_pool(
-            f"{query} {self._settings.hook_query_hints}".strip(),
-            self.HOOK_POOL_SIZE,
-            POOL_HOOK,
-            warnings,
-        )
+        hook_images: list[PinterestImage] = []
+        if use_pinned_person:
+            hook_images = self._pinned_person_pool(warnings)
+        if not hook_images:
+            hook_images = self._search_pool(
+                f"{query} {self._settings.hook_query_hints}".strip(),
+                self.HOOK_POOL_SIZE,
+                POOL_HOOK,
+                warnings,
+            )
         scene_images = self._search_pool(
             f"{query} {self._settings.scene_query_hints}".strip(),
             max(slides_count, 6),
@@ -284,6 +310,50 @@ class GenerationService:
                 warnings.append("Nenhuma imagem retornada pela busca.")
             elif any(is_mock_image(img) for img in images):
                 self._warn_mock_images(warnings)
+        return images
+
+    def _pinned_person_pool(self, warnings: list[str]) -> list[PinterestImage]:
+        """Pool de retrato via pins relacionados à pessoa fixada. [] = fallback.
+
+        Cada saída sem foto explica o motivo no aviso: a opção foi marcada de
+        propósito, e um hook com outra pessoa sem explicação pareceria bug.
+        """
+        pinned = load_pinned()
+        if not pinned:
+            warnings.append(
+                "Nenhuma pessoa fixada — fixe uma pela prévia (imagem 1). "
+                "A busca de retrato de sempre foi usada."
+            )
+            return []
+        related = getattr(self._pinterest, "related", None)
+        if not callable(related):
+            warnings.append(
+                "A pessoa fixada usa os pins relacionados do Pinterest e só "
+                "funciona com IMAGE_PROVIDER=pinterest_scrape — a busca de "
+                "retrato de sempre foi usada."
+            )
+            return []
+        try:
+            images = related(pinned["pin_url"], limit=self.HOOK_POOL_SIZE)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Pins relacionados à pessoa fixada falharam: %s", type(exc).__name__
+            )
+            images = []
+        if not images:
+            warnings.append(
+                "Os pins relacionados à pessoa fixada não retornaram fotos — "
+                "a busca de retrato de sempre foi usada."
+            )
+            return []
+        for img in images:
+            img.pool = POOL_HOOK
+        title = str(pinned.get("title") or "").strip()
+        warnings.append(
+            "A imagem 1 buscou pins relacionados à pessoa fixada"
+            + (f" ({title[:60]})" if title else "")
+            + " — confira na galeria se a pessoa é a mesma."
+        )
         return images
 
     def _warn_mock_images(self, warnings: list[str]) -> None:
