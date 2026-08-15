@@ -37,6 +37,38 @@ def test_briefing_validates_required_fields(app):
         assert briefing["style"] == "list"
         assert briefing["slides_count"] == 6
         assert briefing["keywords"] == ["foco"]
+        # Sem seletor no POST (cliente antigo), a fonte fica com o ambiente.
+        assert briefing["image_source"] == ""
+
+
+def test_briefing_carries_the_image_source_choice(app):
+    with app.test_request_context("/", method="POST", data={
+        "raw_text": "Texto válido com mais de vinte caracteres para passar.",
+        "theme": "rotina matinal",
+        "language": "pt-BR",
+        "style": "sticker",
+        "slides_count": "3",
+        "script_mode": "auto",
+        "image_source": "instagram_pinterest",
+    }):
+        form = BriefingForm()
+        assert form.validate_on_submit(), form.errors
+        assert form.to_briefing()["image_source"] == "instagram_pinterest"
+
+
+def test_briefing_rejects_an_unknown_image_source(app):
+    with app.test_request_context("/", method="POST", data={
+        "raw_text": "Texto válido com mais de vinte caracteres para passar.",
+        "theme": "rotina matinal",
+        "language": "pt-BR",
+        "style": "sticker",
+        "slides_count": "3",
+        "script_mode": "auto",
+        "image_source": "orkut",
+    }):
+        form = BriefingForm()
+        assert not form.validate_on_submit()
+        assert "image_source" in form.errors
 
 
 def test_briefing_rejects_short_raw_text(app):

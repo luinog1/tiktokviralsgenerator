@@ -21,6 +21,8 @@ from .text_composer import (
 )
 from .pinterest_client import (
     PinterestClient,
+    CombinedImageClient,
+    InstagramScrapeClient,
     MockPinterestClient,
     PinterestImage,
     PinterestScrapeClient,
@@ -64,6 +66,8 @@ __all__ = [
     "viral_script_roles",
     # Pinterest
     "PinterestClient",
+    "CombinedImageClient",
+    "InstagramScrapeClient",
     "MockPinterestClient",
     "PinterestImage",
     "PinterestScrapeClient",

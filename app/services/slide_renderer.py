@@ -262,9 +262,9 @@ class SlideRenderer:
 
     # ---------- layouts ----------
 
-    # Posição vertical do bloco de texto, por papel no roteiro viral.
-    # O hook fica baixo e sozinho (a foto respira em cima); os slides de
-    # desenvolvimento usam dois blocos separados, começando no terço superior.
+    # Posição vertical do bloco de texto, por papel no roteiro viral — vale
+    # para slides de UMA caixa. O hook fica baixo e sozinho (a foto respira em
+    # cima); com 2+ caixas quem manda é o espalhamento (_sticker_spread_slots).
     _STICKER_ANCHORS: dict[str, float] = {
         "hook": 0.60,
         "problem": 0.13,
@@ -291,11 +291,16 @@ class SlideRenderer:
         """Estilo TikTok: cada bloco vira uma pilha de caixas brancas, uma por
         linha, cada uma do tamanho da própria linha.
 
-        headline e body são blocos separados, com respiro entre eles — é assim
-        que o texto aparece nos photo posts nativos do TikTok. Dentro de um
-        bloco o texto quebra e cada linha ganha a sua etiqueta; as etiquetas se
-        encostam, então a pilha lê como uma mancha branca contínua, com a borda
-        acompanhando o comprimento de cada linha.
+        headline e body são blocos separados, e um slide com 2+ caixas sai
+        ESPALHADO por padrão: a primeira caixa abre no topo da foto e a última
+        fecha no pé — "pergunta em cima, resposta embaixo", o layout dos photo
+        posts nativos (ver `_sticker_spread_slots`). Empilhadas uma sob a
+        outra, as duas caixas saíam coladas no terço superior e o resto da
+        foto ficava vazio. Slides de uma caixa continuam na âncora do papel.
+
+        Dentro de um bloco o texto quebra e cada linha ganha a sua etiqueta;
+        as etiquetas se encostam, então a pilha lê como uma mancha branca
+        contínua, com a borda acompanhando o comprimento de cada linha.
 
         Todos os blocos saem no MESMO corpo de fonte: no photo post nativo a
         legenda não muda de tamanho entre "título" e "texto", e dimensionar cada
@@ -315,7 +320,7 @@ class SlideRenderer:
 
         texts = [("headline", headline), ("body", body), ("cta", cta)]
         sized = self._fit_sticker_blocks(
-            draw, texts, max_width=max_width, scales=box_scales
+            draw, texts, max_width=max_width, scales=box_scales, bold_all=outline
         )
         if not sized:
             return
@@ -340,6 +345,23 @@ class SlideRenderer:
         if not blocks:
             return
 
+        cx = self._w // 2 if pos_x is None else int(self._w * pos_x)
+        # A caixa mais larga define o quanto o bloco pode andar para os lados
+        # sem cortar texto.
+        margin_x = int(self._w * 0.04)
+        half_widest = max(self._sticker_block_width(draw, l, f) for l, f in blocks) // 2
+        cx = max(margin_x + half_widest, min(cx, self._w - margin_x - half_widest))
+
+        slots = self._sticker_spread_slots(draw, sized, role=role, pos_y=pos_y)
+        if slots is not None:
+            for key, lines, font in sized:
+                if key in box_positions:
+                    continue
+                self._draw_sticker_block(
+                    draw, lines, font, slots[key], cx, outline=outline
+                )
+            return
+
         total = sum(self._sticker_block_height(draw, l, f) for l, f in blocks)
         total += gap * (len(blocks) - 1)
 
@@ -358,13 +380,6 @@ class SlideRenderer:
         # Nunca deixar o texto sangrar para fora do canvas.
         margin = int(self._h * 0.06)
         top = max(margin, min(top, self._h - total - margin))
-
-        cx = self._w // 2 if pos_x is None else int(self._w * pos_x)
-        # O mesmo cuidado no eixo X: a caixa mais larga define o quanto o
-        # bloco pode andar para os lados sem cortar texto.
-        margin_x = int(self._w * 0.04)
-        half_widest = max(self._sticker_block_width(draw, l, f) for l, f in blocks) // 2
-        cx = max(margin_x + half_widest, min(cx, self._w - margin_x - half_widest))
 
         y = top
         for lines, font in blocks:
@@ -393,15 +408,60 @@ class SlideRenderer:
     _STICKER_PAD_Y_RATIO = 0.09
     _STICKER_RADIUS_RATIO = 0.22
     # Espessura do contorno preto do estilo "black outline", em fração do corpo
-    # da fonte. O Pillow desenha o stroke para FORA do glifo, então 0.08 vira
-    # ~5px numa fonte de 64 — o peso da legenda clássica do TikTok.
-    _STICKER_OUTLINE_RATIO = 0.08
+    # da fonte. O Pillow desenha o stroke para FORA do glifo, então 0.12 vira
+    # ~8px numa fonte de 64 — o halo encorpado da legenda clássica do TikTok
+    # (0.08 saía fino demais perto da referência). A prévia usa o DOBRO em
+    # `-webkit-text-stroke`, porque o CSS centra o traço na borda do glifo.
+    _STICKER_OUTLINE_RATIO = 0.12
     # Respiro entre caixas (headline → corpo → CTA).
     _STICKER_BLOCK_GAP_RATIO = 0.045
+    # Limites do espalhamento vertical dos slides com 2+ caixas: a primeira
+    # caixa abre em 12% da altura e a última fecha em 88% — "pergunta em cima,
+    # resposta embaixo", como no photo post nativo. A prévia espelha com
+    # `justify-content: space-between` e padding vertical de 15% da largura
+    # (= 12% da altura no canvas 4:5).
+    _STICKER_SPREAD_TOP = 0.12
+    _STICKER_SPREAD_BOTTOM = 0.88
     # Fatia da altura do slide que o texto pode ocupar. É o ÚNICO gatilho do
     # encolhimento: enquanto couber na altura, o texto só ganha mais uma linha —
     # é assim que o editor do TikTok se comporta quando o texto cresce.
     _STICKER_MAX_TEXT_RATIO = 0.84
+
+    def _sticker_spread_slots(
+        self, draw, sized, *, role: str, pos_y: float | None
+    ) -> dict[str, int] | None:
+        """Topo de cada caixa no layout espalhado — None quando ele não vale.
+
+        Vale para slides com 2+ caixas de texto, sem arraste do bloco inteiro
+        (`pos_y`) e fora do hook, que é uma caixa só ancorada embaixo. A
+        primeira caixa abre no topo, a última fecha no pé e o miolo é
+        distribuído por igual — a mesma conta do `space-between` da prévia.
+
+        Os slots saem de TODAS as caixas com texto, arrastadas ou não: a caixa
+        solta guarda o lugar dela no fluxo, então arrastar uma não move as
+        outras. Texto alto demais para espalhar (o respiro entre caixas
+        ficaria menor que o gap da pilha) devolve None e cai na pilha de
+        sempre, que já sabe encolher e clampar.
+        """
+        if pos_y is not None or role == "hook" or len(sized) < 2:
+            return None
+        top_bound = int(self._h * self._STICKER_SPREAD_TOP)
+        bottom_bound = int(self._h * self._STICKER_SPREAD_BOTTOM)
+        gap = int(self._h * self._STICKER_BLOCK_GAP_RATIO)
+        heights = [
+            self._sticker_block_height(draw, lines, font)
+            for _, lines, font in sized
+        ]
+        leftover = (bottom_bound - top_bound) - sum(heights)
+        if leftover < gap * (len(sized) - 1):
+            return None
+        spacing = leftover / (len(sized) - 1)
+        slots: dict[str, int] = {}
+        y = float(top_bound)
+        for (key, _, _), height in zip(sized, heights):
+            slots[key] = int(round(y))
+            y += height + spacing
+        return slots
 
     def _fit_sticker_blocks(
         self,
@@ -410,6 +470,7 @@ class SlideRenderer:
         *,
         max_width: int,
         scales: dict[str, float] | None = None,
+        bold_all: bool = False,
     ) -> list[tuple[str, list[str], Any]]:
         """Quebra as caixas num corpo de fonte COMUM, reduzindo todas juntas.
 
@@ -422,6 +483,10 @@ class SlideRenderer:
         Uma caixa com escala própria em `scales` é dimensionada a partir do
         tamanho comum e não entra na decisão de encolher — o usuário pediu
         aquele tamanho.
+
+        `bold_all` põe TODAS as caixas no corte SemiBold — é o caso do "black
+        outline": a legenda clássica do TikTok tem um peso só, e o corpo em
+        Medium sob um contorno preto grosso saía fraco, desigual da headline.
         """
         scales = scales or {}
         filled = [(key, text) for key, text in texts if text.strip()]
@@ -437,7 +502,7 @@ class SlideRenderer:
         while True:
             result = []
             for key, text in filled:
-                bold = key != "body"
+                bold = bold_all or key != "body"
                 path = self._bold_path if bold else self._regular_path
                 box_size = max(10, int(round(size * scales.get(key, 1.0))))
                 font = _font(path, box_size)

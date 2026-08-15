@@ -42,6 +42,18 @@ LANGUAGE_CHOICES = [
     ("es-ES", "Español (España)"),
 ]
 
+# Fonte das fotos, escolhida por geração. "" mantém o IMAGE_PROVIDER do
+# ambiente. As opções de scraping (Pinterest sem token, Instagram e o
+# combinado) valem as mesmas ressalvas de compliance do README — a escolha na
+# UI é o opt-in.
+IMAGE_SOURCE_CHOICES = [
+    ("", "Padrão do servidor (IMAGE_PROVIDER)"),
+    ("unsplash", "Só Unsplash"),
+    ("pinterest_scrape", "Só Pinterest (sem token)"),
+    ("instagram_scrape", "Só Instagram (sem token)"),
+    ("instagram_pinterest", "Instagram + Pinterest (metade de cada)"),
+]
+
 MODE_CHOICES = [
     ("script", "Roteiro por imagem — eu escrevo o texto de cada foto"),
     ("auto", "Automático — o LLM organiza o texto colado em slides"),
@@ -157,6 +169,13 @@ class BriefingForm(FlaskForm):
         min_entries=0,
         max_entries=8,
     )
+    # Fonte das fotos desta geração. Vazio = IMAGE_PROVIDER do ambiente.
+    image_source = SelectField(
+        "Fonte das fotos",
+        choices=IMAGE_SOURCE_CHOICES,
+        default="",
+        validators=[Optional()],
+    )
     # Só aparece no formulário quando há pessoa fixada (ver template). Desligado
     # por padrão: repetir a pessoa é escolha por carrossel, não estado global.
     use_pinned_person = BooleanField(
@@ -235,6 +254,7 @@ class BriefingForm(FlaskForm):
             "script_mode": "script" if self.is_script_mode else "auto",
             "script_blocks": blocks,
             "use_pinned_person": bool(self.use_pinned_person.data),
+            "image_source": (self.image_source.data or "").strip(),
         }
 
 
@@ -287,6 +307,13 @@ class GoviralForm(FlaskForm):
         "Palavras-chave",
         validators=[Optional(), Length(max=200)],
         render_kw={"placeholder": "separadas por vírgula: foco, hábitos"},
+    )
+    # Mesmo seletor do BriefingForm: a fonte vale para ESTA geração.
+    image_source = SelectField(
+        "Fonte das fotos",
+        choices=IMAGE_SOURCE_CHOICES,
+        default="",
+        validators=[Optional()],
     )
     # Mesmo comportamento do checkbox no BriefingForm: opt-in por carrossel.
     use_pinned_person = BooleanField(
@@ -414,6 +441,7 @@ __all__ = [
     "STYLE_CHOICES",
     "SLIDES_CHOICES",
     "LANGUAGE_CHOICES",
+    "IMAGE_SOURCE_CHOICES",
     "MODE_CHOICES",
     "MAX_SCRIPT_BLOCKS",
     "script_field_labels",

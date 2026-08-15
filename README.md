@@ -8,6 +8,14 @@ Aplicação Flask que transforma o texto gerado pelo **goviral.ai** em um carros
 
 ---
 
+## 🎯 O que mudou na v0.12
+
+- ✅ **As duas caixas do slide saem espalhadas: uma no topo, outra no pé** — o layout "pergunta em cima, resposta embaixo" dos photo posts nativos virou o padrão. Antes as caixas saíam empilhadas no terço superior, praticamente coladas (o respiro entre elas era só 4,5% da altura), e o resto da foto ficava vazio. Agora um slide com 2+ caixas abre a primeira em 12% da altura e fecha a última em 88%, com o miolo distribuído por igual — a mesma conta do `justify-content: space-between`, que é exatamente como a prévia espelha o PNG (o padding vertical dela virou 15% da largura = 12% da altura no 4:5). O hook (uma caixa) continua ancorado embaixo, slides de uma caixa continuam na âncora do papel, e o arraste manual segue mandando: os slots são calculados sobre TODAS as caixas com texto, então arrastar uma não muda o lugar das outras. Texto alto demais para espalhar cai na pilha de sempre, que já sabe encolher a fonte.
+- ✅ **"Black outline" igual ao da referência** — o contorno subiu de 8% para **12% do corpo da fonte** (na prévia, 0.24em de `-webkit-text-stroke`, porque o CSS centra o traço na borda) e TODAS as caixas do outline saem no corte **SemiBold** da TikTok Sans: a legenda clássica do TikTok tem um peso só, e o corpo em Medium sob um contorno preto grosso ficava fraco, desigual da headline. A geometria (largura, passo entre linhas, duas passadas) não muda.
+- ✅ **Instagram como fonte de fotos, e um seletor de fonte na UI** — `IMAGE_PROVIDER=instagram_scrape` busca no Instagram **sem token**, pelos mesmos endpoints web anônimos que o [instagram-php-scraper](https://github.com/postaddictme/instagram-php-scraper) usa (`/api/v1/users/web_profile_info/` e `/api/v1/tags/web_info/`, com o `x-ig-app-id` do site); `instagram_pinterest` combina Instagram + Pinterest sem token, **intercalados** (um de cada até fechar o limite, e um preenche quando o outro falha — resultado mock de uma fonte que caiu fica de fora). Nos formulários (`/create` e `/goviral`), o novo seletor **"Fonte das fotos"** escolhe por geração — Padrão do servidor, Só Unsplash, Só Pinterest, Só Instagram ou Instagram + Pinterest — vencendo o `IMAGE_PROVIDER` daquela vez. O Instagram não busca texto livre sem login, então a query vira **uma hashtag**: o tema sem espaços/acentos e sem as palavras das queries de casting (`rotina matinal` → `#rotinamatinal`); um `#hashtag` ou `@perfil` digitado no tema/palavras-chave vence a derivação, e `@perfil` busca as fotos do perfil. O piso de resolução, a preferência por retrato e o ponto de corte sorteado são os mesmos do `pinterest_scrape`; o `accessibility_caption` ("May be an image of 1 person…") alimenta o casting por metadado como o alt do Pinterest. **Acesso anônimo é liberado e bloqueado por IP pelo próprio Instagram**: quando o site devolve a página de login (ou 401/429), o carrossel cai no gradiente mock com o motivo escrito na prévia — o mesmo contrato instável, e o mesmo opt-in explícito, do Pinterest sem token (nunca entra no `auto`; ver [compliance](#️-limitações-e-compliance)).
+
+---
+
 ## 🎯 O que mudou na v0.11
 
 - ✅ **Fixar a pessoa do hook e repeti-la nos próximos carrosséis (opcional)** — na prévia, a imagem 1 ganhou o botão **"📌 Fixar esta pessoa"**: ele guarda o pin da foto do hook em `instance/pinned_person.json` (sobrevive a restart; os projetos vivem em memória com TTL). Nos formulários (`/create` e `/goviral`), quando existe pessoa fixada aparece um checkbox — **desligado por padrão** — "Buscar mais fotos da pessoa fixada": com ele marcado, o pool de retrato do hook vem dos **pins relacionados** àquele pin (o "mais como este" do Pinterest, via `related()` da `pinterest-dl`) em vez da query de retrato. Para um pin de retrato os relacionados costumam trazer a mesma pessoa — é similaridade visual do próprio Pinterest, **nenhum reconhecimento facial**, e por isso "costuma", não "sempre": a galeria da prévia continua lá para conferir e trocar. O pool de cenário não muda (a pessoa fixada é do hook; o resto segue b-roll), e o recorte é o mesmo da busca por query: piso de resolução, retrato primeiro, ponto sorteado. Só funciona com `IMAGE_PROVIDER=pinterest_scrape` (Unsplash não tem "fotos relacionadas" na API pública); qualquer falha — ninguém fixado, provider sem `related`, pin sem relacionados, erro de rede — cai na busca de retrato de sempre com o motivo nos avisos da prévia. Fixar uma foto que não é pin do Pinterest responde 422 explicando; "Esquecer a pessoa fixada" apaga o arquivo.
@@ -308,7 +316,7 @@ Reaproveitar essa sessão no servidor significaria repassar seus cookies, ou sej
 - **Imagem 1 sempre com o hook sozinho, e nunca em branco** — uma caixa, sem texto de apoio e sem CTA, nos três caminhos de composição.
 - Ordenação no roteiro viral de 3 atos (`hook → problema → agitação → valor → prova → CTA`).
 - Renderização estilo sticker do TikTok — caixas brancas arredondadas com texto preto.
-- Busca de imagens via API oficial do Pinterest, via Pinterest **sem token** (`pinterest-dl`), via Unsplash ou mock.
+- Busca de imagens via API oficial do Pinterest, via Pinterest **sem token** (`pinterest-dl`), via **Instagram sem token** (hashtag ou @perfil), via Unsplash ou mock — combinável (Instagram + Pinterest intercalados) e escolhível **por geração** no seletor "Fonte das fotos" dos formulários.
 - **Piso de resolução na busca sem token** — só foto que cobre o slide sem ser ampliada, com degradação em ordem quando o tema não tem acervo.
 - Ranking opcional de imagens por endpoint LLM (com fallback determinístico).
 - Qualificação por **visão** opcional (VLM): nota olhando a foto + posição automática do texto + assunto da foto (pessoa/cenário) para o casting.
@@ -370,7 +378,7 @@ python run.py
 | `FLASK_ENV` | `development` | Ambiente Flask |
 | `SECRET_KEY` | `dev-insecure-change-me` | **Definir em produção** |
 | `DEBUG` | `true` | Modo debug |
-| `IMAGE_PROVIDER` | `auto` | De onde vêm as fotos: `auto`, `pinterest_v5`, `pinterest_scrape`, `unsplash` ou `mock` |
+| `IMAGE_PROVIDER` | `auto` | De onde vêm as fotos: `auto`, `pinterest_v5`, `pinterest_scrape`, `unsplash`, `instagram_scrape`, `instagram_pinterest` ou `mock`. O seletor "Fonte das fotos" dos formulários vence este valor por geração |
 | `PINTEREST_ACCESS_TOKEN` | (vazio) | Token da API oficial v5. Vazio → tenta Unsplash |
 | `PINTEREST_API_BASE_URL` | `https://api.pinterest.com/v5` | Base URL da API |
 | `UNSPLASH_ACCESS_KEY` | (vazio) | Access Key do Unsplash. Usada quando não há token Pinterest. Vazio → mock |
@@ -437,7 +445,7 @@ curl -s http://localhost:5000/health | python -m json.tool
 │   │   ├── text_composer.py    # TextComposer (mock + LLM)
 │   │   ├── script_parser.py    # Roteiro por imagem — blocos → slides (sem LLM)
 │   │   ├── goviral_parser.py   # Painel do goviral (Hook/Script/Paragraph) → blocos
-│   │   ├── pinterest_client.py # Pinterest v5 + Pinterest sem token + Unsplash + Mock
+│   │   ├── pinterest_client.py # Pinterest v5 + Pinterest/Instagram sem token + Unsplash + Mock
 │   │   ├── ranking_provider.py # Inference (LLM) + Mock
 │   │   └── vision_provider.py  # VLM — nota + posição do texto + assunto da foto
 │   ├── services/
@@ -537,8 +545,8 @@ Cada estilo produz um layout distinto no PNG renderizado:
 
 | Estilo | Layout | Caso de uso |
 |--------|--------|-------------|
-| `sticker` | **(padrão)** Uma caixa branca arredondada por **linha**, do tamanho daquela linha, texto preto, foto sem escurecimento. As caixas se sobrepõem e a pilha lê como uma mancha contínua. O texto corre até perto da margem antes de quebrar. Um tamanho de fonte só para headline/corpo/CTA; cada bloco arrasta e redimensiona sozinho na prévia | Photo post nativo do TikTok |
-| `sticker_outline` | Mesma geometria do sticker, tinta diferente: texto **branco com contorno preto**, sem caixa ("black outline" do TikTok) | Photo post nativo, foto clara demais para caixa branca |
+| `sticker` | **(padrão)** Uma caixa branca arredondada por **linha**, do tamanho daquela linha, texto preto, foto sem escurecimento. As caixas se sobrepõem e a pilha lê como uma mancha contínua. Com 2+ caixas o slide sai **espalhado**: a primeira abre no topo da foto e a última fecha no pé. O texto corre até perto da margem antes de quebrar. Um tamanho de fonte só para headline/corpo/CTA; cada bloco arrasta e redimensiona sozinho na prévia | Photo post nativo do TikTok |
+| `sticker_outline` | Mesma geometria do sticker (espalhamento incluso), tinta diferente: texto **branco com contorno preto** de 12% do corpo, sem caixa, tudo num peso só (SemiBold) — o "black outline" do TikTok | Photo post nativo, foto clara demais para caixa branca |
 | `quote` | Aspas decorativas + headline centralizada + body + CTA inferior | Frases inspiradoras, quotes |
 | `list` | Headline à esquerda com barra de destaque + bullets + CTA centralizado | Listas de dicas, passos numerados |
 | `tutorial` | Tag "PASSO A PASSO" + headline + body + CTA em caixa colorida | Tutoriais, como-fazer |
@@ -588,6 +596,7 @@ Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SL
   1. **Termos de uso.** Acesso automatizado pode conflitar com os [Terms of Service do Pinterest](https://developers.pinterest.com/terms/). A biblioteca declara uso educacional e não é afiliada ao Pinterest. Ligar a opção é decisão de quem publica — por isso ela nunca entra sozinha no modo `auto`.
   2. **Contrato instável.** Uma API interna muda sem aviso e sem versionamento. Quando mudar, a busca falha e o carrossel cai no gradiente mock com o motivo no aviso da prévia — não quebra a aplicação, mas para de trazer fotos.
   3. **Direitos da imagem.** Um pin não é banco de imagens: a foto costuma ser de terceiros e o Pinterest é só o índice. O link do pin vai na atribuição, mas verifique a origem antes de publicar comercialmente.
+- **Instagram sem token (`IMAGE_PROVIDER=instagram_scrape` e `instagram_pinterest`):** lê os endpoints web **anônimos** do próprio site (os mesmos do [instagram-php-scraper](https://github.com/postaddictme/instagram-php-scraper)), sem login e sem credencial. As três ressalvas acima valem inteiras — termos de uso ([Instagram Platform Policy](https://developers.facebook.com/terms/)), contrato instável e direitos da imagem (a foto é de quem postou; o link do post vai na atribuição). Duas particularidades: o **acesso anônimo é liberado e bloqueado por IP** pelo próprio Instagram, então a busca pode voltar o muro de login a qualquer momento (o carrossel cai no gradiente mock com o motivo na prévia); e as URLs do CDN (`scontent.cdninstagram.com`) são **assinadas e expiram** — servem para a prévia e o render da sessão, não para guardar. Também nunca entra sozinho no `auto`; a escolha na UI (seletor "Fonte das fotos") ou no `.env` é o opt-in.
 - **Unsplash:** gratuito e sem aprovação, com atribuição obrigatória — preservada na prévia e no Markdown exportado.
 - **LLM:** o endpoint é opcional. Groq, OpenAI ou qualquer provedor OpenAI-compatible podem ser usados. "Free model" não implica em disponibilidade permanente ou autorização comercial — valide os termos.
 - **Persistência:** em memória por processo. Reiniciar o container apaga projetos. Para multi-worker, substitua `SessionStore` por Redis ou DB.

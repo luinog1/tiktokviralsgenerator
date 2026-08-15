@@ -39,7 +39,7 @@ def generate():
         ), 422
 
     briefing = form.to_briefing()
-    service = GenerationService(settings)
+    service = GenerationService(settings, image_source=briefing["image_source"])
 
     try:
         outcome = service.run(

@@ -593,7 +593,11 @@ a:hover { text-decoration: underline; }
 .slide-visual-sticker {
   align-items: stretch;
   justify-content: center;
-  padding: 24px 6%;
+  /* O padding vertical em % resolve contra a LARGURA: 15% da largura = 12% da
+     altura no canvas 4:5 — os mesmos limites do espalhamento no PNG
+     (`_STICKER_SPREAD_TOP/BOTTOM`). Era 24px fixos, e as caixas espalhadas da
+     prévia colavam na borda enquanto o PNG as segurava a 12%. */
+  padding: 15% 6%;
   container-type: inline-size;
 }
 
@@ -740,14 +744,21 @@ a:hover { text-decoration: underline; }
    caixa. Mesmíssima geometria do sticker (largura, passo, duas camadas) — só a
    tinta muda. A camada de baixo deixa de pintar a etiqueta branca e passa a
    pintar o CONTORNO: `-webkit-text-stroke` centra o traço na borda do glifo,
-   então 0.16em aqui deixam ~0.08em visíveis por fora — a mesma fração que o
+   então 0.24em aqui deixam ~0.12em visíveis por fora — a mesma fração que o
    PNG usa (`_STICKER_OUTLINE_RATIO`), cujo stroke cresce só para fora. A
    camada de cima pinta a letra branca por cima da metade interna do traço. */
 .slide-visual-outline .slide-headline,
 .slide-visual-outline .slide-body-snippet,
 .slide-visual-outline .slide-cta-snippet {
   background: none;
-  -webkit-text-stroke: 0.16em #000;
+  -webkit-text-stroke: 0.24em #000;
+}
+
+/* No outline TODAS as caixas saem SemiBold, como a legenda clássica do
+   TikTok: o corpo em Medium sob um contorno grosso ficava fraco, desigual da
+   headline. Espelha o `bold_all` do PNG. */
+.slide-visual-outline .slide-text-box[data-box="body"] {
+  font-weight: 600;
 }
 
 .slide-visual-outline .sticker-ink-text {
@@ -778,6 +789,19 @@ a:hover { text-decoration: underline; }
 .slide-visual-sticker .slide-text-stack[data-role="hook"] { justify-content: flex-end; }
 .slide-visual-sticker .slide-text-stack[data-role="cta"] { justify-content: center; }
 
+/* Com 2+ caixas COM texto, o slide sai espalhado: a primeira caixa no topo e
+   a última no pé da foto — "pergunta em cima, resposta embaixo", o layout dos
+   photo posts nativos. É o `_sticker_spread_slots` do PNG: primeira no limite
+   de cima, última no de baixo (o padding vertical de 15% acima), miolo
+   distribuído. A classe vem do JS da prévia, que conta as caixas com texto ao
+   carregar e a cada edição — contar por seletor exigiria um :has() dentro de
+   outro (a caixa vazia é `:has(> :empty)`), que é inválido. Fica DEPOIS da
+   regra do CTA para vencer na ordem: no PNG o espalhamento também vence a
+   âncora do papel quando há 2+ caixas. */
+.slide-visual-sticker .slide-text-stack.spread {
+  justify-content: space-between;
+}
+
 /* --- Reposicionamento manual (arraste) ---
    Cada CAIXA arrasta sozinha: no photo post do TikTok a pergunta fica no topo
    da foto e a resposta embaixo, cada uma no seu espaço limpo. Enquanto ninguém
@@ -806,16 +830,22 @@ a:hover { text-decoration: underline; }
 
 .slide-visual-sticker .slide-text-box.positioned {
   position: absolute;
-  /* left/top vêm inline, do arraste. 88% = a largura útil dentro do padding de
-     6% do .slide-visual-sticker, para o texto quebrar igual.
+  /* left/top vêm inline, do arraste.
 
      `width: max-content` (herdado da regra acima) em vez de `fit-content` é o
      que impede o texto de ser reformatado ao ARRASTAR: o espaço disponível de
      um elemento absoluto é `largura do contêiner - left`, então com
      `fit-content` a caixa ia estreitando conforme se arrastava para a direita e
      o texto quebrava em mais linhas no meio do gesto. `max-content` não olha o
-     espaço disponível, e o teto de 88% vale igual nos dois estados. */
-  max-width: 88%;
+     espaço disponível.
+
+     100%, e não 88%: o containing block do elemento absoluto é o
+     `.slide-text-stack` (position: relative), que já mede 88% do slide — o
+     percentual resolve contra ELE, não contra o visual. Com 88% o teto de
+     quebra encolhia para ~77% do slide no instante do agarre e o texto
+     requebrava em mais linhas no primeiro arraste. 100% do stack = a mesma
+     largura útil da caixa em fluxo, então mover não reflui o texto. */
+  max-width: 100%;
   transform: translate(-50%, -50%);
   margin: 0;
   z-index: 2;

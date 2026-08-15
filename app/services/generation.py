@@ -53,10 +53,14 @@ class GenerationService:
     # alguém em cena, e é a galeria da prévia que absorve as sobras.
     HOOK_POOL_SIZE = 6
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, image_source: str = ""):
         self._settings = settings
         self._composer: TextComposer = build_text_composer(settings)
-        self._pinterest: PinterestClient = build_pinterest_client(settings)
+        # `image_source` é a escolha da UI (o seletor de fonte): vale para esta
+        # geração e vence o IMAGE_PROVIDER do ambiente. Vazio = ambiente manda.
+        self._pinterest: PinterestClient = build_pinterest_client(
+            settings, override=image_source
+        )
         self._ranking: RankingProvider = build_ranking_provider(settings)
         self._vision: VisionRankingProvider | None = build_vision_provider(settings)
         self._store: SessionStore = get_store(settings.session_ttl_minutes)

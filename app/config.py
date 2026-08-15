@@ -30,8 +30,18 @@ HOOK_SUBJECTS = ("woman", "person", "off")
 _DEFAULT_SCENE_HINTS = "aesthetic lifestyle travel food"
 
 # De onde vêm as fotos. "auto" mantém a escada histórica (token oficial →
-# chave do Unsplash → scraping → mock); os demais fixam um cliente.
-IMAGE_PROVIDERS = ("auto", "pinterest_v5", "pinterest_scrape", "unsplash", "mock")
+# chave do Unsplash → mock); os demais fixam um cliente. Os modos com
+# Instagram leem a API interna do site (sem token) — opt-in explícito, como o
+# pinterest_scrape: nunca entram sozinhos no "auto".
+IMAGE_PROVIDERS = (
+    "auto",
+    "pinterest_v5",
+    "pinterest_scrape",
+    "unsplash",
+    "instagram_scrape",
+    "instagram_pinterest",
+    "mock",
+)
 
 
 def _hook_hints(subject: str) -> str:

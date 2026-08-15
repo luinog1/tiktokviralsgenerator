@@ -160,7 +160,10 @@ def generate():
     # "Content Dashboard Last updated".
     clean_text = "\n\n".join(blocks)
 
-    service = GenerationService(current_app.config["SETTINGS"])
+    service = GenerationService(
+        current_app.config["SETTINGS"],
+        image_source=(form.image_source.data or "").strip(),
+    )
     try:
         outcome = service.run(
             raw_text=clean_text,

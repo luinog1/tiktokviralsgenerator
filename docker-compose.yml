@@ -17,6 +17,9 @@ services:
       - ./templates:/app/templates:ro
       - ./static:/app/static:ro
       - ./run.py:/app/run.py:ro
+      # A pessoa fixada vive em instance/pinned_person.json — sem este volume o
+      # pin era gravado dentro do container e sumia no próximo up/recreate.
+      - ./instance:/app/instance
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5000/health"]
       interval: 30s

@@ -159,6 +159,18 @@
       <button type="button" class="btn btn-ghost btn-sm" id="js-add-keyword">+ Adicionar palavra</button>
     </fieldset>
 
+    <div class="field">
+      <label for="image_source">{{ form.image_source.label.text }}</label>
+      {{ form.image_source(id="image_source", class_="input") }}
+      <p class="small muted">
+        Vale só para esta geração. No <strong>Instagram</strong> a busca é por
+        hashtag (derivada do tema, sem espaços e sem acentos) — escreva
+        <code>#hashtag</code> ou <code>@perfil</code> no tema/palavras-chave
+        para mandar na busca. Os modos sem token leem a API interna dos sites;
+        as ressalvas do README valem aqui.
+      </p>
+    </div>
+
     {% include "_pinned_person.html" %}
 
     <div class="form-actions">

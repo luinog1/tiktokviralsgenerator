@@ -254,6 +254,26 @@
       const bodyDisplay = card.querySelector(".slide-body-snippet");
       const ctaDisplay = card.querySelector(".slide-cta-snippet");
 
+      // Espelha o espalhamento do PNG: com 2+ caixas com texto, a primeira vai
+      // para o topo e a última para o pé (`justify-content: space-between`,
+      // via a classe .spread). Contado aqui — e refeito a cada edição — porque
+      // a caixa vazia é `:has(> :empty)` no CSS, e um :has() dentro de outro
+      // :has() é seletor inválido. O hook fica de fora: é uma caixa só,
+      // ancorada embaixo, como no PNG.
+      const syncSpread = () => {
+        const stack = card.querySelector(".js-box-stack");
+        if (!stack) return;
+        if ((stack.dataset.role || "value") === "hook") return;
+        const filled = Array.from(
+          stack.querySelectorAll(".slide-text-box")
+        ).filter((box) => {
+          const first = box.firstElementChild;
+          return first && first.textContent.trim() !== "";
+        }).length;
+        stack.classList.toggle("spread", filled >= 2);
+      };
+      syncSpread();
+
       // No estilo sticker a frase vive em duas camadas: o inline pinta as
       // etiquetas brancas e a cópia `.sticker-ink-layer` desenha as letras por cima
       // (ver o CSS). As duas precisam receber o mesmo texto — se só a de baixo
@@ -265,6 +285,7 @@
           ? display.parentElement.querySelector(".sticker-ink-text")
           : null;
         if (ink) ink.textContent = value;
+        syncSpread();
       };
 
       // Mapear campos pela ordem: headline, body, cta
@@ -357,9 +378,18 @@
           return { left, right, top, bottom, width: right - left, height: bottom - top };
         };
 
+        // A fração gravada (box_positions) é do CANVAS inteiro — a convenção do
+        // PNG. Mas left/top em % resolvem contra o containing block do elemento
+        // absoluto, que é o .slide-text-stack (position: relative), menor que o
+        // visual por causa do padding. Sem converter, a caixa da prévia não
+        // ficava onde o PNG a desenha e dava um pequeno salto no agarre.
         const place = (x, y) => {
-          box.style.left = `${(x * 100).toFixed(2)}%`;
-          box.style.top = `${(y * 100).toFixed(2)}%`;
+          const area = visual.getBoundingClientRect();
+          const stackRect = stack.getBoundingClientRect();
+          const lx = (x * area.width + area.left - stackRect.left) / stackRect.width;
+          const ly = (y * area.height + area.top - stackRect.top) / stackRect.height;
+          box.style.left = `${(lx * 100).toFixed(2)}%`;
+          box.style.top = `${(ly * 100).toFixed(2)}%`;
           box.classList.add("positioned");
         };
 

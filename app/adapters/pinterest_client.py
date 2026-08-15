@@ -1,4 +1,4 @@
-"""Cliente de imagens — Pinterest (oficial ou scraping), Unsplash e mock.
+"""Cliente de imagens — Pinterest (oficial ou scraping), Instagram, Unsplash e mock.
 
 Fluxo de prioridade (`IMAGE_PROVIDER=auto`, o default):
 1. PINTEREST_ACCESS_TOKEN definido → Pinterest v5 (requer Standard Access para /search)
@@ -6,10 +6,14 @@ Fluxo de prioridade (`IMAGE_PROVIDER=auto`, o default):
 3. Nenhuma chave                   → Mock SVG (sempre funciona)
 
 `IMAGE_PROVIDER=pinterest_scrape` troca tudo isso pelo Pinterest **sem token**
-(via `pinterest-dl`). É opt-in explícito: scraping nunca entra sozinho.
+(via `pinterest-dl`). `instagram_scrape` busca no Instagram sem token (a API
+interna do site, os mesmos endpoints do instagram-php-scraper) e
+`instagram_pinterest` combina as duas buscas, intercaladas. Todos são opt-in
+explícitos: scraping nunca entra sozinho.
 
 Variáveis de ambiente:
-    IMAGE_PROVIDER           → auto | pinterest_v5 | pinterest_scrape | unsplash | mock
+    IMAGE_PROVIDER           → auto | pinterest_v5 | pinterest_scrape | unsplash
+                               | instagram_scrape | instagram_pinterest | mock
     PINTEREST_ACCESS_TOKEN   → token Pinterest
     PINTEREST_API_BASE_URL   → default: https://api.pinterest.com/v5
     UNSPLASH_ACCESS_KEY      → chave pública Unsplash (Access Key, não Secret Key)
@@ -21,13 +25,16 @@ import logging
 import os
 import random
 import re
+import unicodedata
 import importlib.util
 from dataclasses import dataclass
+from itertools import zip_longest
+from types import SimpleNamespace
 from typing import Any, Iterable, Protocol, runtime_checkable
 
 import requests
 
-from app.config import Settings
+from app.config import IMAGE_PROVIDERS, Settings
 
 logger = logging.getLogger(__name__)
 
@@ -452,6 +459,23 @@ def _covers_slide(media: Any, minimum: tuple[int, int]) -> bool:
     return width >= min_width and height >= min_height
 
 
+def _cut_pool(medias: list[Any], limit: int, min_resolution: tuple[int, int]) -> list[Any]:
+    """O recorte comum das buscas sem token (Pinterest e Instagram).
+
+    Alta resolução e retrato primeiro, com as exigências caindo em ordem quando
+    o acervo não dá para elas, e o ponto de corte sorteado para a mesma busca
+    não devolver sempre as mesmas fotos. Ver `PinterestScrapeClient._select`
+    para o porquê de cada correção.
+    """
+    sharp = [m for m in medias if _covers_slide(m, min_resolution)]
+    portrait = [m for m in medias if _is_portrait(m)]
+    for pool in ([m for m in sharp if _is_portrait(m)], sharp, portrait, medias):
+        if len(pool) >= limit:
+            break
+    start = random.randint(0, max(0, len(pool) - limit))
+    return pool[start : start + limit]
+
+
 def _load_pinterest_dl() -> Any | None:
     try:
         from pinterest_dl import PinterestDL
@@ -594,13 +618,7 @@ class PinterestScrapeClient:
         ainda é melhor que um carrossel de gradientes — e a foto pequena aparece
         na galeria da prévia, onde dá para trocar.
         """
-        sharp = [m for m in medias if _covers_slide(m, self._min_resolution)]
-        portrait = [m for m in medias if _is_portrait(m)]
-        for pool in ([m for m in sharp if _is_portrait(m)], sharp, portrait, medias):
-            if len(pool) >= limit:
-                break
-        start = random.randint(0, max(0, len(pool) - limit))
-        return pool[start : start + limit]
+        return _cut_pool(medias, limit, self._min_resolution)
 
     @staticmethod
     def _to_image(media: Any, query: str) -> PinterestImage:
@@ -625,25 +643,449 @@ class PinterestScrapeClient:
 
 
 # ---------------------------------------------------------------------------
+# Instagram sem token — os endpoints web do site (como o instagram-php-scraper)
+# ---------------------------------------------------------------------------
+
+# O app id do site web do Instagram — o mesmo que o instagram-php-scraper manda
+# em toda chamada anônima. Sem ele, os endpoints /api/v1/ respondem 401 direto.
+_IG_APP_ID = "936619743392459"
+_IG_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
+
+def _ig_slug(text: str) -> str:
+    """Hashtag a partir de texto livre: sem acento, sem espaço, minúscula."""
+    ascii_text = (
+        unicodedata.normalize("NFKD", str(text or ""))
+        .encode("ascii", "ignore")
+        .decode("ascii")
+    )
+    return re.sub(r"[^a-z0-9_]", "", ascii_text.lower())
+
+
+def _ig_username(query: str) -> str:
+    """O @perfil digitado na busca, se houver. Vazio = busca por hashtag."""
+    for token in str(query or "").split():
+        if token.startswith("@") and len(token) > 1:
+            return re.sub(r"[^a-z0-9._]", "", token[1:].lower())
+    return ""
+
+
+def _ig_dedupe(entries: list[Any]) -> list[Any]:
+    """O mesmo post aparece em `top` e `recent` — a primeira ocorrência vale."""
+    seen: set[str] = set()
+    unique: list[Any] = []
+    for entry in entries:
+        if entry.media_id in seen:
+            continue
+        seen.add(entry.media_id)
+        unique.append(entry)
+    return unique
+
+
+def _ig_entry_from_node(node: Any) -> SimpleNamespace | None:
+    """Post no formato GraphQL (perfil e fallback de hashtag) → entrada comum.
+
+    A entrada tem `.resolution` para reusar o recorte do pool (`_cut_pool`).
+    Vídeo fica de fora: o slide é uma foto.
+    """
+    if not isinstance(node, dict) or node.get("is_video"):
+        return None
+    src = str(node.get("display_url") or "")
+    if not src:
+        return None
+    dims = node.get("dimensions") or {}
+    caption_edges = (node.get("edge_media_to_caption") or {}).get("edges") or []
+    caption = ""
+    if caption_edges:
+        caption = str(((caption_edges[0] or {}).get("node") or {}).get("text") or "")
+    try:
+        resolution = (int(dims.get("width") or 0), int(dims.get("height") or 0))
+    except (TypeError, ValueError):
+        resolution = (0, 0)
+    return SimpleNamespace(
+        media_id=str(node.get("id") or node.get("shortcode") or ""),
+        code=str(node.get("shortcode") or ""),
+        src=src,
+        thumb=str(node.get("thumbnail_src") or ""),
+        resolution=resolution,
+        # `accessibility_caption` ("May be an image of 1 person…") é o que
+        # alimenta o casting por metadado, como o alt do Pinterest/Unsplash.
+        alt=str(node.get("accessibility_caption") or "") or caption,
+        username=str((node.get("owner") or {}).get("username") or ""),
+    )
+
+
+def _ig_entry_from_v1(media: Any) -> SimpleNamespace | None:
+    """Post no formato da API v1 (seções de hashtag) → entrada comum."""
+    if not isinstance(media, dict):
+        return None
+    media_type = media.get("media_type")
+    if media_type == 2:  # vídeo/reel
+        return None
+    if media_type == 8:  # carrossel: a primeira foto é a capa
+        children = media.get("carousel_media") or []
+        cover = next(
+            (c for c in children if isinstance(c, dict) and c.get("media_type") == 1),
+            None,
+        )
+        if cover is not None:
+            media = {
+                **media,
+                **{
+                    key: cover[key]
+                    for key in ("image_versions2", "original_width", "original_height")
+                    if key in cover
+                },
+            }
+    candidates = (media.get("image_versions2") or {}).get("candidates") or []
+    candidates = [c for c in candidates if isinstance(c, dict) and c.get("url")]
+    if not candidates:
+        return None
+
+    def _width(candidate: dict[str, Any]) -> int:
+        try:
+            return int(candidate.get("width") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    best = max(candidates, key=_width)
+    smallest = min(candidates, key=_width)
+    try:
+        resolution = (
+            int(media.get("original_width") or _width(best)),
+            int(media.get("original_height") or best.get("height") or 0),
+        )
+    except (TypeError, ValueError):
+        resolution = (0, 0)
+    caption = str(((media.get("caption") or {}) or {}).get("text") or "")
+    code = str(media.get("code") or "")
+    return SimpleNamespace(
+        media_id=str(media.get("pk") or media.get("id") or code),
+        code=code,
+        src=str(best.get("url") or ""),
+        thumb=str(smallest.get("url") or "") if smallest is not best else "",
+        resolution=resolution,
+        alt=str(media.get("accessibility_caption") or "") or caption,
+        username=str((media.get("user") or {}).get("username") or ""),
+    )
+
+
+def _ig_tag_entries(payload: dict[str, Any]) -> list[Any]:
+    """Fotos do payload de hashtag, nas DUAS formas que o endpoint responde.
+
+    O contrato é interno e o Instagram alterna entre as seções da API v1
+    (`data.top/recent.sections[].layout_content.medias[].media`) e o formato
+    GraphQL antigo (`…hashtag.edge_hashtag_to_media.edges[].node`). Ler as
+    duas custa pouco e é o que evita "parou de funcionar" num rollout deles.
+    """
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    entries: list[Any] = []
+    for section_key in ("top", "recent"):
+        sections = (data.get(section_key) or {}).get("sections") or []
+        for section in sections:
+            medias = ((section or {}).get("layout_content") or {}).get("medias") or []
+            for item in medias:
+                entry = _ig_entry_from_v1((item or {}).get("media"))
+                if entry is not None:
+                    entries.append(entry)
+    for container in (data, payload.get("graphql") or {}):
+        if not isinstance(container, dict):
+            continue
+        edges = (
+            ((container.get("hashtag") or {}).get("edge_hashtag_to_media") or {}).get(
+                "edges"
+            )
+            or []
+        )
+        for edge in edges:
+            entry = _ig_entry_from_node((edge or {}).get("node"))
+            if entry is not None:
+                entries.append(entry)
+    return _ig_dedupe(entries)
+
+
+def _instagram_reason(response: requests.Response) -> str:
+    """Motivo legível de um HTTP de erro do Instagram — sem falar de chave,
+    porque não existe chave: o acesso anônimo é liberado e bloqueado por IP."""
+    code = response.status_code
+    if code in (401, 403):
+        return (
+            f"Instagram bloqueou o acesso anônimo (HTTP {code}) — sem login, o "
+            "site libera e bloqueia por IP. Tente de novo mais tarde."
+        )
+    if code == 429:
+        return "Instagram está limitando a taxa de chamadas (HTTP 429)."
+    return f"Instagram respondeu HTTP {code}."
+
+
+class InstagramScrapeClient:
+    """Instagram sem token — os endpoints web anônimos do próprio site.
+
+    São os mesmos endpoints que o `instagram-php-scraper` usa: o perfil em
+    `/api/v1/users/web_profile_info/` e a hashtag em `/api/v1/tags/web_info/`,
+    ambos com o header `x-ig-app-id` do site. Não há credencial: o Instagram
+    libera (e bloqueia) o acesso anônimo por IP, então a busca funciona na
+    maior parte do tempo e cai no gradiente mock com o motivo quando o site
+    devolve a página de login — o mesmo contrato instável do
+    `pinterest_scrape`, com as mesmas ressalvas de compliance (ver README).
+
+    A query vira **uma hashtag**: o Instagram não busca texto livre sem login.
+    As palavras das queries de casting (HOOK/SCENE_QUERY_HINTS) são removidas
+    antes — "#rotinamatinalwomanportrait" não existe — e um `@perfil` ou
+    `#hashtag` digitados no tema/palavras-chave vencem a derivação.
+    """
+
+    name = "instagram_scrape"
+    _BASE = "https://www.instagram.com"
+
+    def __init__(
+        self,
+        timeout: int = 20,
+        min_resolution: tuple[int, int] = (0, 0),
+        hint_words: Iterable[str] = (),
+    ):
+        self._timeout = timeout
+        # O mesmo piso do pinterest_scrape: foto menor que o slide é ampliada
+        # no render e chega ao feed borrada.
+        self._min_resolution = min_resolution
+        self._hint_words = {w.strip().lower() for w in hint_words if w.strip()}
+        # Por que a última busca caiu no mock. Vazio = não caiu.
+        self.last_fallback_reason = ""
+
+    def search(self, query: str, limit: int = 8) -> list[PinterestImage]:
+        self.last_fallback_reason = ""
+        username = _ig_username(query)
+        tag = "" if username else self._tag_from(query)
+        if not username and not tag:
+            self.last_fallback_reason = (
+                "A busca no Instagram precisa de uma #hashtag, um @perfil ou "
+                "um tema com letras — a query ficou vazia depois da limpeza."
+            )
+            logger.warning(self.last_fallback_reason)
+            return MockPinterestClient().search(query, limit)
+        scope = f"@{username}" if username else f"#{tag}"
+
+        try:
+            if username:
+                entries = self._profile_entries(username)
+            else:
+                entries = _ig_tag_entries(
+                    self._get_json("/api/v1/tags/web_info/", {"tag_name": tag})
+                )
+        except requests.Timeout:
+            logger.warning("Instagram timeout — usando fallback mock.")
+            self.last_fallback_reason = f"Instagram não respondeu em {self._timeout}s."
+            return MockPinterestClient().search(query, limit)
+        except ValueError:
+            # HTML no lugar do JSON: o muro de login do Instagram.
+            logger.warning("Instagram devolveu HTML (muro de login) — fallback mock.")
+            self.last_fallback_reason = (
+                "O Instagram devolveu a página de login em vez de dados — o "
+                "acesso anônimo está bloqueado para este IP no momento."
+            )
+            return MockPinterestClient().search(query, limit)
+        except requests.RequestException as exc:
+            logger.warning("Instagram erro: %s — usando fallback mock.", type(exc).__name__)
+            self.last_fallback_reason = self.last_fallback_reason or (
+                f"Falha de rede ao chamar o Instagram ({type(exc).__name__})."
+            )
+            return MockPinterestClient().search(query, limit)
+
+        if not entries:
+            logger.info("Instagram sem resultados para %s.", scope)
+            self.last_fallback_reason = self.last_fallback_reason or (
+                f"A busca no Instagram não retornou fotos para {scope}."
+            )
+            return MockPinterestClient().search(query, limit)
+
+        selected = _cut_pool(entries, limit, self._min_resolution)
+        logger.info(
+            "Instagram retornou %d imagens para %s (pool de %d, %d acima do piso)",
+            len(selected), scope, len(entries),
+            sum(1 for e in entries if _covers_slide(e, self._min_resolution)),
+        )
+        return [self._to_image(entry, scope) for entry in selected]
+
+    # ---- helpers ----
+
+    def _tag_from(self, query: str) -> str:
+        tokens = str(query or "").split()
+        explicit = next((t for t in tokens if t.startswith("#") and len(t) > 1), "")
+        if explicit:
+            return _ig_slug(explicit)
+        words = [t for t in tokens if t.lower() not in self._hint_words]
+        return _ig_slug("".join(words))
+
+    def _get_json(self, path: str, params: dict[str, str]) -> dict[str, Any]:
+        response = requests.get(
+            f"{self._BASE}{path}",
+            params=params,
+            headers={
+                "User-Agent": _IG_USER_AGENT,
+                "x-ig-app-id": _IG_APP_ID,
+                "Accept": "*/*",
+                "Referer": f"{self._BASE}/",
+            },
+            timeout=self._timeout,
+        )
+        if response.status_code >= 400:
+            logger.warning(
+                "Instagram HTTP %d: %s", response.status_code, response.text[:200]
+            )
+            self.last_fallback_reason = _instagram_reason(response)
+            response.raise_for_status()
+        return response.json() or {}
+
+    def _profile_entries(self, username: str) -> list[Any]:
+        payload = self._get_json(
+            "/api/v1/users/web_profile_info/", {"username": username}
+        )
+        user = (payload.get("data") or {}).get("user") or {}
+        if user.get("is_private"):
+            self.last_fallback_reason = (
+                f"O perfil @{username} é privado — sem fotos para o carrossel."
+            )
+            return []
+        edges = (user.get("edge_owner_to_timeline_media") or {}).get("edges") or []
+        entries = [
+            entry
+            for entry in (_ig_entry_from_node((edge or {}).get("node")) for edge in edges)
+            if entry is not None
+        ]
+        return _ig_dedupe(entries)
+
+    def _to_image(self, entry: Any, scope: str) -> PinterestImage:
+        if entry.code:
+            source = f"{self._BASE}/p/{entry.code}/"
+        elif scope.startswith("@"):
+            source = f"{self._BASE}/{scope[1:]}/"
+        else:
+            source = f"{self._BASE}/explore/tags/{scope.lstrip('#')}/"
+        by = f"@{entry.username}" if entry.username else scope
+        return PinterestImage(
+            # O prefixo evita colisão de id com pins na busca combinada.
+            image_id=f"ig-{entry.media_id}",
+            image_url=entry.src,
+            thumb_url=entry.thumb,
+            source_url=source,
+            title=(entry.alt or scope)[:200],
+            description="",
+            attribution_text=f"{by} no Instagram",
+        )
+
+
+class CombinedImageClient:
+    """Mais de uma busca na mesma geração — Instagram e Pinterest, intercalados.
+
+    Cada cliente busca com o MESMO limite e o resultado é intercalado (um de
+    cada, na ordem da lista) até fechar o limite: metade de cada fonte quando
+    as duas respondem, e uma preenche o que a outra não trouxe. Resultado mock
+    de um cliente que caiu no fallback fica de fora — gradiente sintético no
+    meio de fotos reais só polui a galeria. Sem NENHUMA foto real, o mock
+    volta com os motivos somados, como nos outros clientes.
+    """
+
+    def __init__(self, clients: list[Any], name: str = "combined"):
+        self._clients = clients
+        self.name = name
+        # Por que a última busca caiu no mock. Vazio = não caiu.
+        self.last_fallback_reason = ""
+
+    def search(self, query: str, limit: int = 8) -> list[PinterestImage]:
+        self.last_fallback_reason = ""
+        pools: list[list[PinterestImage]] = []
+        reasons: list[str] = []
+        for client in self._clients:
+            try:
+                found = client.search(query, limit=limit)
+            except Exception as exc:  # pragma: no cover - defensivo
+                logger.warning(
+                    "Busca combinada: %s falhou (%s).",
+                    getattr(client, "name", "?"), type(exc).__name__,
+                )
+                found = []
+            real = [img for img in found if not is_mock_image(img)]
+            if not real:
+                reasons.append(
+                    getattr(client, "last_fallback_reason", "")
+                    or f"{getattr(client, 'name', 'cliente')} não retornou fotos."
+                )
+            pools.append(real)
+
+        merged: list[PinterestImage] = []
+        seen: set[str] = set()
+        for group in zip_longest(*pools):
+            for img in group:
+                if img is None or img.image_id in seen:
+                    continue
+                seen.add(img.image_id)
+                merged.append(img)
+        if not merged:
+            self.last_fallback_reason = (
+                " ".join(reasons) or "Nenhuma das buscas combinadas retornou fotos."
+            )
+            return MockPinterestClient().search(query, limit)
+        return merged[:limit]
+
+    def related(self, pin_url: str, limit: int = 8) -> list[PinterestImage]:
+        """Pins relacionados (pessoa fixada) — repassado a quem sabe responder."""
+        for client in self._clients:
+            related = getattr(client, "related", None)
+            if callable(related):
+                return related(pin_url, limit=limit)
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Fábrica — escolhe o melhor cliente disponível automaticamente
 # ---------------------------------------------------------------------------
 
-def build_pinterest_client(settings: Settings) -> PinterestClient:
+def _pinterest_scrape_client(settings: Settings) -> PinterestScrapeClient:
+    return PinterestScrapeClient(
+        timeout=settings.request_timeout_seconds,
+        # O piso de resolução é o próprio slide: exigir mais seria arbitrário
+        # e exigir menos deixaria entrar foto que o render precisa ampliar.
+        min_resolution=(settings.slide_width, settings.slide_height),
+    )
+
+
+def _instagram_scrape_client(settings: Settings) -> InstagramScrapeClient:
+    return InstagramScrapeClient(
+        timeout=settings.request_timeout_seconds,
+        min_resolution=(settings.slide_width, settings.slide_height),
+        # As palavras das queries de casting não entram na hashtag derivada.
+        hint_words=f"{settings.hook_query_hints} {settings.scene_query_hints}".split(),
+    )
+
+
+def build_pinterest_client(settings: Settings, override: str = "") -> PinterestClient:
     """Cliente de imagens conforme `IMAGE_PROVIDER`.
 
+    `override` é a escolha feita na UI (o seletor de fonte dos formulários):
+    vale só para aquela geração e vence o ambiente. Vazio ou desconhecido, o
+    `IMAGE_PROVIDER` do ambiente decide, como sempre.
+
     Em `auto` (default) vale a escada de sempre: token oficial → chave do
-    Unsplash → mock. O scraping fica **de fora** do automático de propósito —
-    ele lê uma API não documentada do Pinterest e as regras de uso do site são
-    problema de quem publica (ver README). Entrar sozinho num ambiente sem
-    chave transformaria "esqueci de configurar" em "estou raspando o
-    Pinterest", que não é uma decisão que o app deva tomar pelo usuário.
+    Unsplash → mock. O scraping (Pinterest sem token, Instagram e o modo
+    combinado) fica **de fora** do automático de propósito — ele lê APIs não
+    documentadas e as regras de uso dos sites são problema de quem publica
+    (ver README). Entrar sozinho num ambiente sem chave transformaria
+    "esqueci de configurar" em "estou raspando o Pinterest/Instagram", que
+    não é uma decisão que o app deva tomar pelo usuário.
 
     Uma escolha explícita que não dá para atender (provider sem credencial)
     cai na mesma escada com um aviso no log, em vez de devolver um cliente que
     só sabe falhar.
     """
     unsplash_key = os.environ.get("UNSPLASH_ACCESS_KEY", "").strip()
-    choice = settings.image_provider
+    choice = (override or "").strip().lower() or settings.image_provider
+    if choice not in IMAGE_PROVIDERS:
+        choice = settings.image_provider
 
     if choice == "mock":
         logger.info("IMAGE_PROVIDER=mock — usando cliente mock.")
@@ -652,12 +1094,16 @@ def build_pinterest_client(settings: Settings) -> PinterestClient:
         # Sem o pacote, o cliente ainda é devolvido: ele explica a ausência no
         # `last_fallback_reason`, que a prévia mostra. Trocar por outro provider
         # aqui esconderia a única pista de por que o carrossel saiu diferente.
-        logger.info("IMAGE_PROVIDER=pinterest_scrape — Pinterest sem token.")
-        return PinterestScrapeClient(
-            timeout=settings.request_timeout_seconds,
-            # O piso de resolução é o próprio slide: exigir mais seria arbitrário
-            # e exigir menos deixaria entrar foto que o render precisa ampliar.
-            min_resolution=(settings.slide_width, settings.slide_height),
+        logger.info("Fonte de imagens: Pinterest sem token.")
+        return _pinterest_scrape_client(settings)
+    if choice == "instagram_scrape":
+        logger.info("Fonte de imagens: Instagram sem token.")
+        return _instagram_scrape_client(settings)
+    if choice == "instagram_pinterest":
+        logger.info("Fonte de imagens: Instagram + Pinterest (sem token).")
+        return CombinedImageClient(
+            [_instagram_scrape_client(settings), _pinterest_scrape_client(settings)],
+            name="instagram_pinterest",
         )
     if choice == "pinterest_v5":
         if settings.pinterest_configured:
