@@ -10,7 +10,7 @@ import pytest
 
 from app.main import create_app
 from app.config import Settings
-from app.services.session_store import reset_store
+from app.services.session_store import get_store, reset_store
 
 
 @pytest.fixture
@@ -587,3 +587,140 @@ def test_generate_with_pasted_panel_in_raw_text_skips_the_llm(client):
     # Sem aviso de composer mock: o composer não rodou.
     assert "Composição em modo mock" not in body
     assert "i was consistent, but i was still guessing." in body
+
+
+# ---------- proxy de imagem do Instagram (CORP) ----------
+
+
+def test_image_proxy_serves_instagram_cdn_bytes(client, monkeypatch):
+    """O CDN do Instagram manda Cross-Origin-Resource-Policy: same-origin — o
+    navegador baixa a foto e a DESCARTA na checagem de CORP (thumb branco com
+    o alt escrito). A prévia pede ao app, que busca do lado do servidor."""
+    fetched = []
+
+    class _Upstream:
+        status_code = 200
+        content = b"\xff\xd8jpeg-fake"
+        headers = {"Content-Type": "image/jpeg"}
+
+    def _get(url, **kwargs):
+        fetched.append(url)
+        return _Upstream()
+
+    monkeypatch.setattr("app.routes.preview.requests.get", _get)
+    url = "https://scontent-waw2-1.cdninstagram.com/v/t51/foto.jpg?oe=abc"
+    response = client.get("/image-proxy", query_string={"u": url})
+
+    assert response.status_code == 200
+    assert response.data == b"\xff\xd8jpeg-fake"
+    assert response.headers["Content-Type"].startswith("image/jpeg")
+    assert "max-age" in response.headers.get("Cache-Control", "")
+    assert fetched == [url]
+
+
+def test_image_proxy_accepts_the_fbcdn_profile_variant(client, monkeypatch):
+    """O caminho @perfil devolve hosts instagram.f<região>.fna.fbcdn.net — o
+    mesmo CDN com outro domínio, e o mesmo header de CORP."""
+
+    class _Upstream:
+        status_code = 200
+        content = b"ok"
+        headers = {"Content-Type": "image/jpeg"}
+
+    monkeypatch.setattr(
+        "app.routes.preview.requests.get", lambda *a, **k: _Upstream()
+    )
+    response = client.get("/image-proxy", query_string={
+        "u": "https://instagram.fmex19-1.fna.fbcdn.net/v/t51/foto.jpg"
+    })
+    assert response.status_code == 200
+
+
+def test_image_proxy_refuses_anything_that_is_not_the_instagram_cdn(
+    client, monkeypatch
+):
+    """Sem a lista fechada de hosts, o proxy seria um SSRF de brinde."""
+    calls = []
+    monkeypatch.setattr(
+        "app.routes.preview.requests.get",
+        lambda *a, **k: calls.append(a),
+    )
+    for bad in (
+        "https://evil.com/x.jpg",
+        "https://cdninstagram.com.evil.com/x.jpg",
+        "http://scontent.cdninstagram.com/x.jpg",
+        "https://i.pinimg.com/originals/a.jpg",
+        "",
+    ):
+        response = client.get("/image-proxy", query_string={"u": bad})
+        assert response.status_code == 404, bad
+    assert client.get("/image-proxy").status_code == 404
+    assert calls == []
+
+
+def test_image_proxy_maps_upstream_failures_to_502(client, monkeypatch):
+    """URL assinada expirada (403 do CDN) ou rede fora — o thumb quebra só
+    quando a foto está morta mesmo, sem virar 500 na prévia."""
+    import requests as _requests
+
+    class _Dead:
+        status_code = 403
+        content = b""
+        headers = {}
+
+    monkeypatch.setattr("app.routes.preview.requests.get", lambda *a, **k: _Dead())
+    url = "https://scontent.cdninstagram.com/v/morta.jpg"
+    assert client.get("/image-proxy", query_string={"u": url}).status_code == 502
+
+    def _timeout(*a, **k):
+        raise _requests.Timeout()
+
+    monkeypatch.setattr("app.routes.preview.requests.get", _timeout)
+    assert client.get("/image-proxy", query_string={"u": url}).status_code == 502
+
+
+def test_browser_src_proxies_instagram_and_leaves_the_rest_alone(app):
+    from urllib.parse import parse_qs, urlsplit
+
+    from app.routes.preview import browser_src
+
+    with app.test_request_context("/"):
+        original = "https://instagram.fmex19-1.fna.fbcdn.net/v/x.jpg?a=1&b=2"
+        proxied = browser_src(original)
+        assert proxied.startswith("/image-proxy?u=")
+        # O que importa é o round-trip: o `u` decodificado é a URL original,
+        # com a query interna (a=1&b=2) intacta.
+        assert parse_qs(urlsplit(proxied).query)["u"][0] == original
+        # As outras fontes não mandam o header de CORP: passam intactas.
+        pin = "https://i.pinimg.com/originals/x.jpg"
+        assert browser_src(pin) == pin
+        assert browser_src("data:image/svg+xml;utf8,<svg/>").startswith("data:")
+        assert browser_src("") == ""
+
+
+def test_preview_page_sends_instagram_images_through_the_proxy(client):
+    """Integração: com uma foto do Instagram no projeto, a prévia inteira
+    (galeria e fundo do slide) aponta para o proxy — nenhum src direto do
+    CDN sobra para o navegador bloquear."""
+    response = client.post("/generate", data={
+        "raw_text": (
+            "Texto de teste com tamanho suficiente para o formulário. "
+            "Uma frase a mais para garantir a validação."
+        ),
+        "theme": "rotina matinal",
+        "language": "pt-BR",
+        "style": "sticker",
+        "slides_count": "3",
+    }, follow_redirects=False)
+    project_id = response.headers["Location"].rstrip("/").split("/")[-1]
+
+    project = get_store().get(project_id)
+    project.images[0]["image_url"] = (
+        "https://scontent-waw2-1.cdninstagram.com/v/t51/foto.jpg"
+    )
+    project.images[0]["thumb_url"] = ""
+
+    body = client.get(f"/preview/{project_id}").data.decode("utf-8")
+    assert "/image-proxy?u=https://scontent-waw2-1.cdninstagram.com" in body
+    assert 'src="https://scontent' not in body
+    assert "background-image: url('https://scontent" not in body

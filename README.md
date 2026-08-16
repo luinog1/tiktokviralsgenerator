@@ -8,6 +8,20 @@ Aplicação Flask que transforma o texto gerado pelo **goviral.ai** em um carros
 
 ---
 
+## 🎯 O que mudou na v0.18
+
+- 🐛 **As fotos do Instagram saíam brancas na prévia — e o defeito nunca foi da busca** — buscar `@perfil` (ou hashtag) via Apify devolvia os posts certos, com metadado certo (o alt "Photo by BELLE…" e a fonte na legenda), e ainda assim a galeria e o fundo do slide mostravam quadrados brancos. Medido em 2026-08-16: o CDN do Instagram (tanto `scontent-*.cdninstagram.com` quanto `instagram.f*.fna.fbcdn.net`, o host que o caminho de perfil costuma devolver) responde `200` com a foto **e** o header `Cross-Origin-Resource-Policy: same-origin`. O navegador baixa a imagem e a **descarta** na checagem de CORP, porque a página é de outra origem — hotlink de foto do Instagram não renderiza em navegador moderno, com a URL viva e o download do servidor funcionando. É por isso que o sintoma engana: o PNG exportado sai com a foto (render é do servidor) e a prévia não. Nenhum atributo de `<img>` (`referrerpolicy`, `crossorigin`) contorna CORP.
+- ✅ **`/image-proxy` — a prévia pede a foto ao app** — o filtro `browser_src` dos templates troca as URLs do CDN do Instagram por `/image-proxy?u=…` na galeria, no fundo do slide e no `data-image-url` que o JS usa ao trocar de foto; o app baixa do lado do servidor, onde CORP não vale, e devolve com `Cache-Control` para o navegador guardar o thumb. Pinterest, Unsplash e o mock passam intactos — os CDNs deles não mandam o header. **Só hosts do CDN do Instagram passam pelo proxy** (lista fechada; qualquer outro host responde 404, sem chamada de rede): sem isso o endpoint seria um SSRF de brinde. URL assinada que expirou vira 502 — o thumb quebra quando a foto está morta de verdade, que é o contrato documentado das URLs do `scontent` (servem à sessão, não para guardar).
+
+---
+
+## 🎯 O que mudou na v0.17
+
+- ✅ **Unsplash + Pinterest como fonte combinada** — `IMAGE_PROVIDER=unsplash_pinterest`, ou a opção nova **"Unsplash + Pinterest (metade de cada)"** no seletor "Fonte das fotos" dos dois formulários. A mecânica é a mesma do `instagram_pinterest`: cada fonte busca com o mesmo limite, o resultado sai **intercalado** (um de cada) até fechar o carrossel, uma fonte preenche o que a outra não trouxe e o resultado mock de uma fonte que caiu fica de fora. É o combinado para quem tem a chave (gratuita) do Unsplash e quer juntar o acervo dele com a estética do Pinterest — sem tocar no Instagram e portanto sem `APIFY_TOKEN`. A metade Pinterest continua sendo scraping: as [ressalvas de compliance](#️-limitações-e-compliance) valem inteiras e o modo nunca entra sozinho no `auto`.
+- ✅ **Unsplash sem chave falha rápido e nomeia o que falta** — no modo combinado o cliente Unsplash existe mesmo sem `UNSPLASH_ACCESS_KEY` (o par entra inteiro, como o Instagram sem token no outro combinado). Em vez de gastar um round-trip fadado ao 401 — cujo motivo diria "chave recusada", de uma chave que **não existe** —, a busca cai no mock localmente com "sem UNSPLASH_ACCESS_KEY configurada". Como nos outros combinados, o motivo só aparece na prévia quando as DUAS fontes falham; com o Pinterest respondendo, ele preenche e o carrossel sai com fotos.
+
+---
+
 ## 🎯 O que mudou na v0.16
 
 - 🐛 **A busca por hashtag via Apify voltava 1 item e nenhuma foto utilizável** — com tudo configurado certo (`APIFY_TOKEN`, `IMAGE_PROVIDER=instagram_pinterest`), o carrossel caía no gradiente mock com o aviso "A Apify devolveu 1 itens, mas nenhuma foto utilizável". O dataset do run conta o que houve (medido em 2026-08-16): a fase de busca do actor (`search` + `searchType=hashtag`) virou uma consulta ao **Google** (`site:instagram.com/explore/tags/* "aesthetic"`), que casou a hashtag **errada** (#gaesthetic) e devolveu a *entidade do resultado da busca* (`searchTerm`/`postsCount`/`url`) como único item — sem raspar post nenhum ("Crawled 0/1 pages" no log do run). Não era nome de campo trocado, como o aviso hipotetizava: era um dataset sem nenhum post dentro.
@@ -353,7 +367,7 @@ Reaproveitar essa sessão no servidor significaria repassar seus cookies, ou sej
 - **Imagem 1 sempre com o hook sozinho, e nunca em branco** — uma caixa, sem texto de apoio e sem CTA, nos três caminhos de composição.
 - Ordenação no roteiro viral de 3 atos (`hook → problema → agitação → valor → prova → CTA`).
 - Renderização estilo sticker do TikTok — caixas brancas arredondadas com texto preto.
-- Busca de imagens via Pinterest **sem token** (`pinterest-dl`), via **Instagram sem token** (hashtag ou @perfil), via Unsplash ou mock — combinável (Instagram + Pinterest intercalados) e escolhível **por geração** no seletor "Fonte das fotos" dos formulários.
+- Busca de imagens via Pinterest **sem token** (`pinterest-dl`), via **Instagram sem token** (hashtag ou @perfil), via Unsplash ou mock — combinável (Instagram + Pinterest ou Unsplash + Pinterest, intercalados) e escolhível **por geração** no seletor "Fonte das fotos" dos formulários.
 - **Piso de resolução na busca sem token** — só foto que cobre o slide sem ser ampliada, com degradação em ordem quando o tema não tem acervo.
 - Ranking opcional de imagens por endpoint LLM (com fallback determinístico).
 - Qualificação por **visão** opcional (VLM): nota olhando a foto + posição automática do texto + assunto da foto (pessoa/cenário) para o casting.
@@ -415,7 +429,7 @@ python run.py
 | `FLASK_ENV` | `development` | Ambiente Flask |
 | `SECRET_KEY` | `dev-insecure-change-me` | **Definir em produção** |
 | `DEBUG` | `true` | Modo debug |
-| `IMAGE_PROVIDER` | `auto` | De onde vêm as fotos: `auto`, `pinterest_scrape`, `unsplash`, `instagram_scrape`, `instagram_pinterest` ou `mock`. O seletor "Fonte das fotos" dos formulários vence este valor por geração |
+| `IMAGE_PROVIDER` | `auto` | De onde vêm as fotos: `auto`, `pinterest_scrape`, `unsplash`, `instagram_scrape`, `instagram_pinterest`, `unsplash_pinterest` ou `mock`. O seletor "Fonte das fotos" dos formulários vence este valor por geração |
 | `UNSPLASH_ACCESS_KEY` | (vazio) | Access Key do Unsplash — a **única** fonte de imagens com chave. Vazio (com `auto`) → mock |
 | `APIFY_TOKEN` | (vazio) | Token da [Apify](https://apify.com): roda um **actor** que raspa o Instagram com sessão própria e devolve dataset estruturado. É o único transporte com chance na busca por hashtag, e **vence** o `SCRAPEDO_TOKEN` quando os dois existem |
 | `APIFY_ACTOR` | `apify~instagram-scraper` | Qual actor rodar (id com **til** no lugar da barra). Cobre hashtag e `@perfil` |
@@ -458,7 +472,8 @@ Para confirmar o que está ativo:
 
 ```bash
 curl -s http://localhost:5000/health | python -m json.tool
-# providers.images        → "pinterest_scrape" | "unsplash" | "instagram_scrape" | "mock"
+# providers.images        → "pinterest_scrape" | "unsplash" | "instagram_scrape"
+#                           | "instagram_pinterest" | "unsplash_pinterest" | "mock"
 # providers.casting       → "woman" | "person" | "off"
 # providers.vision        → "configured" | "off"
 # images_diagnostic.using_mock → true quando o carrossel sai com gradiente
@@ -630,7 +645,7 @@ Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SL
 ## ⚠️ Limitações e compliance
 
 - **goviral.ai:** ferramenta externa sem API/token. O usuário é responsável por acessar via login Discord e colar o texto no formulário. O ViralPost Studio não automatiza o acesso.
-- **Pinterest sem token (`IMAGE_PROVIDER=pinterest_scrape`):** usa a biblioteca [pinterest-dl](https://github.com/sean1832/pinterest-dl), que lê a API **interna** do site. Três consequências que valem a leitura antes de ligar:
+- **Pinterest sem token (`IMAGE_PROVIDER=pinterest_scrape` — e a metade Pinterest dos combinados `instagram_pinterest` e `unsplash_pinterest`):** usa a biblioteca [pinterest-dl](https://github.com/sean1832/pinterest-dl), que lê a API **interna** do site. Três consequências que valem a leitura antes de ligar:
   1. **Termos de uso.** Acesso automatizado pode conflitar com os [Terms of Service do Pinterest](https://developers.pinterest.com/terms/). A biblioteca declara uso educacional e não é afiliada ao Pinterest. Ligar a opção é decisão de quem publica — por isso ela nunca entra sozinha no modo `auto`.
   2. **Contrato instável.** Uma API interna muda sem aviso e sem versionamento. Quando mudar, a busca falha e o carrossel cai no gradiente mock com o motivo no aviso da prévia — não quebra a aplicação, mas para de trazer fotos.
   3. **Direitos da imagem.** Um pin não é banco de imagens: a foto costuma ser de terceiros e o Pinterest é só o índice. O link do pin vai na atribuição, mas verifique a origem antes de publicar comercialmente.

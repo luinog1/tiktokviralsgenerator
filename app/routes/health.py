@@ -15,9 +15,9 @@ bp = Blueprint("health", __name__)
 def health():
     settings = current_app.config["SETTINGS"]
     # Nome real do cliente de imagens: "pinterest_scrape" | "unsplash" |
-    # "instagram_scrape" | "instagram_pinterest" | "mock". Antes isso era
-    # derivado só de `pinterest_configured`, então uma chave Unsplash válida
-    # ainda aparecia como "mock" aqui.
+    # "instagram_scrape" | "instagram_pinterest" | "unsplash_pinterest" |
+    # "mock". Antes isso era derivado só de `pinterest_configured`, então uma
+    # chave Unsplash válida ainda aparecia como "mock" aqui.
     images_provider = getattr(build_pinterest_client(settings), "name", "unknown")
     payload = {
         "status": "ok",

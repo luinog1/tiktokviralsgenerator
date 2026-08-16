@@ -8,9 +8,12 @@ from __future__ import annotations
 import io
 import logging
 import zipfile
+from urllib.parse import urlsplit
 
+import requests
 from flask import (
     Blueprint,
+    Response,
     abort,
     current_app,
     flash,
@@ -109,6 +112,72 @@ def _box_scales_field(slide: dict) -> str:
         except (TypeError, ValueError):
             continue
     return ";".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Fotos do Instagram na prévia — o CDN deles manda
+# `Cross-Origin-Resource-Policy: same-origin` (medido em 2026-08-16 no
+# scontent-*.cdninstagram.com E no instagram.f*.fna.fbcdn.net): o navegador
+# baixa a foto e a DESCARTA na checagem de CORP, porque a página é de outra
+# origem. O <img> vira o quadrado branco com o alt escrito — com a URL viva e
+# o download do servidor funcionando, que é o que torna o sintoma enganoso.
+# Nenhum atributo (referrerpolicy/crossorigin) contorna CORP; a saída é a
+# prévia pedir a foto AO APP, que a busca do lado do servidor, onde CORP não
+# vale. Só as URLs do CDN do Instagram passam por aqui: as outras fontes não
+# mandam o header, e um proxy aberto viraria SSRF.
+# ---------------------------------------------------------------------------
+
+def _is_instagram_cdn(url: str) -> bool:
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    host = (parts.hostname or "").lower()
+    return parts.scheme == "https" and (
+        host == "cdninstagram.com"
+        or host.endswith(".cdninstagram.com")
+        or host == "fbcdn.net"
+        or host.endswith(".fbcdn.net")
+    )
+
+
+@bp.app_template_filter("browser_src")
+def browser_src(url: str) -> str:
+    """URL que o NAVEGADOR consegue exibir. Foto do Instagram sai proxiada;
+    qualquer outra (Pinterest, Unsplash, data URI do mock) passa intacta."""
+    if not _is_instagram_cdn(url or ""):
+        return url or ""
+    return url_for("preview.image_proxy", u=url)
+
+
+@bp.route("/image-proxy")
+def image_proxy():
+    url = request.args.get("u", "")
+    if not _is_instagram_cdn(url):
+        abort(404)
+    settings = current_app.config["SETTINGS"]
+    try:
+        upstream = requests.get(
+            url,
+            timeout=settings.request_timeout_seconds,
+            # O CDN não redireciona; um redirect aqui seria o proxy sendo
+            # apontado para outro lugar — falha em vez de seguir.
+            allow_redirects=False,
+        )
+    except requests.RequestException as exc:
+        logger.warning("Proxy de imagem falhou (%s).", type(exc).__name__)
+        return Response(status=502)
+    if upstream.status_code != 200:
+        # URL assinada expirada (a prévia é da sessão, não para guardar) ou
+        # CDN indisponível — o thumb quebra só quando a foto está morta mesmo.
+        return Response(status=502)
+    return Response(
+        upstream.content,
+        mimetype=upstream.headers.get("Content-Type", "image/jpeg"),
+        # A URL assinada é imutável enquanto vale: o navegador pode guardar o
+        # thumb em vez de re-proxiar a cada render da prévia.
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @bp.route("/preview/<project_id>")

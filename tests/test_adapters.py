@@ -317,6 +317,24 @@ def test_unsplash_401_explains_the_wrong_key(monkeypatch):
     assert "Access Key" in client.last_fallback_reason
 
 
+def test_unsplash_without_a_key_fails_fast_and_offline(monkeypatch):
+    """Só o modo combinado (unsplash_pinterest) constrói o cliente sem chave.
+    A falha é local — sem gastar um round-trip fadado ao 401 — e o motivo diz
+    "sem chave", não "chave recusada", que mandaria conferir uma chave que
+    não existe."""
+    from app.adapters.pinterest_client import UnsplashClient, is_mock_image
+
+    def _explode(*a, **k):
+        raise AssertionError("sem chave a busca não deveria ir à rede")
+
+    monkeypatch.setattr("app.adapters.pinterest_client.requests.get", _explode)
+    client = UnsplashClient(access_key="")
+    images = client.search("cafe", limit=2)
+
+    assert all(is_mock_image(img) for img in images)
+    assert "UNSPLASH_ACCESS_KEY" in client.last_fallback_reason
+
+
 def _unsplash_payload(photo_id: str = "abc123") -> dict:
     return {
         "total": 400,

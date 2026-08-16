@@ -16,6 +16,7 @@ from app.adapters.pinterest_client import (
     MockPinterestClient,
     PinterestImage,
     PinterestScrapeClient,
+    UnsplashClient,
     build_pinterest_client,
     is_mock_image,
 )
@@ -720,6 +721,30 @@ def test_combined_forwards_related_to_the_client_that_has_it():
     assert [i.image_id for i in combined.related("https://pin", limit=2)] == ["rel-1"]
 
 
+def test_unsplash_pinterest_without_a_key_still_fills_from_pinterest():
+    """A metade sem chave cai no mock (sem ir à rede) e o Pinterest preenche —
+    o mesmo contrato do instagram_pinterest sem APIFY_TOKEN."""
+    combined = CombinedImageClient([
+        UnsplashClient(access_key=""),
+        _StubClient("pinterest_scrape", [_img("p-1"), _img("p-2")]),
+    ], name="unsplash_pinterest")
+    images = combined.search("rotina", limit=2)
+    assert [img.image_id for img in images] == ["p-1", "p-2"]
+
+
+def test_unsplash_pinterest_with_both_down_names_the_missing_key():
+    """Quando as DUAS fontes caem, o motivo somado precisa apontar a chave que
+    falta — e não um "Unsplash recusou a chave" de uma chave que não existe."""
+    combined = CombinedImageClient([
+        UnsplashClient(access_key=""),
+        _StubClient("pinterest_scrape", [], reason="Pinterest sem pins."),
+    ], name="unsplash_pinterest")
+    images = combined.search("rotina", limit=2)
+    assert all(is_mock_image(img) for img in images)
+    assert "UNSPLASH_ACCESS_KEY" in combined.last_fallback_reason
+    assert "Pinterest sem pins." in combined.last_fallback_reason
+
+
 # ---------- fábrica e settings ----------
 
 
@@ -736,6 +761,29 @@ def test_factory_builds_the_combined_client_with_both_sources():
     assert client.name == "instagram_pinterest"
     assert any(isinstance(c, InstagramScrapeClient) for c in client._clients)
     assert any(isinstance(c, PinterestScrapeClient) for c in client._clients)
+
+
+def test_factory_builds_the_unsplash_pinterest_pair(monkeypatch):
+    monkeypatch.setenv("UNSPLASH_ACCESS_KEY", "chave")
+    settings = Settings.from_env({"IMAGE_PROVIDER": "unsplash_pinterest"})
+    client = build_pinterest_client(settings)
+    assert isinstance(client, CombinedImageClient)
+    assert client.name == "unsplash_pinterest"
+    assert any(isinstance(c, UnsplashClient) for c in client._clients)
+    assert any(isinstance(c, PinterestScrapeClient) for c in client._clients)
+
+
+def test_the_unsplash_pinterest_pair_survives_a_missing_key(monkeypatch):
+    """Sem a chave o par entra INTEIRO mesmo assim — como o Instagram sem
+    APIFY_TOKEN no outro combinado: a metade fadada a cair devolve mock com o
+    motivo, o combinado descarta o mock e o Pinterest preenche. Um cliente
+    solo aqui esconderia por que metade das fotos não veio."""
+    monkeypatch.setenv("UNSPLASH_ACCESS_KEY", "")
+    settings = Settings.from_env({"IMAGE_PROVIDER": "unsplash_pinterest"})
+    client = build_pinterest_client(settings)
+    assert isinstance(client, CombinedImageClient)
+    assert client.name == "unsplash_pinterest"
+    assert any(isinstance(c, UnsplashClient) for c in client._clients)
 
 
 def test_ui_override_beats_the_environment_provider():
@@ -757,6 +805,12 @@ def test_instagram_providers_are_valid_settings_values():
     assert Settings.from_env(
         {"IMAGE_PROVIDER": "instagram_pinterest"}
     ).image_provider == "instagram_pinterest"
+
+
+def test_unsplash_pinterest_is_a_valid_settings_value():
+    assert Settings.from_env(
+        {"IMAGE_PROVIDER": "unsplash_pinterest"}
+    ).image_provider == "unsplash_pinterest"
 
 
 def test_instagram_client_inherits_the_slide_floor_and_the_hints():

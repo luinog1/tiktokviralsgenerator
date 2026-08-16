@@ -56,6 +56,21 @@ def test_briefing_carries_the_image_source_choice(app):
         assert form.to_briefing()["image_source"] == "instagram_pinterest"
 
 
+def test_briefing_accepts_the_unsplash_pinterest_source(app):
+    with app.test_request_context("/", method="POST", data={
+        "raw_text": "Texto válido com mais de vinte caracteres para passar.",
+        "theme": "rotina matinal",
+        "language": "pt-BR",
+        "style": "sticker",
+        "slides_count": "3",
+        "script_mode": "auto",
+        "image_source": "unsplash_pinterest",
+    }):
+        form = BriefingForm()
+        assert form.validate_on_submit(), form.errors
+        assert form.to_briefing()["image_source"] == "unsplash_pinterest"
+
+
 def test_briefing_rejects_an_unknown_image_source(app):
     with app.test_request_context("/", method="POST", data={
         "raw_text": "Texto válido com mais de vinte caracteres para passar.",

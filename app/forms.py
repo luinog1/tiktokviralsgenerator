@@ -52,6 +52,7 @@ IMAGE_SOURCE_CHOICES = [
     ("pinterest_scrape", "Só Pinterest (sem token)"),
     ("instagram_scrape", "Só Instagram (sem token)"),
     ("instagram_pinterest", "Instagram + Pinterest (metade de cada)"),
+    ("unsplash_pinterest", "Unsplash + Pinterest (metade de cada)"),
 ]
 
 MODE_CHOICES = [

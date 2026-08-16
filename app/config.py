@@ -32,8 +32,9 @@ _DEFAULT_SCENE_HINTS = "aesthetic lifestyle travel food"
 # De onde vêm as fotos. "auto" é a escada curta (chave do Unsplash → mock);
 # os demais fixam um cliente. A API oficial v5 do Pinterest ("pinterest_v5")
 # foi removida — ela exigia Standard Access que o projeto nunca teve, e o
-# pinterest_scrape faz a mesma busca sem token. Os modos com Instagram e o
-# pinterest_scrape leem APIs internas dos sites — opt-in explícito: nunca
+# pinterest_scrape faz a mesma busca sem token. Os modos com Instagram, o
+# pinterest_scrape e os combinados que o incluem (instagram_pinterest,
+# unsplash_pinterest) leem APIs internas dos sites — opt-in explícito: nunca
 # entram sozinhos no "auto".
 IMAGE_PROVIDERS = (
     "auto",
@@ -41,6 +42,7 @@ IMAGE_PROVIDERS = (
     "unsplash",
     "instagram_scrape",
     "instagram_pinterest",
+    "unsplash_pinterest",
     "mock",
 )
 

@@ -68,7 +68,7 @@
         </header>
 
         <!-- Prévia visual do slide -->
-        <div class="slide-visual{% if stickerish %} slide-visual-sticker{% endif %}{% if style == 'sticker_outline' %} slide-visual-outline{% endif %}" style="background-image: url('{{ image_for_slide[i].image_url if image_for_slide[i] else '' }}');">
+        <div class="slide-visual{% if stickerish %} slide-visual-sticker{% endif %}{% if style == 'sticker_outline' %} slide-visual-outline{% endif %}" style="background-image: url('{{ (image_for_slide[i].image_url | browser_src) if image_for_slide[i] else '' }}');">
           {% if not stickerish %}<div class="slide-overlay"></div>{% endif %}
           {# Cada caixa tem seu próprio contêiner: é o que permite arrastar uma
              de cada vez. As caixas brancas são pintadas por LINHA, no texto
@@ -158,9 +158,9 @@
             <button type="button"
                     class="mini-thumb{% if (form.selected_image_ids[i].data or '') == img.image_id %} selected{% endif %}"
                     data-image-id="{{ img.image_id }}"
-                    data-image-url="{{ img.image_url }}"
+                    data-image-url="{{ img.image_url | browser_src }}"
                     title="{{ img.title | truncate(50) }}">
-              <img src="{{ img.image_url }}" alt="{{ img.title }}" loading="lazy" />
+              <img src="{{ img.image_url | browser_src }}" alt="{{ img.title }}" loading="lazy" />
             </button>
             {% endfor %}
           </div>

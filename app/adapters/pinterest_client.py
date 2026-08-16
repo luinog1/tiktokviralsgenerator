@@ -6,9 +6,9 @@ Fluxo de prioridade (`IMAGE_PROVIDER=auto`, o default):
 
 `IMAGE_PROVIDER=pinterest_scrape` troca isso pelo Pinterest **sem token** (via
 `pinterest-dl`). `instagram_scrape` busca no Instagram sem token (a API interna
-do site, os mesmos endpoints do instagram-php-scraper) e `instagram_pinterest`
-combina as duas buscas, intercaladas. Todos são opt-in explícitos: scraping
-nunca entra sozinho.
+do site, os mesmos endpoints do instagram-php-scraper); `instagram_pinterest`
+e `unsplash_pinterest` combinam duas buscas, intercaladas. Todos os modos com
+scraping são opt-in explícitos: scraping nunca entra sozinho.
 
 A API oficial v5 do Pinterest foi removida: o `/search/pins/` dela exige
 Standard Access (aprovação manual da Pinterest), então o cliente nunca chegou a
@@ -16,7 +16,8 @@ buscar nada — e o `pinterest_scrape` faz a mesma busca sem credencial.
 
 Variáveis de ambiente:
     IMAGE_PROVIDER           → auto | pinterest_scrape | unsplash
-                               | instagram_scrape | instagram_pinterest | mock
+                               | instagram_scrape | instagram_pinterest
+                               | unsplash_pinterest | mock
     UNSPLASH_ACCESS_KEY      → chave pública Unsplash (Access Key, não Secret Key)
     APIFY_TOKEN              → roda um actor da Apify que raspa o Instagram e
                                devolve dataset próprio (vence o Scrape.do)
@@ -212,6 +213,15 @@ class UnsplashClient:
 
     def search(self, query: str, limit: int = 8) -> list[PinterestImage]:
         self.last_fallback_reason = ""
+        if not self._access_key:
+            # Só o modo combinado constrói este cliente sem chave (a fábrica
+            # não devolve o Unsplash solo sem ela). Falhar aqui, sem ir à
+            # rede, deixa o motivo certo: um 401 do Unsplash diria "chave
+            # recusada" — e chave não há.
+            self.last_fallback_reason = (
+                "O Unsplash está sem UNSPLASH_ACCESS_KEY configurada."
+            )
+            return MockPinterestClient().search(query, limit)
         per_page = min(limit, 30)
         page = random.randint(1, self._PAGE_WINDOW)
         try:
@@ -1217,7 +1227,8 @@ class InstagramScrapeClient:
 
 
 class CombinedImageClient:
-    """Mais de uma busca na mesma geração — Instagram e Pinterest, intercalados.
+    """Mais de uma busca na mesma geração — duas fontes intercaladas
+    (Instagram + Pinterest, Unsplash + Pinterest).
 
     Cada cliente busca com o MESMO limite e o resultado é intercalado (um de
     cada, na ordem da lista) até fechar o limite: metade de cada fonte quando
@@ -1349,6 +1360,20 @@ def build_pinterest_client(settings: Settings, override: str = "") -> PinterestC
         return CombinedImageClient(
             [_instagram_scrape_client(settings), _pinterest_scrape_client(settings)],
             name="instagram_pinterest",
+        )
+    if choice == "unsplash_pinterest":
+        # O par entra INTEIRO mesmo sem a chave do Unsplash — a mesma regra do
+        # instagram_pinterest, cujo Instagram também pode estar fadado a cair
+        # (sem APIFY_TOKEN): a fonte que falha devolve mock com o motivo, o
+        # combinado descarta o mock e a outra preenche. Trocar o par por um
+        # cliente solo aqui esconderia POR QUE metade das fotos não veio.
+        logger.info("Fonte de imagens: Unsplash + Pinterest.")
+        return CombinedImageClient(
+            [
+                UnsplashClient(unsplash_key, timeout=settings.request_timeout_seconds),
+                _pinterest_scrape_client(settings),
+            ],
+            name="unsplash_pinterest",
         )
     if choice == "unsplash":
         if unsplash_key:
