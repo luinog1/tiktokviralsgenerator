@@ -1,14 +1,11 @@
-"""A ferramenta interna: o painel do goviral colado inteiro vira carrossel.
+"""Geração de roteiro e importação de painel no mesmo fluxo de carrossel.
 
-O `/create` é o formulário completo — dois modos, um campo por imagem, nº de
-slides. Para quem já tem o roteiro pronto no painel do goviral, quase tudo isso
-é pergunta que o painel já responde: quantas imagens, o que é hook e o que são
-as duas caixas de cada imagem. O que sobra é colar e gerar.
+O endpoint de geração cria a mesma estrutura Hook/Script/Paragraph que o parser
+já consumia. Quem tem um painel antigo também pode colá-lo sem transformação.
 
-A composição é a mesma do modo roteiro (`compose_from_blocks`, chamado pelo
-`GenerationService`): esta rota só traduz o painel em blocos e entrega ao fluxo
-que já existe — nenhum render, ranking ou busca de foto próprios, e nenhum LLM
-no caminho do texto.
+A composição final é a mesma do modo roteiro (`compose_from_blocks`, chamado
+pelo `GenerationService`): depois que o painel está na caixa editável, nenhum
+LLM redistribui o texto durante o render.
 """
 
 from __future__ import annotations
@@ -27,6 +24,7 @@ from flask import (
     url_for,
 )
 
+from app.adapters.content_generator import generate_content_panel
 from app.adapters.goviral_parser import goviral_blocks, parse_goviral
 from app.adapters.text_enhancer import enhance_panel
 from app.forms import MAX_SCRIPT_BLOCKS, GoviralForm
@@ -128,6 +126,74 @@ def enhance():
     return jsonify({"enhanced": True, "raw_text": "\n".join(lines)})
 
 
+@bp.route("/goviral/generate-content", methods=["POST"])
+def generate_content():
+    """Generate Hook/Scripts directly, without depending on goviral.ai.
+
+    The response is the canonical panel text used by the existing parser. The
+    browser puts it in the editable textarea, so generation remains reviewable
+    and the carousel POST stays deterministic after this point.
+    """
+    payload = request.get_json(silent=True) or {}
+    brief = " ".join(str(payload.get("brief") or "").split())
+    audience = " ".join(str(payload.get("audience") or "").split())
+    language = str(payload.get("language") or "auto").strip()
+    try:
+        slide_count = int(payload.get("slide_count") or 6)
+    except (TypeError, ValueError):
+        slide_count = 0
+
+    raw_include_app = payload.get("include_app", True)
+    include_app = (
+        raw_include_app
+        if isinstance(raw_include_app, bool)
+        else str(raw_include_app).strip().lower() not in {"0", "false", "no", "off"}
+    )
+
+    if len(brief) < 10:
+        return jsonify({
+            "generated": False,
+            "reason": "Descreva a ideia, historia ou resultado em pelo menos 10 caracteres.",
+        }), 422
+    if len(brief) > 5000 or len(audience) > 300:
+        return jsonify({
+            "generated": False,
+            "reason": "O briefing ou o publico informado ultrapassa o limite.",
+        }), 422
+    if language not in {"auto", "pt-BR", "en-US", "es-ES"}:
+        return jsonify({"generated": False, "reason": "Idioma invalido."}), 422
+    if not 3 <= slide_count <= MAX_SCRIPT_BLOCKS:
+        return jsonify({
+            "generated": False,
+            "reason": f"Escolha entre 3 e {MAX_SCRIPT_BLOCKS} imagens.",
+        }), 422
+
+    settings = current_app.config["SETTINGS"]
+    if settings.llm_provider == "mock" or not settings.llm_configured:
+        return jsonify({
+            "generated": False,
+            "reason": (
+                "LLM nao configurado - defina LLM_PROVIDER, LLM_API_BASE_URL, "
+                "LLM_API_KEY e LLM_MODEL."
+            ),
+        }), 503
+
+    result = generate_content_panel(
+        settings,
+        brief=brief,
+        audience=audience,
+        language=language,
+        slide_count=slide_count,
+        include_app=include_app,
+    )
+    if result is None:
+        return jsonify({
+            "generated": False,
+            "reason": "O LLM nao devolveu um roteiro completo e valido. Tente novamente.",
+        }), 502
+    return jsonify({"generated": True, **result})
+
+
 @bp.route("/goviral", methods=["POST"])
 def generate():
     form = GoviralForm()
@@ -155,6 +221,14 @@ def generate():
         )
         blocks = blocks[:MAX_SCRIPT_BLOCKS]
 
+    requested_instagram_images = int(form.instagram_images_count.data or 1)
+    instagram_images_count = min(requested_instagram_images, len(blocks))
+    if requested_instagram_images > len(blocks):
+        warnings.append(
+            f"A cota do Instagram foi ajustada de {requested_instagram_images} "
+            f"para {len(blocks)}, o número de imagens deste carrossel."
+        )
+
     # O corpus da busca de fotos, do ranking e da visão é o texto LIMPO, não o
     # painel colado: com os rótulos dentro, um tema vazio faria a query virar
     # "Content Dashboard Last updated".
@@ -163,6 +237,7 @@ def generate():
     service = GenerationService(
         current_app.config["SETTINGS"],
         image_source=(form.image_source.data or "").strip(),
+        instagram_images_count=instagram_images_count,
     )
     try:
         outcome = service.run(

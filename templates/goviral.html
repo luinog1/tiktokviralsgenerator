@@ -1,30 +1,84 @@
 {% extends "base.html" %}
-{% block title %}Painel do goviral → carrossel — ViralPost Studio{% endblock %}
+{% block title %}Gerador de hooks e scripts - ViralPost Studio{% endblock %}
 
 {% block content %}
 <section class="create-section">
   <header class="section-head">
-    <h1>Painel do goviral → carrossel</h1>
+    <h1>Gerador de hooks e scripts</h1>
     <p>
-      Selecione o painel inteiro no
-      <a href="{{ goviral_url }}" target="_blank" rel="noopener">goviral.ai</a>
-      (<code>Ctrl+A</code>, <code>Ctrl+C</code>) e cole aqui. O
-      <strong>Hook</strong> vira a imagem 1 e cada <strong>Script</strong> vira
-      uma imagem, com o <em>Paragraph 1</em> na caixa de cima e o
-      <em>Paragraph 2</em> na de baixo — sem distribuir campo por campo e sem
-      LLM reescrevendo por cima.
+      Crie o roteiro completo a partir de uma ideia, história ou resultado. O
+      texto gerado continua editável antes de buscar as fotos e montar o
+      carrossel.
     </p>
   </header>
 
   <form method="POST" action="{{ url_for('goviral.generate') }}" class="briefing-form" novalidate>
     {{ form.csrf_token }}
 
+    <section class="goviral-generator" aria-labelledby="goviral-generator-title">
+      <div>
+        <h2 id="goviral-generator-title">Novo roteiro</h2>
+        <p class="small muted">
+          Inclua no briefing os fatos, números e datas que precisam ser
+          preservados. O gerador não inventa resultados pessoais.
+        </p>
+      </div>
+
+      <div class="field">
+        <label for="content-brief">Ideia, história ou resultado *</label>
+        <textarea id="content-brief" class="input textarea" rows="5"
+                  maxlength="5000" autofocus
+                  placeholder="Ex.: nos meus primeiros 6 meses como micro influencer, ganhei $0 em dezembro, $150 em janeiro...; quase desisti em abril e em maio melhorei os vídeos depois de testar os hooks no Go Viral app"></textarea>
+      </div>
+
+      <div class="grid-3">
+        <div class="field">
+          <label for="content-audience">Público</label>
+          <input id="content-audience" class="input" maxlength="300"
+                 placeholder="Ex.: pequenas criadoras de conteúdo" />
+        </div>
+        <div class="field">
+          <label for="content-language">Idioma</label>
+          <select id="content-language" class="input">
+            <option value="auto" selected>Detectar pelo briefing</option>
+            <option value="pt-BR">Português (Brasil)</option>
+            <option value="en-US">English (US)</option>
+            <option value="es-ES">Español (España)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="content-slides">Número de imagens</label>
+          <select id="content-slides" class="input">
+            <option value="5">5 imagens</option>
+            <option value="6" selected>6 imagens (recomendado)</option>
+            <option value="7">7 imagens</option>
+            <option value="8">8 imagens</option>
+            <option value="9">9 imagens</option>
+            <option value="10">10 imagens</option>
+            <option value="12">12 imagens</option>
+          </select>
+        </div>
+      </div>
+
+      <label class="goviral-inline-check" for="content-include-app">
+        <input type="checkbox" id="content-include-app" checked />
+        <span>Incluir uma menção natural ao Go Viral app</span>
+      </label>
+
+      <div class="goviral-generator-actions">
+        <button type="button" class="btn btn-primary" id="goviral-generate-content">
+          Gerar hook e scripts
+        </button>
+        <span class="small muted" id="goviral-status" role="status" aria-live="polite"></span>
+      </div>
+    </section>
+
     <div class="field">
       <label for="raw_text">{{ form.raw_text.label.text }}</label>
       <p class="small muted">
-        O nº de imagens vem do próprio painel (hook + um por script, até
-        {{ max_images }}). Linhas de interface antes do <code>Hook</code>
-        — cabeçalho, "Last updated", "Sign Out" — são descartadas.
+        O roteiro gerado aparece aqui para revisão. Também é possível colar um
+        painel antigo do <a href="{{ goviral_url }}" target="_blank" rel="noopener">goviral.ai</a>;
+        o número de imagens vem do hook + scripts, até {{ max_images }}.
         {% if casting_enabled %}
           A imagem 1 recebe uma foto com
           {{ 'mulher' if hook_subject == 'woman' else 'pessoa' }}; as demais,
@@ -48,7 +102,6 @@
       <button type="button" class="btn btn-ghost" id="goviral-enhance-undo" hidden>
         Desfazer melhoria
       </button>
-      <span class="small muted" id="goviral-status" role="status" aria-live="polite"></span>
       <ol class="goviral-blocks" id="goviral-blocks" hidden></ol>
     </div>
 
@@ -74,21 +127,29 @@
     </div>
     <p class="small muted">
       Tema e palavras-chave só alimentam a <strong>busca de fotos</strong> — o
-      texto do carrossel é o do painel, sempre. Sem tema, a busca usa as
+      texto do carrossel é o roteiro acima, sempre. Sem tema, a busca usa as
       primeiras palavras do hook, e o resultado é mais genérico.
     </p>
 
-    <div class="field">
-      <label for="image_source">{{ form.image_source.label.text }}</label>
-      {{ form.image_source(id="image_source", class_="input") }}
-      <p class="small muted">
-        Vale só para esta geração. No <strong>Instagram</strong> a busca é por
-        hashtag (derivada do tema, sem espaços e sem acentos) — escreva
-        <code>#hashtag</code> ou <code>@perfil</code> no tema/palavras-chave
-        para mandar na busca. Os modos sem token leem a API interna dos sites;
-        as ressalvas do README valem aqui.
-      </p>
+    <div class="grid-2">
+      <div class="field">
+        <label for="image_source">{{ form.image_source.label.text }}</label>
+        {{ form.image_source(id="image_source", class_="input") }}
+      </div>
+      <div class="field">
+        <label for="instagram_images_count">{{ form.instagram_images_count.label.text }}</label>
+        {{ form.instagram_images_count(id="instagram_images_count", class_="input") }}
+        {% if form.instagram_images_count.errors %}
+          <ul class="errors">{% for err in form.instagram_images_count.errors %}<li>{{ err }}</li>{% endfor %}</ul>
+        {% endif %}
+      </div>
     </div>
+    <p class="small muted">
+      No modo <strong>Instagram + Pinterest</strong>, uma foto do Instagram é
+      priorizada para o hook e o Pinterest completa o carrossel com o tema e as
+      palavras-chave. Use <code>@perfil</code> para buscar a pessoa no Instagram;
+      esse perfil não é enviado ao Pinterest. A cota não altera fontes únicas.
+    </p>
 
     {% include "_pinned_person.html" %}
 
@@ -108,6 +169,74 @@
     const status = document.getElementById("goviral-status");
     const list = document.getElementById("goviral-blocks");
     const csrf = document.querySelector('input[name="csrf_token"]')?.value || "";
+    const generatedBrief = document.getElementById("content-brief");
+    const generatedAudience = document.getElementById("content-audience");
+    const generatedLanguage = document.getElementById("content-language");
+    const generatedSlides = document.getElementById("content-slides");
+    const generatedIncludeApp = document.getElementById("content-include-app");
+    const generateContentBtn = document.getElementById("goviral-generate-content");
+    const themeInput = document.getElementById("theme");
+    const keywordsInput = document.getElementById("keywords");
+
+    const renderBlocks = (blocks, found = null, limit = null) => {
+      list.innerHTML = "";
+      (blocks || []).forEach((block, i) => {
+        const item = document.createElement("li");
+        const role = i === 0 ? "hook - uma caixa só" : "duas caixas";
+        const label = document.createElement("strong");
+        label.textContent = `Imagem ${i + 1} (${role})`;
+        const text = document.createElement("p");
+        text.textContent = block;
+        item.append(label, text);
+        list.appendChild(item);
+      });
+      list.hidden = !(blocks || []).length;
+      const count = (blocks || []).length;
+      const extra = found !== null && found > count
+        ? ` (${found - count} além do limite de ${limit})`
+        : "";
+      return `${count} imagem(ns)${extra}.`;
+    };
+
+    generateContentBtn?.addEventListener("click", async () => {
+      const brief = (generatedBrief?.value || "").trim();
+      list.hidden = true;
+      if (brief.length < 10) {
+        status.textContent = "Descreva a ideia, história ou resultado primeiro.";
+        generatedBrief?.focus();
+        return;
+      }
+      generateContentBtn.disabled = true;
+      status.textContent = "Gerando hook e scripts...";
+      try {
+        const response = await fetch("{{ url_for('goviral.generate_content') }}", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-CSRFToken": csrf },
+          body: JSON.stringify({
+            brief,
+            audience: (generatedAudience?.value || "").trim(),
+            language: generatedLanguage?.value || "auto",
+            slide_count: Number(generatedSlides?.value || 6),
+            include_app: Boolean(generatedIncludeApp?.checked),
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok || !data.generated) {
+          status.textContent = data.reason || "Não foi possível gerar o roteiro.";
+          return;
+        }
+        input.value = data.raw_text || "";
+        if (themeInput) themeInput.value = data.theme || "";
+        if (keywordsInput) keywordsInput.value = (data.keywords || []).join(", ");
+        const countText = renderBlocks(data.blocks || []);
+        status.textContent = `Roteiro gerado: ${countText} Revise o texto antes de montar.`;
+        input.scrollIntoView({ behavior: "smooth", block: "center" });
+      } catch (err) {
+        status.textContent = "Não foi possível gerar o roteiro.";
+      } finally {
+        generateContentBtn.disabled = false;
+      }
+    });
 
     // A conferência roda no servidor, no MESMO parser que o POST usa. Reescrevê-la
     // em JS daria uma segunda resposta para "o que o painel disse", e as duas
@@ -136,21 +265,7 @@
             'pelo menos um "Script 1" com os parágrafos.';
           return;
         }
-        (data.blocks || []).forEach((block, i) => {
-          const item = document.createElement("li");
-          const role = i === 0 ? "hook — uma caixa só" : "duas caixas";
-          const label = document.createElement("strong");
-          label.textContent = `Imagem ${i + 1} (${role})`;
-          const text = document.createElement("p");
-          text.textContent = block;
-          item.append(label, text);
-          list.appendChild(item);
-        });
-        list.hidden = false;
-        const extra = data.found > data.blocks.length
-          ? ` (${data.found - data.blocks.length} além do limite de ${data.limit})`
-          : "";
-        status.textContent = `${data.blocks.length} imagem(ns)${extra}.`;
+        status.textContent = renderBlocks(data.blocks || [], data.found, data.limit);
       } catch (err) {
         status.textContent = "Não foi possível ler o painel.";
       } finally {
@@ -161,9 +276,7 @@
     // Melhoria opcional: o LLM reescreve hook e parágrafos (mais curtos,
     // mesma linha), acrescenta um script de fecho promovendo o goviral app e
     // o painel volta REMONTADO para a própria caixa — revisável, editável e
-    // desfazível. A geração continua determinística: este é o único ponto do
-    // fluxo do painel em que um LLM toca no texto, e só quando o botão é
-    // clicado.
+    // desfazível. Depois dessa etapa, a montagem continua determinística.
     const enhanceBtn = document.getElementById("goviral-enhance");
     const undoBtn = document.getElementById("goviral-enhance-undo");
     let beforeEnhance = null;

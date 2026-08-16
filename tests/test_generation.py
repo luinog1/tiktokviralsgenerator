@@ -105,6 +105,64 @@ def test_each_photo_remembers_which_pool_it_came_from():
     assert pools == {POOL_HOOK, POOL_SCENE}
 
 
+def test_pool_aware_client_receives_hook_and_scene_explicitly():
+    class _PoolAwareClient(_FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.pools = []
+
+        def search_pool(self, query, limit=10, *, pool=""):
+            self.pools.append(pool)
+            return self.search(query, limit=limit)
+
+    client = _PoolAwareClient()
+    _run(client, _service(client))
+
+    assert client.pools == [POOL_HOOK, POOL_SCENE]
+
+
+def test_instagram_quota_prefers_the_profile_photo_for_the_hook():
+    class _CombinedQuotaClient:
+        name = "instagram_pinterest"
+        last_fallback_reason = ""
+
+        def search_pool(self, query, limit=10, *, pool=""):
+            if pool == POOL_HOOK:
+                return [
+                    PinterestImage(
+                        image_id="ig-profile",
+                        image_url="https://img/ig",
+                        source_url="https://instagram/profile",
+                        title="a woman smiling",
+                    ),
+                    PinterestImage(
+                        image_id="pin-person",
+                        image_url="https://img/pin",
+                        source_url="https://pinterest/pin",
+                        title="a woman smiling",
+                    ),
+                ]
+            return [
+                PinterestImage(
+                    image_id="pin-scene",
+                    image_url="https://img/scene",
+                    source_url="https://pinterest/scene",
+                    title="morning coffee on a table",
+                )
+            ]
+
+    service = GenerationService(
+        Settings.from_env({"LLM_PROVIDER": "mock"}),
+        instagram_images_count=1,
+    )
+    service._pinterest = _CombinedQuotaClient()  # noqa: SLF001
+
+    outcome = _run(_FakeClient(), service)
+
+    assert outcome.project.carousel["slides"][0]["image_id"] == "ig-profile"
+    assert any("Instagram limitado a 1" in warning for warning in outcome.warnings)
+
+
 def test_query_hints_are_configurable():
     client = _FakeClient()
     _run(client, _service(

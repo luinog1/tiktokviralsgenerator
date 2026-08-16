@@ -87,6 +87,7 @@ def cast_carousel(
     verdicts: list[Any] | None = None,
     *,
     hook_subject: str = "woman",
+    preferred_hook_ids: set[str] | None = None,
 ) -> CastingResult:
     """Escolhe a foto de cada slide. Não muta nada — devolve os image_ids."""
     result = CastingResult()
@@ -101,7 +102,13 @@ def cast_carousel(
     }
 
     hook_index = _hook_index(slides)
-    hook_image, hook_source = _pick_hook(images, subjects, scores, hook_subject)
+    hook_image, hook_source = _pick_hook(
+        images,
+        subjects,
+        scores,
+        hook_subject,
+        preferred_hook_ids or set(),
+    )
     result.hook_image_id = hook_image.image_id
     result.hook_source = hook_source
 
@@ -163,12 +170,14 @@ def _pick_hook(
     subjects: dict[str, str],
     scores: dict[str, float],
     hook_subject: str,
+    preferred_hook_ids: set[str],
 ) -> tuple[PinterestImage, str]:
     """Melhor foto com pessoa para o slide 1, e de onde veio a certeza."""
     ranked = sorted(
         images,
         key=lambda img: (
             _person_affinity(img, subjects, hook_subject),
+            img.image_id in preferred_hook_ids,
             scores.get(img.image_id, 0.0),
         ),
         reverse=True,

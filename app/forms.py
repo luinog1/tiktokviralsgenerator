@@ -51,7 +51,7 @@ IMAGE_SOURCE_CHOICES = [
     ("unsplash", "Só Unsplash"),
     ("pinterest_scrape", "Só Pinterest (sem token)"),
     ("instagram_scrape", "Só Instagram (sem token)"),
-    ("instagram_pinterest", "Instagram + Pinterest (metade de cada)"),
+    ("instagram_pinterest", "Instagram + Pinterest (quantidade ajustável)"),
     ("unsplash_pinterest", "Unsplash + Pinterest (metade de cada)"),
 ]
 
@@ -63,6 +63,11 @@ MODE_CHOICES = [
 # Teto de campos de roteiro. Bate com a maior opção de SLIDES_CHOICES: mais que
 # isso o formulário renderiza campos que o carrossel nunca usaria.
 MAX_SCRIPT_BLOCKS = 12
+
+INSTAGRAM_IMAGE_COUNT_CHOICES = [
+    (str(count), "1 foto (hook recomendado)" if count == 1 else f"{count} fotos")
+    for count in range(1, MAX_SCRIPT_BLOCKS + 1)
+]
 
 # Rótulo de cada campo do roteiro, pelo papel do slide naquela posição. O papel
 # vem de `viral_script_roles`, a mesma função que decide o papel real no
@@ -177,6 +182,12 @@ class BriefingForm(FlaskForm):
         default="",
         validators=[Optional()],
     )
+    instagram_images_count = SelectField(
+        "Fotos do Instagram no modo combinado",
+        choices=INSTAGRAM_IMAGE_COUNT_CHOICES,
+        default="1",
+        validators=[DataRequired(message="Escolha quantas fotos vêm do Instagram.")],
+    )
     # Só aparece no formulário quando há pessoa fixada (ver template). Desligado
     # por padrão: repetir a pessoa é escolha por carrossel, não estado global.
     use_pinned_person = BooleanField(
@@ -244,23 +255,28 @@ class BriefingForm(FlaskForm):
         # ranking e a visão usam esse campo como corpus do tema. Os blocos são o
         # melhor corpus disponível ali.
         raw_text = (self.raw_text.data or "").strip() or "\n\n".join(blocks)
+        slides_count = int(self.slides_count.data or 6)
+        instagram_images_count = min(
+            int(self.instagram_images_count.data or 1), slides_count
+        )
         return {
             "theme": (self.theme.data or "").strip(),
             "raw_text": raw_text,
             "niche": (self.niche.data or "").strip(),
             "language": (self.language.data or "pt-BR").strip(),
             "style": (self.style.data or "quote").strip(),
-            "slides_count": int(self.slides_count.data or 6),
+            "slides_count": slides_count,
             "keywords": keywords,
             "script_mode": "script" if self.is_script_mode else "auto",
             "script_blocks": blocks,
             "use_pinned_person": bool(self.use_pinned_person.data),
             "image_source": (self.image_source.data or "").strip(),
+            "instagram_images_count": instagram_images_count,
         }
 
 
 class GoviralForm(FlaskForm):
-    """O painel do goviral colado inteiro — a ferramenta de um campo.
+    """Roteiro gerado localmente ou painel do goviral colado inteiro.
 
     O que essa tela automatiza é justamente o que o `BriefingForm` pede em
     pedaços: o número de imagens e a distribuição do texto entre elas saem do
@@ -271,15 +287,15 @@ class GoviralForm(FlaskForm):
     """
 
     raw_text = TextAreaField(
-        "Painel do goviral (Hook + Scripts) *",
+        "Roteiro (Hook + Scripts) *",
         validators=[
             DataRequired(message="Cole o painel do goviral."),
             Length(max=12000),
         ],
         render_kw={
             "placeholder": (
-                "Selecione o painel inteiro no goviral.ai (Ctrl+A, Ctrl+C) e cole "
-                "aqui:\n\n"
+                "O roteiro gerado aparece aqui. Você também pode colar um painel "
+                "existente:\n\n"
                 "Hook\n"
                 "a frase que para o scroll\n"
                 "Script 1\n"
@@ -290,7 +306,6 @@ class GoviralForm(FlaskForm):
                 "a caixa de baixo"
             ),
             "rows": 14,
-            "autofocus": True,
         },
     )
     theme = StringField(
@@ -315,6 +330,12 @@ class GoviralForm(FlaskForm):
         choices=IMAGE_SOURCE_CHOICES,
         default="",
         validators=[Optional()],
+    )
+    instagram_images_count = SelectField(
+        "Fotos do Instagram no modo combinado",
+        choices=INSTAGRAM_IMAGE_COUNT_CHOICES,
+        default="1",
+        validators=[DataRequired(message="Escolha quantas fotos vêm do Instagram.")],
     )
     # Mesmo comportamento do checkbox no BriefingForm: opt-in por carrossel.
     use_pinned_person = BooleanField(
@@ -443,6 +464,7 @@ __all__ = [
     "SLIDES_CHOICES",
     "LANGUAGE_CHOICES",
     "IMAGE_SOURCE_CHOICES",
+    "INSTAGRAM_IMAGE_COUNT_CHOICES",
     "MODE_CHOICES",
     "MAX_SCRIPT_BLOCKS",
     "script_field_labels",

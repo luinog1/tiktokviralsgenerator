@@ -29,7 +29,11 @@ def health():
             "ranking": settings.llm_provider if settings.ranking_enabled else "disabled",
             "vision": "configured" if settings.vision_configured else "off",
             "casting": settings.hook_subject if settings.casting_enabled else "off",
-            "goviralai": "external_manual",
+            "content_generation": (
+                "llm" if settings.llm_provider != "mock" and settings.llm_configured
+                else "not_configured"
+            ),
+            "goviralai": "optional_import",
         },
         "carousel": {
             "slide_width": settings.slide_width,

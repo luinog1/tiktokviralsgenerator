@@ -47,6 +47,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 
 html, body {
   margin: 0;
@@ -356,6 +357,19 @@ a:hover { text-decoration: underline; }
 
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+
+.briefing-form,
+.field,
+.grid-2 > *,
+.grid-3 > * {
+  min-width: 0;
+}
+
+.input {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
 
 .keywords {
   border: 1px dashed var(--border);
@@ -1075,7 +1089,33 @@ a:hover { text-decoration: underline; }
   white-space: nowrap;
 }
 
-/* ---------- Painel do goviral colado inteiro ---------- */
+/* ---------- Gerador de roteiro e importação de painel ---------- */
+
+.goviral-generator {
+  display: grid;
+  gap: 16px;
+  padding-bottom: 22px;
+  border-bottom: 1px solid var(--border);
+}
+
+.goviral-generator h2 { margin-bottom: 4px; }
+
+.goviral-generator-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.goviral-inline-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.goviral-inline-check input { margin: 0; }
 
 .goviral-check {
   display: grid;

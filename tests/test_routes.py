@@ -40,7 +40,8 @@ def test_health_returns_ok(client):
     data = response.get_json()
     assert data["status"] == "ok"
     assert data["providers"]["composer"] == "mock"
-    assert data["providers"]["goviralai"] == "external_manual"
+    assert data["providers"]["goviralai"] == "optional_import"
+    assert data["providers"]["content_generation"] == "not_configured"
 
 
 def test_health_reports_mock_images_when_no_key(client, monkeypatch):
@@ -73,7 +74,7 @@ def test_index_returns_landing(client):
     assert "ViralPost Studio" in body
     assert "goviral.ai" in body
     # Os dois caminhos de entrada: colar o painel (atalho) e o briefing completo.
-    assert "Colar o painel do goviral" in body
+    assert "Gerar hook e scripts" in body
     assert "Briefing completo" in body
 
 
@@ -371,6 +372,7 @@ def test_health_html_reports_unsplash_not_mock(monkeypatch):
     não estava configurado — mesmo com o Unsplash respondendo 200. Era o
     diagnóstico que fazia parecer que o carrossel saía em mock."""
     monkeypatch.setenv("UNSPLASH_ACCESS_KEY", "chave-real")
+    monkeypatch.setenv("IMAGE_PROVIDER", "auto")
     app = create_app()
     app.config["WTF_CSRF_ENABLED"] = False
     with app.test_client() as client:
@@ -496,8 +498,10 @@ GOVIRAL_PANEL = (
 
 def test_goviral_page_renders(client):
     body = client.get("/goviral").data.decode("utf-8")
-    assert "Painel do goviral" in body
+    assert "Gerador de hooks e scripts" in body
+    assert "content-brief" in body
     assert "raw_text" in body
+    assert "instagram_images_count" in body
 
 
 def test_goviral_panel_generates_the_carousel_without_asking_slide_count(client):

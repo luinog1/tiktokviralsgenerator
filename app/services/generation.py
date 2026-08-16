@@ -53,13 +53,21 @@ class GenerationService:
     # alguém em cena, e é a galeria da prévia que absorve as sobras.
     HOOK_POOL_SIZE = 6
 
-    def __init__(self, settings: Settings, image_source: str = ""):
+    def __init__(
+        self,
+        settings: Settings,
+        image_source: str = "",
+        instagram_images_count: int | None = None,
+    ):
         self._settings = settings
+        self._instagram_images_count = instagram_images_count
         self._composer: TextComposer = build_text_composer(settings)
         # `image_source` é a escolha da UI (o seletor de fonte): vale para esta
         # geração e vence o IMAGE_PROVIDER do ambiente. Vazio = ambiente manda.
         self._pinterest: PinterestClient = build_pinterest_client(
-            settings, override=image_source
+            settings,
+            override=image_source,
+            instagram_images_count=instagram_images_count,
         )
         self._ranking: RankingProvider = build_ranking_provider(settings)
         self._vision: VisionRankingProvider | None = build_vision_provider(settings)
@@ -121,6 +129,15 @@ class GenerationService:
         que são as duas caixas de cada imagem, então não há o que redistribuir.
         """
         warnings: list[str] = []
+        if (
+            self._instagram_images_count is not None
+            and self.pinterest_provider_name == "instagram_pinterest"
+        ):
+            warnings.append(
+                f"Instagram limitado a {self._instagram_images_count} foto(s): "
+                "uma é priorizada para o hook e o restante do carrossel é "
+                "preenchido pelo Pinterest usando os termos da busca."
+            )
         manual = [b for b in (script_blocks or []) if b and b.strip()]
 
         if not manual:
@@ -181,6 +198,7 @@ class GenerationService:
             "keywords": keywords or [],
             "raw_text": raw_text[:600],
             "style": style,
+            "instagram_images_count": self._instagram_images_count,
         }
         vision_verdicts = self._see_safely(briefing, images, warnings)
         if vision_verdicts:
@@ -195,11 +213,22 @@ class GenerationService:
         # com cenário. Roda antes das posições porque é o casting que decide
         # qual foto está em qual slide.
         if self._settings.casting_enabled and ordered_images:
+            preferred_hook_ids: set[str] = set()
+            if (
+                self._instagram_images_count is not None
+                and self.pinterest_provider_name == "instagram_pinterest"
+            ):
+                preferred_hook_ids = {
+                    image.image_id
+                    for image in ordered_images
+                    if image.pool == POOL_HOOK and image.image_id.startswith("ig-")
+                }
             casting = cast_carousel(
                 carousel_dict["slides"],
                 ordered_images,
                 vision_verdicts,
                 hook_subject=self._settings.hook_subject,
+                preferred_hook_ids=preferred_hook_ids,
             )
             apply_casting(carousel_dict["slides"], casting)
             warnings.extend(casting.warnings)
@@ -298,7 +327,11 @@ class GenerationService:
         warnings: list[str],
     ) -> list[PinterestImage]:
         try:
-            images = self._pinterest.search(query, limit=limit)
+            search_pool = getattr(self._pinterest, "search_pool", None)
+            if callable(search_pool):
+                images = search_pool(query, limit=limit, pool=pool)
+            else:
+                images = self._pinterest.search(query, limit=limit)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("Busca de imagens falhou: %s", type(exc).__name__)
             warnings.append("Busca de imagens falhou — sem resultados.")

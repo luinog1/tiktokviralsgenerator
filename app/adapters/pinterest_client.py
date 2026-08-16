@@ -687,24 +687,56 @@ def _ig_entry_from_apify(item: Any) -> SimpleNamespace | None:
     """
     if not isinstance(item, dict):
         return None
-    if item.get("type") == "Video" or item.get("videoUrl") or item.get("isVideo"):
+    post_type = str(item.get("type") or "").lower()
+    if post_type == "video" or (
+        post_type != "sidecar" and (item.get("videoUrl") or item.get("isVideo"))
+    ):
         return None
-    # `images` só vem preenchido no carrossel (type=Sidecar); a capa é a
-    # primeira. `displayUrl` cobre o post de foto única e serve de fallback.
-    images = [str(u) for u in (item.get("images") or []) if u]
-    src = str(item.get("displayUrl") or "") or (images[0] if images else "")
+
+    # O schema atual publica `images` e `childPosts` para sidecars. Actors
+    # alternativos costumam preencher apenas um deles, então a capa aceita as
+    # duas formas sem transformar cada filho do mesmo post numa foto repetida.
+    images = [str(u) for u in (item.get("images") or []) if isinstance(u, str) and u]
+    children = [child for child in (item.get("childPosts") or []) if isinstance(child, dict)]
+    photo_child = next(
+        (
+            child
+            for child in children
+            if str(child.get("type") or "").lower() != "video"
+            and child.get("displayUrl")
+        ),
+        {},
+    )
+    src = (
+        str(item.get("displayUrl") or "")
+        or str(photo_child.get("displayUrl") or "")
+        or (images[0] if images else "")
+    )
     if not src:
         return None
     try:
         resolution = (
-            int(item.get("dimensionsWidth") or 0),
-            int(item.get("dimensionsHeight") or 0),
+            int(
+                item.get("dimensionsWidth")
+                or item.get("originalWidth")
+                or photo_child.get("dimensionsWidth")
+                or photo_child.get("originalWidth")
+                or 0
+            ),
+            int(
+                item.get("dimensionsHeight")
+                or item.get("originalHeight")
+                or photo_child.get("dimensionsHeight")
+                or photo_child.get("originalHeight")
+                or 0
+            ),
         )
     except (TypeError, ValueError):
         resolution = (0, 0)
-    code = str(item.get("shortCode") or "")
+    code = str(item.get("shortCode") or item.get("shortcode") or "")
+    owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
     return SimpleNamespace(
-        media_id=str(item.get("id") or code),
+        media_id=str(item.get("id") or item.get("pk") or code or src),
         code=code,
         src=src,
         # O actor não publica uma thumb reduzida; sem ela, a visão baixa a
@@ -715,7 +747,12 @@ def _ig_entry_from_apify(item: Any) -> SimpleNamespace | None:
         # image of 1 person…") — o mesmo sinal que alimenta o casting por
         # metadado nas outras duas formas. Sem ele, a legenda serve.
         alt=str(item.get("alt") or "") or str(item.get("caption") or ""),
-        username=str(item.get("ownerUsername") or ""),
+        username=str(
+            item.get("ownerUsername")
+            or item.get("username")
+            or owner.get("username")
+            or ""
+        ),
     )
 
 
@@ -902,11 +939,37 @@ class InstagramScrapeClient:
         # no render e chega ao feed borrada.
         self._min_resolution = min_resolution
         self._hint_words = {w.strip().lower() for w in hint_words if w.strip()}
+        # O casting faz duas buscas (hook e cenário), mas @perfil e hashtag
+        # resolvem para a mesma URL da Apify. Reusar o dataset evita pagar e
+        # esperar um segundo run idêntico dentro da mesma geração.
+        self._apify_cache: dict[str, list[Any]] = {}
         # Por que a última busca caiu no mock. Vazio = não caiu.
         self.last_fallback_reason = ""
 
     def search(self, query: str, limit: int = 8) -> list[PinterestImage]:
+        return self._search(query, limit=limit, exact_apify_limit=False)
+
+    def search_exact(self, query: str, limit: int = 8) -> list[PinterestImage]:
+        """Busca com cota exata na Apify, usada pelo modo combinado.
+
+        O `search()` normal mantém a folga para resolução/casting. Quando o
+        usuário escolhe quantas fotos quer do Instagram, `resultsLimit`,
+        `maxItems` e o limite do dataset precisam refletir exatamente essa
+        escolha, sem o piso antigo de 12 itens pagos.
+        """
+        return self._search(query, limit=limit, exact_apify_limit=True)
+
+    def _search(
+        self,
+        query: str,
+        *,
+        limit: int,
+        exact_apify_limit: bool,
+    ) -> list[PinterestImage]:
         self.last_fallback_reason = ""
+        limit = max(int(limit or 0), 0)
+        if limit == 0:
+            return []
         username = _ig_username(query)
         tag = "" if username else self._tag_from(query)
         if not username and not tag:
@@ -920,7 +983,9 @@ class InstagramScrapeClient:
 
         try:
             if self._apify_token:
-                entries = self._apify_entries(username, tag, limit)
+                entries = self._apify_entries(
+                    username, tag, limit, exact_limit=exact_apify_limit
+                )
             elif username:
                 entries = self._profile_entries(username)
             else:
@@ -1088,7 +1153,14 @@ class InstagramScrapeClient:
             raise ValueError("login wall")
         return response
 
-    def _apify_entries(self, username: str, tag: str, limit: int) -> list[Any]:
+    def _apify_entries(
+        self,
+        username: str,
+        tag: str,
+        limit: int,
+        *,
+        exact_limit: bool = False,
+    ) -> list[Any]:
         """Roda o actor da Apify e converte o dataset dele nas entradas comuns.
 
         `run-sync-get-dataset-items` roda e devolve os itens na MESMA resposta:
@@ -1101,7 +1173,13 @@ class InstagramScrapeClient:
         pago**, então pool grande aqui é conta maior para jogar a maior parte
         fora.
         """
-        wanted = max(limit * 3, 12)
+        scope = f"@{username}" if username else f"#{tag}"
+        cache_key = f"{username}|{tag}"
+        if cache_key in self._apify_cache:
+            logger.info("Reusando dataset da Apify para %s.", scope)
+            return self._apify_cache[cache_key]
+
+        wanted = max(limit, 1) if exact_limit else max(limit * 3, 12)
         if username:
             # Para perfil, a URL direta é mais previsível que `searchType=user`,
             # que ainda passaria pela busca do Instagram para achar o mesmo
@@ -1134,6 +1212,10 @@ class InstagramScrapeClient:
                 # conta, para um actor que ignore o pedido não virar surpresa
                 # na fatura.
                 "maxItems": wanted,
+                # `maxItems` limita cobrança, não o tamanho da resposta. O
+                # endpoint síncrono também aceita os parâmetros do dataset.
+                "limit": wanted,
+                "clean": "1",
                 # Teto do run. Sem ele o actor herda o timeout da configuração
                 # DELE (que pode ser minutos): a resposta viria depois de o
                 # gunicorn já ter matado o worker, e worker morto não faz
@@ -1174,7 +1256,7 @@ class InstagramScrapeClient:
         ]
         logger.info(
             "Apify devolveu %d itens (%d fotos utilizáveis) para %s.",
-            len(items), len(entries), f"@{username}" if username else f"#{tag}",
+            len(items), len(entries), scope,
         )
         if items and not entries:
             # Dataset cheio e nada aproveitável = ou veio só vídeo/reel, ou os
@@ -1186,7 +1268,9 @@ class InstagramScrapeClient:
                 f"({self._apify_actor}) usa outros nomes de campo que o "
                 "esperado (displayUrl/images, dimensionsWidth/Height)."
             )
-        return _ig_dedupe(entries)
+        deduped = _ig_dedupe(entries)
+        self._apify_cache[cache_key] = deduped
+        return deduped
 
     def _profile_entries(self, username: str) -> list[Any]:
         payload = self._get_json(
@@ -1226,6 +1310,13 @@ class InstagramScrapeClient:
         )
 
 
+def _query_without_instagram_target(query: str) -> str:
+    """Remove @perfil e conserva #hashtag como termo para a outra fonte."""
+    cleaned = re.sub(r"(?<!\w)@[\w.]+", " ", str(query or ""))
+    cleaned = re.sub(r"#([\w]+)", r"\1", cleaned)
+    return " ".join(cleaned.split()) or "lifestyle aesthetic"
+
+
 class CombinedImageClient:
     """Mais de uma busca na mesma geração — duas fontes intercaladas
     (Instagram + Pinterest, Unsplash + Pinterest).
@@ -1238,30 +1329,58 @@ class CombinedImageClient:
     volta com os motivos somados, como nos outros clientes.
     """
 
-    def __init__(self, clients: list[Any], name: str = "combined"):
+    def __init__(
+        self,
+        clients: list[Any],
+        name: str = "combined",
+        source_limits: dict[str, int] | None = None,
+    ):
         self._clients = clients
         self.name = name
+        self._source_remaining = {
+            source: max(int(limit), 0)
+            for source, limit in (source_limits or {}).items()
+        }
+        # A primeira busca é o hook. Ela extrai a cota inteira da Apify uma vez,
+        # devolve uma foto e guarda o restante para o pool de cenário.
+        self._source_carryover: dict[str, list[PinterestImage]] = {}
         # Por que a última busca caiu no mock. Vazio = não caiu.
         self.last_fallback_reason = ""
 
     def search(self, query: str, limit: int = 8) -> list[PinterestImage]:
+        return self.search_pool(query, limit=limit, pool="")
+
+    def search_pool(
+        self,
+        query: str,
+        limit: int = 8,
+        *,
+        pool: str = "",
+    ) -> list[PinterestImage]:
         self.last_fallback_reason = ""
         pools: list[list[PinterestImage]] = []
         reasons: list[str] = []
         for client in self._clients:
+            client_name = getattr(client, "name", "?")
+            client_query = query
+            if self.name == "instagram_pinterest" and client_name != "instagram_scrape":
+                client_query = _query_without_instagram_target(query)
             try:
-                found = client.search(query, limit=limit)
+                found, attempted = self._search_client(
+                    client, client_query, limit=limit, pool=pool
+                )
             except Exception as exc:  # pragma: no cover - defensivo
                 logger.warning(
                     "Busca combinada: %s falhou (%s).",
-                    getattr(client, "name", "?"), type(exc).__name__,
+                    client_name, type(exc).__name__,
                 )
                 found = []
+                attempted = True
             real = [img for img in found if not is_mock_image(img)]
-            if not real:
+            if attempted and not real:
                 reasons.append(
                     getattr(client, "last_fallback_reason", "")
-                    or f"{getattr(client, 'name', 'cliente')} não retornou fotos."
+                    or f"{client_name} não retornou fotos."
                 )
             pools.append(real)
 
@@ -1279,6 +1398,45 @@ class CombinedImageClient:
             )
             return MockPinterestClient().search(query, limit)
         return merged[:limit]
+
+    def _search_client(
+        self,
+        client: Any,
+        query: str,
+        *,
+        limit: int,
+        pool: str,
+    ) -> tuple[list[PinterestImage], bool]:
+        name = getattr(client, "name", "?")
+        if name not in self._source_remaining:
+            return client.search(query, limit=limit), True
+
+        carryover = self._source_carryover.get(name, [])
+        if pool == "scene" and carryover:
+            found = carryover[:limit]
+            self._source_carryover[name] = carryover[len(found):]
+            return found, False
+
+        remaining = self._source_remaining[name]
+        if remaining <= 0:
+            return [], False
+
+        # Sem casting há uma única busca; não extraia mais do que cabe nela.
+        target = remaining if pool else min(remaining, limit)
+        exact_search = getattr(client, "search_exact", None)
+        found = (
+            exact_search(query, limit=target)
+            if callable(exact_search)
+            else client.search(query, limit=target)
+        )
+        real = [img for img in found if not is_mock_image(img)]
+        # A extração exata já foi tentada; repetir o mesmo @perfil só duplicaria
+        # posts e cobrança. O que sobrou fica em memória para o segundo pool.
+        self._source_remaining[name] = 0
+        if pool == "hook":
+            self._source_carryover[name] = real[1:]
+            return real[:1], True
+        return real[:limit], True
 
     def related(self, pin_url: str, limit: int = 8) -> list[PinterestImage]:
         """Pins relacionados (pessoa fixada) — repassado a quem sabe responder."""
@@ -1314,7 +1472,11 @@ def _instagram_scrape_client(settings: Settings) -> InstagramScrapeClient:
     )
 
 
-def build_pinterest_client(settings: Settings, override: str = "") -> PinterestClient:
+def build_pinterest_client(
+    settings: Settings,
+    override: str = "",
+    instagram_images_count: int | None = None,
+) -> PinterestClient:
     """Cliente de imagens conforme `IMAGE_PROVIDER`.
 
     `override` é a escolha feita na UI (o seletor de fonte dos formulários):
@@ -1357,9 +1519,13 @@ def build_pinterest_client(settings: Settings, override: str = "") -> PinterestC
         return _instagram_scrape_client(settings)
     if choice == "instagram_pinterest":
         logger.info("Fonte de imagens: Instagram + Pinterest (sem token).")
+        source_limits = None
+        if instagram_images_count is not None:
+            source_limits = {"instagram_scrape": max(int(instagram_images_count), 1)}
         return CombinedImageClient(
             [_instagram_scrape_client(settings), _pinterest_scrape_client(settings)],
             name="instagram_pinterest",
+            source_limits=source_limits,
         )
     if choice == "unsplash_pinterest":
         # O par entra INTEIRO mesmo sem a chave do Unsplash — a mesma regra do

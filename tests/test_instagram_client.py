@@ -436,10 +436,34 @@ def test_apify_caps_the_billed_items_and_the_run(fake_post):
     wanted = calls[0]["json"]["resultsLimit"]
     assert wanted == 12  # max(limit*3, 12)
     assert calls[0]["params"]["maxItems"] == wanted
+    assert calls[0]["params"]["limit"] == wanted
+    assert calls[0]["params"]["clean"] == "1"
     # O teto do run fica abaixo do timeout do cliente, que sobe para 90s por
     # causa do cold start do actor.
     assert client._timeout == 90
     assert calls[0]["params"]["timeout"] < client._timeout
+
+
+def test_apify_exact_search_uses_the_user_quota_everywhere(fake_post):
+    calls = fake_post(_FakeResponse([_apify_item(0), _apify_item(1)]))
+    images = InstagramScrapeClient(apify_token="a").search_exact(
+        "@fulana", limit=2
+    )
+
+    assert len(images) == 2
+    assert calls[0]["json"]["resultsLimit"] == 2
+    assert calls[0]["params"]["maxItems"] == 2
+    assert calls[0]["params"]["limit"] == 2
+
+
+def test_apify_reuses_the_same_profile_dataset_between_casting_pools(fake_post):
+    calls = fake_post(_FakeResponse([_apify_item(i) for i in range(6)]))
+    client = InstagramScrapeClient(apify_token="a")
+
+    client.search("@fulana woman portrait", limit=2)
+    client.search("@fulana aesthetic lifestyle", limit=4)
+
+    assert len(calls) == 1
 
 
 def test_apify_skips_videos_and_takes_the_carousel_cover(fake_post):
@@ -452,6 +476,34 @@ def test_apify_skips_videos_and_takes_the_carousel_cover(fake_post):
     images = InstagramScrapeClient(apify_token="a").search("rotina", limit=4)
     assert [img.image_id for img in images] == ["ig-314151"]
     assert images[0].image_url == "https://scontent.cdninstagram.com/capa.jpg"
+
+
+def test_apify_sidecar_accepts_child_posts_and_original_dimensions(fake_post):
+    fake_post(_FakeResponse([
+        _apify_item(
+            1,
+            type="Sidecar",
+            displayUrl="",
+            images=[],
+            dimensionsWidth=None,
+            dimensionsHeight=None,
+            originalWidth=1080,
+            originalHeight=1350,
+            childPosts=[
+                {"type": "Video", "displayUrl": "https://cdn/video-cover.jpg"},
+                {
+                    "type": "Image",
+                    "displayUrl": "https://scontent.cdninstagram.com/child.jpg",
+                },
+            ],
+        )
+    ]))
+
+    images = InstagramScrapeClient(
+        apify_token="a", min_resolution=(1080, 1350)
+    ).search_exact("@fulana", limit=1)
+
+    assert images[0].image_url.endswith("/child.jpg")
 
 
 def test_apify_applies_the_slide_resolution_floor(fake_post):
@@ -637,11 +689,26 @@ class _StubClient:
         self._images = images or []
         self.last_fallback_reason = reason
         self._error = error
+        self.queries = []
 
     def search(self, query, limit=8):
+        self.queries.append((query, limit))
         if self._error:
             raise self._error
-        return list(self._images)
+        return list(self._images)[:limit]
+
+
+class _ExactStubClient(_StubClient):
+    def __init__(self, name, images=None, reason="", error=None):
+        super().__init__(name, images, reason, error)
+        self.exact_limits = []
+
+    def search_exact(self, query, limit=8):
+        self.queries.append((query, limit))
+        self.exact_limits.append(limit)
+        if self._error:
+            raise self._error
+        return list(self._images)[:limit]
 
 
 def _img(image_id):
@@ -660,6 +727,49 @@ def test_combined_interleaves_the_two_sources():
     ], name="instagram_pinterest")
     images = combined.search("rotina", limit=4)
     assert [img.image_id for img in images] == ["ig-1", "p-1", "ig-2", "p-2"]
+
+
+def test_combined_quota_reserves_one_instagram_photo_for_the_hook():
+    instagram = _ExactStubClient(
+        "instagram_scrape", [_img("ig-1"), _img("ig-2"), _img("ig-3")]
+    )
+    pinterest = _StubClient(
+        "pinterest_scrape", [_img("p-1"), _img("p-2"), _img("p-3")]
+    )
+    combined = CombinedImageClient(
+        [instagram, pinterest],
+        name="instagram_pinterest",
+        source_limits={"instagram_scrape": 3},
+    )
+
+    hook = combined.search_pool(
+        "rotina @fulana #cafe woman portrait", limit=4, pool="hook"
+    )
+    scene = combined.search_pool(
+        "rotina @fulana #cafe lifestyle", limit=5, pool="scene"
+    )
+
+    assert instagram.exact_limits == [3]
+    assert [img.image_id for img in hook if img.image_id.startswith("ig-")] == ["ig-1"]
+    assert [img.image_id for img in scene if img.image_id.startswith("ig-")] == [
+        "ig-2", "ig-3"
+    ]
+    assert sum(img.image_id.startswith("ig-") for img in hook + scene) == 3
+    assert "@fulana" in instagram.queries[0][0]
+    assert all("@fulana" not in query for query, _ in pinterest.queries)
+    assert all("cafe" in query and "#cafe" not in query for query, _ in pinterest.queries)
+
+
+def test_combined_uses_a_generic_pinterest_query_when_only_a_profile_was_given():
+    instagram = _StubClient("instagram_scrape", [_img("ig-1")])
+    pinterest = _StubClient("pinterest_scrape", [_img("p-1")])
+    combined = CombinedImageClient(
+        [instagram, pinterest], name="instagram_pinterest"
+    )
+
+    combined.search("@fulana", limit=2)
+
+    assert pinterest.queries == [("lifestyle aesthetic", 2)]
 
 
 def test_combined_fills_from_the_other_source_when_one_returns_little():

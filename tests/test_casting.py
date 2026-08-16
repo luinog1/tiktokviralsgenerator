@@ -100,6 +100,26 @@ def test_pool_decides_the_hook_when_vision_is_off():
     assert casting.hook_source == "pool"
 
 
+def test_preferred_instagram_hook_wins_a_same_quality_tie():
+    images = [
+        _image("ig-profile", POOL_HOOK, title="a woman smiling"),
+        _image("pinterest", POOL_HOOK, title="a woman smiling"),
+    ]
+    verdicts = [
+        _verdict("ig-profile", "woman", 0.2),
+        _verdict("pinterest", "woman", 0.95),
+    ]
+
+    casting = cast_carousel(
+        _slides("hook", "cta"),
+        images,
+        verdicts,
+        preferred_hook_ids={"ig-profile"},
+    )
+
+    assert casting.hook_image_id == "ig-profile"
+
+
 def test_vision_beats_the_pool_when_the_two_disagree():
     """A busca de retrato devolve paisagem às vezes; quem olhou a foto ganha."""
     images = [_image("veio-do-pool-hook", POOL_HOOK), _image("cenario", POOL_SCENE)]

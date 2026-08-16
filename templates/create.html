@@ -159,17 +159,27 @@
       <button type="button" class="btn btn-ghost btn-sm" id="js-add-keyword">+ Adicionar palavra</button>
     </fieldset>
 
-    <div class="field">
-      <label for="image_source">{{ form.image_source.label.text }}</label>
-      {{ form.image_source(id="image_source", class_="input") }}
-      <p class="small muted">
-        Vale só para esta geração. No <strong>Instagram</strong> a busca é por
-        hashtag (derivada do tema, sem espaços e sem acentos) — escreva
-        <code>#hashtag</code> ou <code>@perfil</code> no tema/palavras-chave
-        para mandar na busca. Os modos sem token leem a API interna dos sites;
-        as ressalvas do README valem aqui.
-      </p>
+    <div class="grid-2">
+      <div class="field">
+        <label for="image_source">{{ form.image_source.label.text }}</label>
+        {{ form.image_source(id="image_source", class_="input") }}
+      </div>
+      <div class="field">
+        <label for="instagram_images_count">{{ form.instagram_images_count.label.text }}</label>
+        {{ form.instagram_images_count(id="instagram_images_count", class_="input") }}
+        {% if form.instagram_images_count.errors %}
+          <ul class="errors">{% for err in form.instagram_images_count.errors %}<li>{{ err }}</li>{% endfor %}</ul>
+        {% endif %}
+      </div>
     </div>
+    <p class="small muted">
+      No modo <strong>Instagram + Pinterest</strong>, uma foto do Instagram é
+      priorizada para o hook e a cota restante vai para os outros slides; o
+      Pinterest preenche o resto pelos termos da busca. Escreva
+      <code>@perfil</code> para o Instagram — o perfil é removido da query do
+      Pinterest — ou <code>#hashtag</code>, que continua como palavra de busca.
+      A cota não altera os modos de fonte única.
+    </p>
 
     {% include "_pinned_person.html" %}
 

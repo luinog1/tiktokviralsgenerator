@@ -39,6 +39,7 @@ def test_briefing_validates_required_fields(app):
         assert briefing["keywords"] == ["foco"]
         # Sem seletor no POST (cliente antigo), a fonte fica com o ambiente.
         assert briefing["image_source"] == ""
+        assert briefing["instagram_images_count"] == 1
 
 
 def test_briefing_carries_the_image_source_choice(app):
@@ -50,10 +51,43 @@ def test_briefing_carries_the_image_source_choice(app):
         "slides_count": "3",
         "script_mode": "auto",
         "image_source": "instagram_pinterest",
+        "instagram_images_count": "2",
     }):
         form = BriefingForm()
         assert form.validate_on_submit(), form.errors
         assert form.to_briefing()["image_source"] == "instagram_pinterest"
+        assert form.to_briefing()["instagram_images_count"] == 2
+
+
+def test_instagram_count_never_exceeds_the_carousel_size(app):
+    with app.test_request_context("/", method="POST", data={
+        "raw_text": "Texto válido com mais de vinte caracteres para passar.",
+        "theme": "rotina matinal @fulana",
+        "language": "pt-BR",
+        "style": "sticker",
+        "slides_count": "3",
+        "script_mode": "auto",
+        "image_source": "instagram_pinterest",
+        "instagram_images_count": "12",
+    }):
+        form = BriefingForm()
+        assert form.validate_on_submit(), form.errors
+        assert form.to_briefing()["instagram_images_count"] == 3
+
+
+def test_briefing_rejects_an_unknown_instagram_count(app):
+    with app.test_request_context("/", method="POST", data={
+        "raw_text": "Texto válido com mais de vinte caracteres para passar.",
+        "theme": "rotina matinal",
+        "language": "pt-BR",
+        "style": "sticker",
+        "slides_count": "3",
+        "script_mode": "auto",
+        "instagram_images_count": "99",
+    }):
+        form = BriefingForm()
+        assert not form.validate_on_submit()
+        assert "instagram_images_count" in form.errors
 
 
 def test_briefing_accepts_the_unsplash_pinterest_source(app):

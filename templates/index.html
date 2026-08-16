@@ -1,21 +1,19 @@
 {% extends "base.html" %}
-{% block title %}ViralPost Studio — Transforme texto em carrossel visual{% endblock %}
+{% block title %}ViralPost Studio - Gere roteiros e carrosséis visuais{% endblock %}
 
 {% block content %}
 <section class="hero">
   <div class="hero-text">
     <p class="eyebrow">MVP · v0.3 · Carrossel TikTok-style</p>
-    <h1>Cole o texto do goviral.ai e gere um carrossel pronto para publicar.</h1>
+    <h1>Gere o roteiro e o carrossel no mesmo lugar.</h1>
     <p class="lead">
-      Você acessa o <a href="{{ goviral_url }}" target="_blank" rel="noopener">goviral.ai</a>
-      manualmente (login Discord), copia o texto pronto e cola aqui.
-      O ViralPost organiza esse texto em slides sobre imagens do Pinterest
-      e exporta um carrossel visual no estilo TikTok photo post.
+      Descreva uma ideia, história ou resultado. O ViralPost cria o hook e os
+      scripts, organiza as caixas sobre imagens e exporta o carrossel no estilo
+      TikTok photo post. Um painel antigo do goviral.ai ainda pode ser importado.
     </p>
     <div class="hero-actions">
-      <a class="btn btn-primary btn-lg" href="{{ url_for('goviral.paste') }}">Colar o painel do goviral</a>
+      <a class="btn btn-primary btn-lg" href="{{ url_for('goviral.paste') }}">Gerar hook e scripts</a>
       <a class="btn btn-secondary" href="{{ url_for('create.create') }}">Briefing completo</a>
-      <a class="btn btn-ghost" href="{{ goviral_url }}" target="_blank" rel="noopener">Abrir goviral.ai ↗</a>
     </div>
   </div>
   <div class="hero-card" aria-hidden="true">
@@ -32,12 +30,12 @@
 
 <section class="cards" id="como-funciona">
   <article class="card">
-    <h3>1 · Cole o texto</h3>
-    <p>Acesse o goviral.ai (login Discord), gere o texto e cole no formulário do ViralPost.</p>
+    <h3>1 · Descreva a ideia</h3>
+    <p>Informe a história, os fatos e o público do carrossel.</p>
   </article>
   <article class="card">
-    <h3>2 · Estruture em slides</h3>
-    <p>O LLM (ou mock determinístico) divide o texto em N slides com headline, corpo e CTA.</p>
+    <h3>2 · Gere o roteiro</h3>
+    <p>O LLM cria um hook e dois blocos de texto para cada imagem.</p>
   </article>
   <article class="card">
     <h3>3 · Busque imagens</h3>
@@ -69,8 +67,8 @@
     </li>
     <li>
       <span class="dot" data-state="external"></span>
-      <span>goviral.ai (texto bruto)</span>
-      <code>manual</code>
+      <span>goviral.ai (importação opcional)</span>
+      <code>não obrigatório</code>
     </li>
   </ul>
   {% if recent %}

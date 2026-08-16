@@ -34,7 +34,7 @@ services:
       - key: SECRET_KEY
         generateValue: true  # Render gera um secret seguro automaticamente
 
-      # --- LLM (OpenAI-compatible: Groq, OpenAI, Ollama) ---
+      # --- LLM (gera hooks/scripts e compõe texto corrido) ---
       # IMPORTANTE: mude para "openai_compatible" no painel Environment
       # quando tiver preenchido LLM_API_KEY e LLM_API_BASE_URL.
       # Default mock = sem chamada ao LLM, divisão determinística do texto.
@@ -92,6 +92,14 @@ services:
       # pinterest-dl) e nunca é escolhido pelo `auto` — compliance no README.
       - key: IMAGE_PROVIDER
         value: auto
+
+      # --- Instagram via Apify (opcional, pago por resultado) ---
+      # Necessário para hashtag e recomendado para @perfil no Render. A cota de
+      # fotos é escolhida por geração na UI; não é variável de ambiente.
+      - key: APIFY_TOKEN
+        sync: false  # ← token de https://console.apify.com/account/integrations
+      - key: APIFY_ACTOR
+        value: apify~instagram-scraper
 
       # --- Unsplash (a única fonte de imagens com chave) ---
       # Sem UNSPLASH_ACCESS_KEY e com IMAGE_PROVIDER=auto o carrossel sai

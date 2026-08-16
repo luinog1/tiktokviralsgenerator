@@ -1,10 +1,27 @@
 # ViralPost Studio
 
-Aplicação Flask que transforma o texto gerado pelo **goviral.ai** em um carrossel visual pronto para publicar — combinando o texto colado com fotos do Pinterest ou do Instagram (busca **sem token**) ou do Unsplash, composição opcional via LLM e renderização estilo **TikTok photo post** (1080×1350, 4:5).
+Aplicação Flask que transforma uma ideia em um roteiro de hooks e scripts e em um carrossel visual pronto para publicar — usando um endpoint LLM OpenAI-compatible, fotos do Pinterest ou do Instagram (busca **sem token**) ou do Unsplash, e renderização estilo **TikTok photo post** (1080×1350, 4:5). Painéis antigos do goviral.ai continuam podendo ser importados, mas não são necessários.
 
-> **Status:** MVP v0.9 — Ready for building
+> **Status:** MVP v0.20 — cota de fotos do Instagram por carrossel
 > **Stack:** Python 3.11 · Flask 3 · Jinja2 · WTForms · Pillow · Docker
 > **Idioma inicial:** Português (pt-BR)
+
+---
+
+## 🎯 O que mudou na v0.20
+
+- ✅ **Quantidade de fotos do Instagram escolhida por geração** — os formulários `/goviral` e `/create` ganharam o campo **"Fotos do Instagram no modo combinado"** (1 a 12, com 1 como padrão recomendado). Em `instagram_pinterest`, uma foto do Instagram é reservada para o pool do hook, o restante da cota vai para o pool de cenário e o Pinterest preenche os outros slides pelos termos da busca. A cota é limitada automaticamente ao tamanho real do carrossel.
+- ✅ **`@perfil` fica só no Instagram** — antes as duas fontes recebiam a mesma string; buscar `@usuario` fazia o Pinterest procurar também pelo handle, enquanto as duas buscas de casting chamavam o mesmo perfil do Instagram. Agora o Instagram conserva `@perfil`, o Pinterest recebe apenas tema/palavras-chave e uma `#hashtag` vira uma palavra normal na busca complementar. Assim o hook pode vir do perfil e o b-roll continua guiado pelos termos visuais.
+- ✅ **Apify com custo e payload proporcionais à escolha** — quando a cota do modo combinado está ativa, `resultsLimit`, `maxItems` e o `limit` do dataset recebem exatamente a quantidade escolhida; `clean=1` remove campos ocultos/vazios. O dataset do mesmo `@perfil`/hashtag também é reutilizado entre os pools de hook e cenário, evitando um segundo run idêntico. O conversor aceita `childPosts`, `originalWidth/Height`, `pk` e variações de owner do schema atual, mantendo uma capa por post para não transformar carrossel do Instagram em fotos repetidas.
+
+---
+
+## 🎯 O que mudou na v0.19
+
+- ✅ **Geração automática sem copiar e colar do goviral.ai** — a tela `/goviral` recebe uma ideia, público, idioma e número de imagens e pede ao LLM um painel completo com `Hook`, `Script N`, `Position N` e dois parágrafos por script. O resultado volta para a caixa editável e segue pelo parser, busca de imagens, prévia e exportação já existentes.
+- ✅ **Saída validada antes de chegar às imagens** — a resposta precisa ter exatamente o número de scripts pedido e duas caixas não vazias por script. JSON parcial, posição errada ou conteúdo vazio são descartados; o endpoint tenta uma vez sem `response_format` e `reasoning_effort` para compatibilidade com providers OpenAI-compatible que não aceitam esses campos.
+- ✅ **Regras do Creator Program incorporadas ao prompt** — 5-6 imagens como padrão, narrativa concreta, fatos preservados, sem autoridade ou métricas inventadas, capitalização consistente, caixas curtas, sem travessão longo e menção natural ao Go Viral app quando habilitada. O gerador também devolve tema e palavras-chave visuais para a busca de fotos.
+- ✅ **Importação manual continua como fallback** — a caixa do roteiro aceita um painel antigo do goviral.ai e a rota `/goviral/parse` permanece disponível para conferir a distribuição antes de gerar.
 
 ---
 
@@ -347,18 +364,19 @@ A distribuição se adapta ao nº de slides — 3 slides viram `hook → value �
 
 ---
 
-## 🔌 Sobre o goviral.ai
+## 🔌 Sobre o goviral.ai e a geração local
 
 O `content.goviralai.app` **não possui API pública** — responde `HTTP 403` a qualquer requisição programática e não publica documentação de desenvolvedor. A autenticação é uma sessão Discord presa ao navegador.
 
-Reaproveitar essa sessão no servidor significaria repassar seus cookies, ou seja, automação de login não autorizada — exatamente o que o escopo deste projeto proíbe e o que pode derrubar sua conta. Por isso o fluxo continua sendo **colar o texto**, e o trabalho de estruturação acontece aqui, via Groq.
+Reaproveitar essa sessão no servidor significaria repassar seus cookies, ou seja, automação de login não autorizada — exatamente o que o escopo deste projeto proíbe e o que pode derrubar sua conta. O fluxo principal agora é **gerar o conteúdo aqui**, via endpoint LLM OpenAI-compatible. Colar o painel continua disponível como importação compatível, sem qualquer chamada ou login automático no goviral.ai.
 
 ---
 
 ## ✨ Funcionalidades do MVP
 
-- Landing page com link direto para o goviral.ai (login Discord manual).
-- **Tela "Colar do painel" (`/goviral`)** — o dashboard do goviral colado inteiro vira o carrossel: hook + um script por imagem, nº de imagens decidido pelo painel, prévia da distribuição antes de gerar.
+- Landing page com geração direta de roteiro e importação opcional do goviral.ai.
+- **Tela "Gerar roteiro" (`/goviral`)** — briefing, público, idioma e nº de imagens viram um painel completo via LLM; tema e palavras-chave visuais são preenchidos para a busca de fotos e o texto fica editável antes da montagem.
+- **Importação do painel (`/goviral`)** — o dashboard do goviral colado inteiro ainda vira o carrossel: hook + um script por imagem, nº de imagens decidido pelo painel, prévia da distribuição antes de gerar.
 - Formulário com **um campo de roteiro por imagem** (rotulado pelo papel do slide) ou textarea única, mais tema, estilo, nº de slides, idioma e keywords.
 - **Rótulo `Imagem N:` no texto colado dispensa o LLM** — vale nas duas caixas de texto; a linha em branco dentro do trecho separa as duas caixas da imagem. O **painel do goviral** (Hook + Script + Paragraph) é reconhecido do mesmo jeito, sem rótulo nenhum.
 - Botão "distribuir" que divide um roteiro colado entre os campos, entendendo `Imagem N:` (com nota entre parênteses ou sozinho na linha), `2.`, `---`, o intervalo de duas linhas em branco e parágrafos.
@@ -367,7 +385,7 @@ Reaproveitar essa sessão no servidor significaria repassar seus cookies, ou sej
 - **Imagem 1 sempre com o hook sozinho, e nunca em branco** — uma caixa, sem texto de apoio e sem CTA, nos três caminhos de composição.
 - Ordenação no roteiro viral de 3 atos (`hook → problema → agitação → valor → prova → CTA`).
 - Renderização estilo sticker do TikTok — caixas brancas arredondadas com texto preto.
-- Busca de imagens via Pinterest **sem token** (`pinterest-dl`), via **Instagram sem token** (hashtag ou @perfil), via Unsplash ou mock — combinável (Instagram + Pinterest ou Unsplash + Pinterest, intercalados) e escolhível **por geração** no seletor "Fonte das fotos" dos formulários.
+- Busca de imagens via Pinterest **sem token** (`pinterest-dl`), via **Instagram sem token** (hashtag ou @perfil), via Unsplash ou mock — combinável e escolhível **por geração**. Em Instagram + Pinterest, a quantidade de fotos do Instagram também é escolhida por geração (1 foto para o hook é o padrão).
 - **Piso de resolução na busca sem token** — só foto que cobre o slide sem ser ampliada, com degradação em ordem quando o tema não tem acervo.
 - Ranking opcional de imagens por endpoint LLM (com fallback determinístico).
 - Qualificação por **visão** opcional (VLM): nota olhando a foto + posição automática do texto + assunto da foto (pessoa/cenário) para o casting.
@@ -408,17 +426,19 @@ python run.py
 
 ### Fluxo de uso
 
-1. Acesse [https://content.goviralai.app/](https://content.goviralai.app/) (login Discord) **em outra aba**.
-2. Gere o texto pronto lá.
-3. No ViralPost Studio (`http://localhost:5000/create`), escolha o nº de slides (3/6/9/12) e como entregar o texto:
+1. No ViralPost Studio (`http://localhost:5000/goviral`), descreva a ideia, os fatos e o público. Escolha idioma, número de imagens (5-6 é o padrão) e se o roteiro deve mencionar o Go Viral app.
+2. Clique em **Gerar hook e scripts**, revise o painel devolvido e ajuste tema, palavras-chave e estilo visual.
+3. Em **Fonte das fotos**, escolha **Instagram + Pinterest** e defina quantas fotos vêm do Instagram. Para usar uma pessoa no hook e variar o restante, deixe **1 foto** e escreva `@perfil` junto do tema/palavras-chave; o Pinterest recebe apenas os termos visuais.
+4. Clique em **Gerar carrossel**. O texto já vem distribuído: hook sozinho na primeira imagem e duas caixas em cada script.
+5. Se você já tem um painel pronto, cole-o na mesma caixa e use **Conferir o que foi entendido** antes de gerar. Como alternativa, no ViralPost Studio (`http://localhost:5000/create`), escolha o nº de slides (3/6/9/12) e como entregar o texto:
    - **Roteiro por imagem** (padrão) — um campo por foto, rotulado com o papel do slide: *Imagem 1 (hook)*, *Imagem 2 (problema)*, e assim por diante. Dentro de um campo, pule uma linha para mandar o texto seguinte para a outra caixa daquela imagem; sem linha em branco, a primeira linha vira o texto grande e o resto vira o apoio — menos na **imagem 1**, que sai como uma frase só (o hook, sem apoio e sem CTA). Nada de LLM no meio: o que você escreve é o que sai.
    - **Distribuir de uma vez** — dentro do modo por imagem, abra "Colar o roteiro inteiro e distribuir", cole tudo e clique no botão. O servidor divide por `Imagem N:`, `2.`, `---`, intervalo de duas linhas em branco ou parágrafos e preenche os campos, que continuam editáveis.
    - **Texto corrido** — cole tudo numa caixa só e deixe o LLM estruturar. Se você escrever `Imagem 1:`, `Imagem 2:`… na frente dos trechos, o LLM **não entra**: cada trecho vai para a foto que você indicou (ver [O rótulo diz a imagem, a linha em branco diz a caixa](#o-rótulo-diz-a-imagem-a-linha-em-branco-diz-a-caixa)).
-4. Preencha tema, estilo (**sticker** recomendado — ou quote/list/tutorial/story) e as palavras-chave da busca de imagens.
-5. Clique em "Gerar carrossel". Com o casting ligado, a imagem 1 recebe uma foto com pessoa e as demais recebem cenário.
-6. Na prévia, cada slide mostra seu papel e de onde veio a foto do hook (visão, metadado ou busca). Edite os textos e troque a imagem pela galeria.
-7. No estilo `sticker`, **arraste cada caixa** sobre a foto para reposicionar (duplo clique volta ao padrão) e use o controle de tamanho de cada caixa se quiser texto maior. Clique em "Salvar edições" para gravar.
-8. Exporte: **ZIP** (carrossel completo) ou **PNG** (slide único) ou **Markdown** (texto).
+6. Preencha tema, estilo (**sticker** recomendado — ou quote/list/tutorial/story) e as palavras-chave da busca de imagens.
+7. Clique em "Gerar carrossel". Com o casting ligado, a imagem 1 recebe uma foto com pessoa e as demais recebem cenário.
+8. Na prévia, cada slide mostra seu papel e de onde veio a foto do hook (visão, metadado ou busca). Edite os textos e troque a imagem pela galeria.
+9. No estilo `sticker`, **arraste cada caixa** sobre a foto para reposicionar (duplo clique volta ao padrão) e use o controle de tamanho de cada caixa se quiser texto maior. Clique em "Salvar edições" para gravar.
+10. Exporte: **ZIP** (carrossel completo) ou **PNG** (slide único) ou **Markdown** (texto).
 
 ---
 
@@ -431,7 +451,7 @@ python run.py
 | `DEBUG` | `true` | Modo debug |
 | `IMAGE_PROVIDER` | `auto` | De onde vêm as fotos: `auto`, `pinterest_scrape`, `unsplash`, `instagram_scrape`, `instagram_pinterest`, `unsplash_pinterest` ou `mock`. O seletor "Fonte das fotos" dos formulários vence este valor por geração |
 | `UNSPLASH_ACCESS_KEY` | (vazio) | Access Key do Unsplash — a **única** fonte de imagens com chave. Vazio (com `auto`) → mock |
-| `APIFY_TOKEN` | (vazio) | Token da [Apify](https://apify.com): roda um **actor** que raspa o Instagram com sessão própria e devolve dataset estruturado. É o único transporte com chance na busca por hashtag, e **vence** o `SCRAPEDO_TOKEN` quando os dois existem |
+| `APIFY_TOKEN` | (vazio) | Token da [Apify](https://apify.com): roda um **actor** que raspa o Instagram com sessão própria e devolve dataset estruturado. É o único transporte com chance na busca por hashtag, e **vence** o `SCRAPEDO_TOKEN` quando os dois existem. No modo combinado, a UI controla a quantidade exata de itens |
 | `APIFY_ACTOR` | `apify~instagram-scraper` | Qual actor rodar (id com **til** no lugar da barra). Cobre hashtag e `@perfil` |
 | `SCRAPEDO_TOKEN` | (vazio) | Token do [Scrape.do](https://scrape.do): as mesmas chamadas da API web saem pelo gateway deles (proxies residenciais, `super=true`, 10x créditos). **Não** vence o muro da hashtag — é gate de endpoint; serve ao `429` do caminho `@perfil` |
 | `LLM_PROVIDER` | `mock` | `mock` ou `openai_compatible` |
@@ -465,6 +485,8 @@ Com `IMAGE_PROVIDER=auto` (o default), a escada é `UNSPLASH_ACCESS_KEY` → **m
 A API oficial v5 do Pinterest **foi removida na v0.15**: o `/search/pins/` dela exige **Standard Access** (aprovação manual da Pinterest) que este projeto nunca teve, então aquele degrau da escada nunca chegou a buscar nada. `PINTEREST_ACCESS_TOKEN` e `PINTEREST_API_BASE_URL` não são mais lidas.
 
 O Unsplash não exige aprovação — crie um app em [unsplash.com/oauth/applications](https://unsplash.com/oauth/applications) e copie a **Access Key**. Para fotos do Pinterest, `IMAGE_PROVIDER=pinterest_scrape` busca **sem token**, pela API interna do site (ver [Buscar fotos no Pinterest sem token](#buscar-fotos-no-pinterest-sem-token)). Ele nunca entra sozinho no modo `auto` — é escolha explícita, com as [ressalvas de compliance](#️-limitações-e-compliance) que vêm junto.
+
+No modo `instagram_pinterest`, o campo **Fotos do Instagram no modo combinado** controla a mistura. O valor padrão é `1`: o actor busca uma foto do perfil/hashtag para o hook e o Pinterest completa o b-roll. Se a query contém `@perfil`, o handle não é repassado ao Pinterest; se contém `#hashtag`, o `#` sai, mas a palavra continua na busca complementar. A escolha é por geração e não exige variável de ambiente nova.
 
 **Por que a mesma query devolve fotos diferentes agora:** o `/search/photos` do Unsplash ordena por relevância e essa ordem é estável — a página 1 de "café da manhã" é sempre a mesma. Não havia cache no app; era determinismo da API. Cada busca agora sorteia uma página entre 1 e 5 (`UnsplashClient._PAGE_WINDOW`), o que renova o resultado sem cair em fotos irrelevantes. A página escolhida aparece no log `INFO`. Se a query tem acervo curto e a página sorteada vem vazia, a busca reentra dentro do `total_pages` em vez de cair no gradiente mock.
 
@@ -575,7 +597,8 @@ Cobertura (414 testes):
 | Método | Rota | Descrição |
 |--------|------|-----------|
 | GET | `/` | Landing page + status |
-| GET | `/goviral` | Colar o painel do goviral inteiro — hook + scripts viram as imagens |
+| GET | `/goviral` | Gerador de hooks/scripts e importação opcional do painel |
+| POST | `/goviral/generate-content` | Gera painel estruturado a partir de briefing (JSON) |
 | POST | `/goviral` | Gera o carrossel a partir do painel (nº de imagens vem do painel) |
 | POST | `/goviral/parse` | Prévia da distribuição: o que o parser entendeu do painel (JSON) |
 | POST | `/goviral/enhance` | Opcional: melhora hook e parágrafos via LLM e acrescenta o script promo do GoViral app — devolve o painel remontado (JSON) |
@@ -638,13 +661,13 @@ Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SL
 - Logs não contêm credenciais.
 - Atribuição e link da imagem são exibidos na prévia e no Markdown exportado.
 - O `health` endpoint **não** expõe tokens, prompts ou segredos.
-- O goviral.ai é acessado manualmente pelo usuário — o ViralPost Studio nunca faz scraping ou automação de login.
+- O goviral.ai é acessado manualmente pelo usuário quando ele opta por importar um painel — o ViralPost Studio nunca faz scraping ou automação de login. A geração principal usa o LLM configurado no próprio app.
 
 ---
 
 ## ⚠️ Limitações e compliance
 
-- **goviral.ai:** ferramenta externa sem API/token. O usuário é responsável por acessar via login Discord e colar o texto no formulário. O ViralPost Studio não automatiza o acesso.
+- **goviral.ai:** ferramenta externa sem API/token. A importação de um painel é opcional; o gerador principal não depende dele. Quando usado, o usuário acessa via login Discord e cola o texto no formulário. O ViralPost Studio não automatiza o acesso.
 - **Pinterest sem token (`IMAGE_PROVIDER=pinterest_scrape` — e a metade Pinterest dos combinados `instagram_pinterest` e `unsplash_pinterest`):** usa a biblioteca [pinterest-dl](https://github.com/sean1832/pinterest-dl), que lê a API **interna** do site. Três consequências que valem a leitura antes de ligar:
   1. **Termos de uso.** Acesso automatizado pode conflitar com os [Terms of Service do Pinterest](https://developers.pinterest.com/terms/). A biblioteca declara uso educacional e não é afiliada ao Pinterest. Ligar a opção é decisão de quem publica — por isso ela nunca entra sozinha no modo `auto`.
   2. **Contrato instável.** Uma API interna muda sem aviso e sem versionamento. Quando mudar, a busca falha e o carrossel cai no gradiente mock com o motivo no aviso da prévia — não quebra a aplicação, mas para de trazer fotos.
@@ -653,7 +676,7 @@ Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SL
 - **Unsplash:** gratuito e sem aprovação, com atribuição obrigatória — preservada na prévia e no Markdown exportado.
 - **LLM:** o endpoint é opcional. Groq, OpenAI ou qualquer provedor OpenAI-compatible podem ser usados. "Free model" não implica em disponibilidade permanente ou autorização comercial — valide os termos.
 - **Persistência:** em memória por processo. Reiniciar o container apaga projetos. Para multi-worker, substitua `SessionStore` por Redis ou DB.
-- **Sem automação de conta:** nenhuma parte do código faz login, publica, curte ou segue em Pinterest, goviral.ai, Discord ou TikTok. A única leitura automatizada é a busca pública de pins descrita acima, quando explicitamente habilitada.
+- **Sem automação de conta:** nenhuma parte do código faz login, publica, curte ou segue em Pinterest, goviral.ai, Discord ou TikTok. A única leitura automatizada é a busca pública de pins descrita acima, quando explicitamente habilitada; a geração de texto usa apenas o endpoint LLM configurado pelo usuário.
 
 ---
 
