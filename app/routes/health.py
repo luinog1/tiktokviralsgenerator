@@ -49,6 +49,9 @@ def health():
             # de login; o proxy é a saída documentada — booleano, nunca a URL,
             # que costuma carregar credencial.
             "instagram_proxy_set": bool(settings.instagram_proxy),
+            # true = validação de TLS desligada nas chamadas do Instagram
+            # (portas-proxy de agregadores, tipo ScrapeOps, exigem isso).
+            "instagram_proxy_insecure": settings.instagram_proxy_insecure,
             # Transporte alternativo: gateway do Scrape.do (vence o proxy).
             "scrapedo_token_set": bool(settings.scrapedo_token),
         },

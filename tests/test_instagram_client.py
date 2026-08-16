@@ -47,7 +47,7 @@ def fake_get(monkeypatch):
         calls = []
 
         def _get(url, params=None, headers=None, timeout=None, proxies=None,
-                 allow_redirects=True):
+                 allow_redirects=True, verify=True):
             calls.append({
                 "url": url,
                 "params": params or {},
@@ -55,6 +55,7 @@ def fake_get(monkeypatch):
                 "timeout": timeout,
                 "proxies": proxies,
                 "allow_redirects": allow_redirects,
+                "verify": verify,
             })
             if isinstance(response, Exception):
                 raise response
@@ -319,6 +320,20 @@ def test_walled_with_a_proxy_blames_the_proxy_ip(fake_get):
     client.search("rotina", limit=2)
     assert "proxy" in client.last_fallback_reason.lower()
     assert "também caiu" in client.last_fallback_reason
+
+
+def test_an_insecure_proxy_disables_tls_verification_only_when_asked(fake_get):
+    """Portas-proxy de agregadores (ScrapeOps) interceptam o TLS e as docs
+    deles mandam desligar a validação — opt-in, nunca o default."""
+    calls = fake_get(_FakeResponse(_tag_payload([_v1_media(0)])))
+    InstagramScrapeClient(
+        proxy="http://scrapeops.mobile=true:key@residential-proxy.scrapeops.io:8181",
+        proxy_insecure=True,
+    ).search("rotina", limit=1)
+    assert calls[0]["verify"] is False
+    calls = fake_get(_FakeResponse(_tag_payload([_v1_media(0)])))
+    InstagramScrapeClient().search("rotina", limit=1)
+    assert calls[0]["verify"] is True
 
 
 # ---------- transporte Scrape.do ----------
@@ -597,3 +612,15 @@ def test_scrapedo_token_reaches_the_client_from_the_settings():
     assert build_pinterest_client(
         Settings.from_env({"IMAGE_PROVIDER": "instagram_scrape"})
     )._scrapedo_token == ""
+
+
+def test_proxy_insecure_reaches_the_client_from_the_settings():
+    settings = Settings.from_env({
+        "IMAGE_PROVIDER": "instagram_scrape",
+        "INSTAGRAM_PROXY": "http://scrapeops:key@residential-proxy.scrapeops.io:8181",
+        "INSTAGRAM_PROXY_INSECURE": "true",
+    })
+    assert build_pinterest_client(settings)._verify is False
+    assert build_pinterest_client(
+        Settings.from_env({"IMAGE_PROVIDER": "instagram_scrape"})
+    )._verify is True

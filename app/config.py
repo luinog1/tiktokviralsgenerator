@@ -70,6 +70,11 @@ class Settings:
     # mas mandaria Groq, Unsplash e ModelScope pelo proxy junto.
     instagram_proxy: str
 
+    # Portas-proxy de agregadores (ScrapeOps etc.) interceptam o TLS por
+    # design e exigem desligar a validação de certificado — só nas chamadas
+    # do Instagram, e só quando explicitamente ligado.
+    instagram_proxy_insecure: bool
+
     # Alternativa gerida ao proxy: token do Scrape.do — as mesmas chamadas do
     # Instagram saem pelo gateway deles (proxies residenciais, super=true).
     # Com os dois definidos, o token vence.
@@ -159,6 +164,7 @@ class Settings:
             ),
             image_provider=image_provider,
             instagram_proxy=_get("INSTAGRAM_PROXY"),
+            instagram_proxy_insecure=_bool(env.get("INSTAGRAM_PROXY_INSECURE")),  # type: ignore[union-attr]
             scrapedo_token=_get("SCRAPEDO_TOKEN"),
             llm_provider=cls._provider(llm_provider_raw),
             llm_api_base_url=llm_base_raw,

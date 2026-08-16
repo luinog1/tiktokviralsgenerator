@@ -37,6 +37,7 @@ from typing import Any, Iterable, Protocol, runtime_checkable
 from urllib.parse import urlencode
 
 import requests
+import urllib3
 
 from app.config import IMAGE_PROVIDERS, Settings
 
@@ -892,6 +893,7 @@ class InstagramScrapeClient:
         min_resolution: tuple[int, int] = (0, 0),
         hint_words: Iterable[str] = (),
         proxy: str = "",
+        proxy_insecure: bool = False,
         scrapedo_token: str = "",
     ):
         self._scrapedo_token = scrapedo_token
@@ -905,6 +907,15 @@ class InstagramScrapeClient:
         self._hint_words = {w.strip().lower() for w in hint_words if w.strip()}
         # None deixa o requests honrar HTTPS_PROXY/HTTP_PROXY do ambiente.
         self._proxies = {"http": proxy, "https": proxy} if proxy else None
+        # Portas-proxy de agregadores (ScrapeOps etc.) interceptam o TLS por
+        # design e as docs deles mandam desligar a validação de certificado.
+        # Opt-in explícito, e só para estas chamadas — que não carregam
+        # credencial nenhuma (o acesso é anônimo por definição).
+        self._verify = not proxy_insecure
+        if proxy_insecure:
+            # Sem isto, cada busca emitiria um InsecureRequestWarning — ruído
+            # permanente que ensina a ignorar warnings.
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         # Por que a última busca caiu no mock. Vazio = não caiu.
         self.last_fallback_reason = ""
 
@@ -1014,6 +1025,7 @@ class InstagramScrapeClient:
                 },
                 timeout=self._timeout,
                 proxies=self._proxies,
+                verify=self._verify,
                 # De um IP no balde do muro, a API 302-redireciona para
                 # /accounts/login/. O redirect já É a resposta: segui-lo só
                 # baixaria o HTML do login para falhar no json() logo adiante.
@@ -1193,6 +1205,7 @@ def _instagram_scrape_client(settings: Settings) -> InstagramScrapeClient:
         # As palavras das queries de casting não entram na hashtag derivada.
         hint_words=f"{settings.hook_query_hints} {settings.scene_query_hints}".split(),
         proxy=settings.instagram_proxy,
+        proxy_insecure=settings.instagram_proxy_insecure,
         scrapedo_token=settings.scrapedo_token,
     )
 
