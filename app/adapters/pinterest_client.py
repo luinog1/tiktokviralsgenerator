@@ -1014,23 +1014,38 @@ class InstagramScrapeClient:
         if self._scrapedo_token:
             response = self._get_via_scrapedo(path, params)
         else:
-            response = requests.get(
-                f"{self._BASE}{path}",
-                params=params,
-                headers={
-                    "User-Agent": _IG_USER_AGENT,
-                    "x-ig-app-id": _IG_APP_ID,
-                    "Accept": "*/*",
-                    "Referer": f"{self._BASE}/",
-                },
-                timeout=self._timeout,
-                proxies=self._proxies,
-                verify=self._verify,
-                # De um IP no balde do muro, a API 302-redireciona para
-                # /accounts/login/. O redirect já É a resposta: segui-lo só
-                # baixaria o HTML do login para falhar no json() logo adiante.
-                allow_redirects=False,
-            )
+            # Proxy rotativo (ScrapeOps etc.) sorteia outro IP de saída a cada
+            # conexão: um exit no muro não condena os próximos, então o muro
+            # com proxy configurado merece mais duas tentativas. Sem proxy o
+            # IP é sempre o mesmo e repetir seria só latência.
+            attempts = 3 if self._proxies else 1
+            for attempt in range(1, attempts + 1):
+                response = requests.get(
+                    f"{self._BASE}{path}",
+                    params=params,
+                    headers={
+                        "User-Agent": _IG_USER_AGENT,
+                        "x-ig-app-id": _IG_APP_ID,
+                        "Accept": "*/*",
+                        "Referer": f"{self._BASE}/",
+                    },
+                    timeout=self._timeout,
+                    proxies=self._proxies,
+                    verify=self._verify,
+                    # De um IP no balde do muro, a API 302-redireciona para
+                    # /accounts/login/. O redirect já É a resposta: segui-lo só
+                    # baixaria o HTML do login para falhar no json() logo
+                    # adiante.
+                    allow_redirects=False,
+                )
+                if not (300 <= response.status_code < 400):
+                    break
+                if attempt < attempts:
+                    logger.info(
+                        "Instagram devolveu o muro (HTTP %d) na tentativa "
+                        "%d/%d — repetindo por outro IP do proxy.",
+                        response.status_code, attempt, attempts,
+                    )
         if 300 <= response.status_code < 400:
             logger.warning(
                 "Instagram redirecionou a API para o login (HTTP %d) — "

@@ -45,6 +45,9 @@ def fake_get(monkeypatch):
 
     def _install(response):
         calls = []
+        # Uma lista de respostas serve para simular o proxy rotativo: uma
+        # resposta por chamada, na ordem.
+        queue = list(response) if isinstance(response, list) else None
 
         def _get(url, params=None, headers=None, timeout=None, proxies=None,
                  allow_redirects=True, verify=True):
@@ -57,9 +60,10 @@ def fake_get(monkeypatch):
                 "allow_redirects": allow_redirects,
                 "verify": verify,
             })
-            if isinstance(response, Exception):
-                raise response
-            return response
+            current = queue.pop(0) if queue is not None else response
+            if isinstance(current, Exception):
+                raise current
+            return current
 
         monkeypatch.setattr("app.adapters.pinterest_client.requests.get", _get)
         return calls
@@ -320,6 +324,37 @@ def test_walled_with_a_proxy_blames_the_proxy_ip(fake_get):
     client.search("rotina", limit=2)
     assert "proxy" in client.last_fallback_reason.lower()
     assert "também caiu" in client.last_fallback_reason
+
+
+def test_a_rotating_proxy_gets_three_tries_at_the_wall(fake_get):
+    """Pools rotativos (ScrapeOps etc.) sorteiam outro IP a cada conexão — um
+    exit no muro não condena os próximos, então vale repetir."""
+    calls = fake_get([
+        _FakeResponse({}, status_code=302),
+        _FakeResponse({}, status_code=302),
+        _FakeResponse(_tag_payload([_v1_media(0)])),
+    ])
+    client = InstagramScrapeClient(proxy="http://10.0.0.1:8080")
+    images = client.search("rotina", limit=1)
+    assert len(calls) == 3
+    assert not is_mock_image(images[0])
+    assert client.last_fallback_reason == ""
+
+
+def test_still_walled_after_the_retries_falls_back_with_the_reason(fake_get):
+    calls = fake_get([_FakeResponse({}, status_code=302)] * 3)
+    client = InstagramScrapeClient(proxy="http://10.0.0.1:8080")
+    images = client.search("rotina", limit=2)
+    assert len(calls) == 3
+    assert all(is_mock_image(img) for img in images)
+    assert "também caiu" in client.last_fallback_reason
+
+
+def test_without_a_proxy_the_wall_is_not_retried(fake_get):
+    """Sem proxy o IP de saída é sempre o mesmo — repetir seria só latência."""
+    calls = fake_get(_FakeResponse({}, status_code=302))
+    InstagramScrapeClient().search("rotina", limit=2)
+    assert len(calls) == 1
 
 
 def test_an_insecure_proxy_disables_tls_verification_only_when_asked(fake_get):
