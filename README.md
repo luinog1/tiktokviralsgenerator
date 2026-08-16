@@ -8,6 +8,13 @@ Aplicação Flask que transforma o texto gerado pelo **goviral.ai** em um carros
 
 ---
 
+## 🎯 O que mudou na v0.16
+
+- 🐛 **A busca por hashtag via Apify voltava 1 item e nenhuma foto utilizável** — com tudo configurado certo (`APIFY_TOKEN`, `IMAGE_PROVIDER=instagram_pinterest`), o carrossel caía no gradiente mock com o aviso "A Apify devolveu 1 itens, mas nenhuma foto utilizável". O dataset do run conta o que houve (medido em 2026-08-16): a fase de busca do actor (`search` + `searchType=hashtag`) virou uma consulta ao **Google** (`site:instagram.com/explore/tags/* "aesthetic"`), que casou a hashtag **errada** (#gaesthetic) e devolveu a *entidade do resultado da busca* (`searchTerm`/`postsCount`/`url`) como único item — sem raspar post nenhum ("Crawled 0/1 pages" no log do run). Não era nome de campo trocado, como o aviso hipotetizava: era um dataset sem nenhum post dentro.
+- ✅ **A hashtag agora vai como URL direta, igual ao `@perfil`** — `directUrls: ["https://www.instagram.com/explore/tags/<tag>/"]` pula a fase de busca do actor e devolve os posts no formato que o conversor já esperava (`displayUrl`, `dimensionsWidth/Height`, `alt`, `type`), verificado num run real: 5 posts em 5 itens. O resto do caminho não muda — piso de resolução, casting por metadado e os freios de fatura (`maxItems`, `timeout` do run) seguem os mesmos.
+
+---
+
 ## 🎯 O que mudou na v0.15
 
 - 🗑️ **A API oficial v5 do Pinterest foi removida — ela nunca chegou a buscar nada** — `PINTEREST_ACCESS_TOKEN`, `PINTEREST_API_BASE_URL`, o `PinterestV5Client` inteiro (busca + `validate_token`) e o provider `pinterest_v5` saíram. O motivo é o mesmo que criou o `pinterest_scrape` na v0.7: o `/search/pins/` da v5 exige **Standard Access**, aprovação manual da Pinterest que este projeto nunca teve — então o primeiro degrau da escada do `auto` era código que só sabia devolver `403`. Manter os dois caminhos custava um cliente inteiro para manter, uma variável que parecia obrigatória no `.env` e no `render.yaml`, e um diagnóstico a mais no `/health` sugerindo que faltava configurar um token. A `pinterest-dl` faz a mesma busca sem credencial nenhuma.
@@ -23,6 +30,8 @@ Aplicação Flask que transforma o texto gerado pelo **goviral.ai** em um carros
 - ✅ **Dois freios, porque o actor é pago e roda dentro do `POST /generate`** — o pool pedido é `max(nº de fotos × 3, 12)`, não os 40 que o Pinterest traz de graça: sobra folga para o piso de resolução descartar sem multiplicar a conta. O mesmo número vai em `maxItems`, que é o teto de itens **faturados** (para um actor que ignore o `resultsLimit` não virar surpresa na fatura), e o run leva um `timeout` próprio — sem ele o actor herda o timeout da configuração *dele*, a resposta chegaria depois de o gunicorn já ter matado o worker, e worker morto não faz fallback. O timeout do cliente sobe para 90s por causa do cold start, ainda abaixo do `--timeout 180`.
 - 🗑️ **`INSTAGRAM_PROXY` e `INSTAGRAM_PROXY_INSECURE` foram removidos** — eram a materialização do diagnóstico errado. Com eles saiu também o retry de 3 tentativas (sem proxy o IP de saída é sempre o mesmo, então repetir é só latência) e o `verify=False`, que era exigência das portas-proxy de agregadores. Quem tinha as variáveis no ambiente pode apagá-las: elas não são mais lidas.
 - ✅ **Todas as fontes continuam escolhíveis, e `instagram_pinterest` é a saída sem custo** — o seletor "Fonte das fotos" não mudou: Padrão do servidor, Só Unsplash, Só Pinterest, Só Instagram e Instagram + Pinterest seguem lá. Apify e Scrape.do são **transportes dentro** do Instagram, não fontes novas — então o modo combinado se beneficia da Apify sem nenhuma opção a mais na UI. E o combinado já descarta o resultado mock da fonte que caiu e preenche com a outra: sem token pago nenhum, o carrossel sai **com fotos do Pinterest** em vez de gradiente.
+
+> ⚠️ **Corrigido na v0.16:** o caminho da hashtag por `search` + `searchType` deixou de entregar posts — a fase de busca do actor passou a consultar o Google (casando hashtags erradas) e a devolver a entidade do resultado como único item do dataset. A hashtag agora vai por `directUrls` (`/explore/tags/<tag>/`), como o `@perfil` sempre foi. Ver [v0.16](#-o-que-mudou-na-v016).
 
 ---
 

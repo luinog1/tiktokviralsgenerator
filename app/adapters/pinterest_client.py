@@ -1102,11 +1102,16 @@ class InstagramScrapeClient:
                 "resultsLimit": wanted,
             }
         else:
+            # A hashtag também vai por URL direta. `search`+`searchType` parou
+            # de entregar posts (medido em 2026-08-16): a fase de busca do
+            # actor virou uma consulta ao Google, que casa a hashtag errada
+            # ("aesthetic" achou #gaesthetic) e devolve como único item do
+            # dataset a ENTIDADE do resultado (searchTerm/postsCount), sem
+            # raspar post nenhum — "Crawled 0/1 pages" no log do run. A URL
+            # de /explore/tags/ pula essa busca e o actor devolve os posts no
+            # formato que `_ig_entry_from_apify` espera.
             payload = {
-                "search": tag,
-                "searchType": "hashtag",
-                # Uma hashtag só: a derivação já escolheu qual.
-                "searchLimit": 1,
+                "directUrls": [f"{self._BASE}/explore/tags/{tag}/"],
                 "resultsType": "posts",
                 "resultsLimit": wanted,
             }

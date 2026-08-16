@@ -390,8 +390,13 @@ def test_apify_runs_the_actor_and_maps_the_dataset(fake_post):
 
     assert "apify~instagram-scraper/run-sync-get-dataset-items" in calls[0]["url"]
     assert calls[0]["params"]["token"] == "apify_tok"
-    assert calls[0]["json"]["search"] == "rotinamatinal"
-    assert calls[0]["json"]["searchType"] == "hashtag"
+    # A hashtag vai por URL direta: `search`+`searchType` fazia o actor buscar
+    # a hashtag no GOOGLE e devolver a entidade do resultado (sem post nenhum
+    # no dataset) — e casando a hashtag errada ("aesthetic" → #gaesthetic).
+    assert calls[0]["json"]["directUrls"] == [
+        "https://www.instagram.com/explore/tags/rotinamatinal/"
+    ]
+    assert "search" not in calls[0]["json"]
     assert calls[0]["json"]["resultsType"] == "posts"
     assert [img.image_id for img in images] == ["ig-314150", "ig-314151"]
     assert images[0].image_url == "https://scontent.cdninstagram.com/apify0.jpg"
