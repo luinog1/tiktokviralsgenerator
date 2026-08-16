@@ -45,6 +45,12 @@ def health():
             # `pinterest-dl` é dependência opcional: ausente, o cliente de
             # scraping existe mas só sabe cair no mock.
             "pinterest_scrape_installed": pinterest_scrape_available(),
+            # De um IP de datacenter (Render…) o Instagram anônimo cai no muro
+            # de login; o proxy é a saída documentada — booleano, nunca a URL,
+            # que costuma carregar credencial.
+            "instagram_proxy_set": bool(settings.instagram_proxy),
+            # Transporte alternativo: gateway do Scrape.do (vence o proxy).
+            "scrapedo_token_set": bool(settings.scrapedo_token),
         },
         # Diagnóstico LLM — booleanos, NUNCA valores secretos
         "llm_diagnostic": {

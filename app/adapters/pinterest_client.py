@@ -17,6 +17,9 @@ Variáveis de ambiente:
     PINTEREST_ACCESS_TOKEN   → token Pinterest
     PINTEREST_API_BASE_URL   → default: https://api.pinterest.com/v5
     UNSPLASH_ACCESS_KEY      → chave pública Unsplash (Access Key, não Secret Key)
+    INSTAGRAM_PROXY          → proxy só para as chamadas do Instagram sem token
+    SCRAPEDO_TOKEN           → as mesmas chamadas, saindo pelo gateway do
+                               Scrape.do (vence o proxy quando os dois existem)
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from dataclasses import dataclass
 from itertools import zip_longest
 from types import SimpleNamespace
 from typing import Any, Iterable, Protocol, runtime_checkable
+from urllib.parse import urlencode
 
 import requests
 
@@ -654,6 +658,10 @@ _IG_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 
+# Gateway do Scrape.do — transporte alternativo para as MESMAS chamadas quando
+# o IP local está no muro (datacenter). A chamada sai pelos proxies deles.
+_SCRAPEDO_ENDPOINT = "https://api.scrape.do/"
+
 
 def _ig_slug(text: str) -> str:
     """Hashtag a partir de texto livre: sem acento, sem espaço, minúscula."""
@@ -816,11 +824,38 @@ def _instagram_reason(response: requests.Response) -> str:
     if code in (401, 403):
         return (
             f"Instagram bloqueou o acesso anônimo (HTTP {code}) — sem login, o "
-            "site libera e bloqueia por IP. Tente de novo mais tarde."
+            "site libera e bloqueia por IP. Tente de outra rede ou configure "
+            "INSTAGRAM_PROXY."
         )
     if code == 429:
         return "Instagram está limitando a taxa de chamadas (HTTP 429)."
     return f"Instagram respondeu HTTP {code}."
+
+
+def _scrapedo_reason(response: requests.Response) -> str:
+    """Motivo legível de um HTTP de erro vindo do gateway do Scrape.do.
+
+    Os códigos são DELES (auth, créditos, concorrência do plano), não do
+    Instagram — sem esta separação, um token errado apareceria na prévia como
+    "Instagram bloqueou", que é a pista errada."""
+    code = response.status_code
+    if code == 401:
+        return (
+            "O Scrape.do recusou o token (HTTP 401) — token errado, sem "
+            "créditos ou assinatura suspensa. Confira o painel do Scrape.do."
+        )
+    if code == 429:
+        return (
+            "O Scrape.do limitou a concorrência do plano (HTTP 429) — "
+            "tente gerar de novo em alguns segundos."
+        )
+    if code == 502:
+        return (
+            "O Scrape.do não conseguiu uma resposta válida do Instagram mesmo "
+            "com os retries dele (HTTP 502, sem consumo de crédito) — tente "
+            "gerar de novo."
+        )
+    return f"O Scrape.do respondeu HTTP {code}."
 
 
 class InstagramScrapeClient:
@@ -838,6 +873,14 @@ class InstagramScrapeClient:
     As palavras das queries de casting (HOOK/SCENE_QUERY_HINTS) são removidas
     antes — "#rotinamatinalwomanportrait" não existe — e um `@perfil` ou
     `#hashtag` digitados no tema/palavras-chave vencem a derivação.
+
+    De um IP no balde do muro (datacenter — Render, AWS…), `proxy` dá um IP de
+    saída só para estas chamadas (`INSTAGRAM_PROXY` no ambiente); os downloads
+    do CDN seguem diretos, porque as URLs assinadas não são presas ao IP.
+    `scrapedo_token` (`SCRAPEDO_TOKEN`) é a alternativa gerida: as MESMAS
+    chamadas saem pelo gateway do Scrape.do com proxies residenciais
+    (`super=true`) — o parse e os fallbacks não mudam, só o transporte. Com os
+    dois definidos, o Scrape.do vence.
     """
 
     name = "instagram_scrape"
@@ -848,12 +891,20 @@ class InstagramScrapeClient:
         timeout: int = 20,
         min_resolution: tuple[int, int] = (0, 0),
         hint_words: Iterable[str] = (),
+        proxy: str = "",
+        scrapedo_token: str = "",
     ):
-        self._timeout = timeout
+        self._scrapedo_token = scrapedo_token
+        # O gateway do Scrape.do tenta vários IPs por dentro antes de responder
+        # — os 20s dimensionados para a chamada direta cancelariam metade das
+        # chamadas no meio dos retries (a mesma lição do VISION_TIMEOUT).
+        self._timeout = max(timeout, 60) if scrapedo_token else timeout
         # O mesmo piso do pinterest_scrape: foto menor que o slide é ampliada
         # no render e chega ao feed borrada.
         self._min_resolution = min_resolution
         self._hint_words = {w.strip().lower() for w in hint_words if w.strip()}
+        # None deixa o requests honrar HTTPS_PROXY/HTTP_PROXY do ambiente.
+        self._proxies = {"http": proxy, "https": proxy} if proxy else None
         # Por que a última busca caiu no mock. Vazio = não caiu.
         self.last_fallback_reason = ""
 
@@ -882,12 +933,13 @@ class InstagramScrapeClient:
             self.last_fallback_reason = f"Instagram não respondeu em {self._timeout}s."
             return MockPinterestClient().search(query, limit)
         except ValueError:
-            # HTML no lugar do JSON: o muro de login do Instagram.
-            logger.warning("Instagram devolveu HTML (muro de login) — fallback mock.")
-            self.last_fallback_reason = (
-                "O Instagram devolveu a página de login em vez de dados — o "
-                "acesso anônimo está bloqueado para este IP no momento."
-            )
+            # HTML (ou redirect) no lugar do JSON: o muro de login do Instagram.
+            # O redirect já chega com o motivo preenchido pelo `_get_json`.
+            if not self.last_fallback_reason:
+                logger.warning(
+                    "Instagram devolveu HTML (muro de login) — fallback mock."
+                )
+                self.last_fallback_reason = self._wall_reason()
             return MockPinterestClient().search(query, limit)
         except requests.RequestException as exc:
             logger.warning("Instagram erro: %s — usando fallback mock.", type(exc).__name__)
@@ -921,25 +973,105 @@ class InstagramScrapeClient:
         words = [t for t in tokens if t.lower() not in self._hint_words]
         return _ig_slug("".join(words))
 
-    def _get_json(self, path: str, params: dict[str, str]) -> dict[str, Any]:
-        response = requests.get(
-            f"{self._BASE}{path}",
-            params=params,
-            headers={
-                "User-Agent": _IG_USER_AGENT,
-                "x-ig-app-id": _IG_APP_ID,
-                "Accept": "*/*",
-                "Referer": f"{self._BASE}/",
-            },
-            timeout=self._timeout,
-        )
-        if response.status_code >= 400:
-            logger.warning(
-                "Instagram HTTP %d: %s", response.status_code, response.text[:200]
+    def _wall_reason(self) -> str:
+        """O muro de login, com o remédio: a causa é o IP de saída, então o
+        aviso da prévia precisa dizer QUAL IP trocar — o do servidor, o do
+        proxy que já está configurado, ou o sorteado pelo Scrape.do."""
+        if self._scrapedo_token:
+            remedy = (
+                "a chamada saiu pelos proxies residenciais do Scrape.do e "
+                "mesmo assim caiu no muro — o IP muda a cada chamada, então "
+                "gerar de novo costuma resolver"
             )
-            self.last_fallback_reason = _instagram_reason(response)
+        elif self._proxies:
+            remedy = (
+                "o IP do proxy configurado em INSTAGRAM_PROXY também caiu no "
+                "muro — troque o proxy por um de IP residencial/móvel"
+            )
+        else:
+            remedy = (
+                "IPs de datacenter (Render, AWS…) caem quase sempre nesse "
+                "balde — configure INSTAGRAM_PROXY com um proxy de IP "
+                "residencial ou rode de outra rede"
+            )
+        return (
+            "O Instagram devolveu a página de login em vez de dados — o "
+            f"acesso anônimo está bloqueado para este IP; {remedy}."
+        )
+
+    def _get_json(self, path: str, params: dict[str, str]) -> dict[str, Any]:
+        if self._scrapedo_token:
+            response = self._get_via_scrapedo(path, params)
+        else:
+            response = requests.get(
+                f"{self._BASE}{path}",
+                params=params,
+                headers={
+                    "User-Agent": _IG_USER_AGENT,
+                    "x-ig-app-id": _IG_APP_ID,
+                    "Accept": "*/*",
+                    "Referer": f"{self._BASE}/",
+                },
+                timeout=self._timeout,
+                proxies=self._proxies,
+                # De um IP no balde do muro, a API 302-redireciona para
+                # /accounts/login/. O redirect já É a resposta: segui-lo só
+                # baixaria o HTML do login para falhar no json() logo adiante.
+                allow_redirects=False,
+            )
+        if 300 <= response.status_code < 400:
+            logger.warning(
+                "Instagram redirecionou a API para o login (HTTP %d) — "
+                "fallback mock.",
+                response.status_code,
+            )
+            self.last_fallback_reason = self._wall_reason()
+            raise ValueError("login wall")
+        if response.status_code >= 400:
+            api = "Scrape.do" if self._scrapedo_token else "Instagram"
+            logger.warning(
+                "%s HTTP %d: %s", api, response.status_code, response.text[:200]
+            )
+            # Um erro do gateway (token, créditos, concorrência) não pode
+            # aparecer na prévia como "Instagram bloqueou" — é a pista errada.
+            self.last_fallback_reason = (
+                _scrapedo_reason(response)
+                if self._scrapedo_token
+                else _instagram_reason(response)
+            )
             response.raise_for_status()
         return response.json() or {}
+
+    def _get_via_scrapedo(self, path: str, params: dict[str, str]) -> requests.Response:
+        """A mesma chamada, saindo pelo gateway do Scrape.do.
+
+        `extraHeaders` manda o x-ig-app-id num header `sd-*` POR CIMA do
+        fingerprint deles (`customHeaders` substituiria os headers todos e
+        estragaria o disfarce); `disableRedirection` faz o muro de login
+        voltar como header em vez de virar o HTML da página de login.
+        """
+        response = requests.get(
+            _SCRAPEDO_ENDPOINT,
+            params={
+                "token": self._scrapedo_token,
+                "url": f"{self._BASE}{path}?{urlencode(params)}",
+                # Proxies residenciais/móveis (10x créditos por chamada): os
+                # de datacenter caem no mesmo balde do muro que o IP local.
+                "super": "true",
+                "extraHeaders": "true",
+                "disableRedirection": "true",
+            },
+            headers={"sd-x-ig-app-id": _IG_APP_ID, "sd-referer": f"{self._BASE}/"},
+            timeout=self._timeout,
+        )
+        if response.headers.get("Scrape.do-Target-Redirected-Location"):
+            logger.warning(
+                "Instagram redirecionou para o login (via Scrape.do) — "
+                "fallback mock."
+            )
+            self.last_fallback_reason = self._wall_reason()
+            raise ValueError("login wall")
+        return response
 
     def _profile_entries(self, username: str) -> list[Any]:
         payload = self._get_json(
@@ -1060,6 +1192,8 @@ def _instagram_scrape_client(settings: Settings) -> InstagramScrapeClient:
         min_resolution=(settings.slide_width, settings.slide_height),
         # As palavras das queries de casting não entram na hashtag derivada.
         hint_words=f"{settings.hook_query_hints} {settings.scene_query_hints}".split(),
+        proxy=settings.instagram_proxy,
+        scrapedo_token=settings.scrapedo_token,
     )
 
 

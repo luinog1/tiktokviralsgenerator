@@ -63,6 +63,18 @@ class Settings:
     # Qual cliente de imagens usar. Ver IMAGE_PROVIDERS.
     image_provider: str
 
+    # Proxy usado SÓ nas chamadas do Instagram sem token. O Instagram libera e
+    # bloqueia o acesso anônimo por IP, e IPs de datacenter (Render, AWS…)
+    # caem praticamente sempre no muro de login — nenhum header resolve; o que
+    # resolve é sair por outro IP. Um HTTPS_PROXY global também funcionaria,
+    # mas mandaria Groq, Unsplash e ModelScope pelo proxy junto.
+    instagram_proxy: str
+
+    # Alternativa gerida ao proxy: token do Scrape.do — as mesmas chamadas do
+    # Instagram saem pelo gateway deles (proxies residenciais, super=true).
+    # Com os dois definidos, o token vence.
+    scrapedo_token: str
+
     # LLM (OpenAI-compatible: Groq, OpenAI, Ollama, etc.) — usado para
     # composição de slides E ranking de imagens (mesma fonte).
     llm_provider: Literal["mock", "openai_compatible"]
@@ -146,6 +158,8 @@ class Settings:
                 "https://api.pinterest.com/v5",
             ),
             image_provider=image_provider,
+            instagram_proxy=_get("INSTAGRAM_PROXY"),
+            scrapedo_token=_get("SCRAPEDO_TOKEN"),
             llm_provider=cls._provider(llm_provider_raw),
             llm_api_base_url=llm_base_raw,
             llm_api_key=llm_key_raw,

@@ -23,10 +23,11 @@ from app.config import Settings
 
 
 class _FakeResponse:
-    def __init__(self, payload=None, status_code=200, text=""):
+    def __init__(self, payload=None, status_code=200, text="", headers=None):
         self._payload = payload
         self.status_code = status_code
         self.text = text or ("" if payload is not None else "<html>login</html>")
+        self.headers = headers or {}
 
     def json(self):
         if self._payload is None:
@@ -45,12 +46,15 @@ def fake_get(monkeypatch):
     def _install(response):
         calls = []
 
-        def _get(url, params=None, headers=None, timeout=None):
+        def _get(url, params=None, headers=None, timeout=None, proxies=None,
+                 allow_redirects=True):
             calls.append({
                 "url": url,
                 "params": params or {},
                 "headers": headers or {},
                 "timeout": timeout,
+                "proxies": proxies,
+                "allow_redirects": allow_redirects,
             })
             if isinstance(response, Exception):
                 raise response
@@ -280,6 +284,129 @@ def test_html_instead_of_json_reads_as_the_login_wall(fake_get):
     assert "login" in client.last_fallback_reason
 
 
+def test_a_redirect_is_the_login_wall_and_is_not_followed(fake_get):
+    """De um IP no balde do muro, a API 302-redireciona para /accounts/login/.
+    Seguir o redirect só baixaria o HTML do login — o redirect já É a resposta,
+    e o motivo aponta o remédio (o IP de saída, não o código)."""
+    calls = fake_get(_FakeResponse({}, status_code=302))
+    client = InstagramScrapeClient()
+    images = client.search("rotina", limit=4)
+    assert all(is_mock_image(img) for img in images)
+    assert calls[0]["allow_redirects"] is False
+    assert "página de login" in client.last_fallback_reason
+    assert "INSTAGRAM_PROXY" in client.last_fallback_reason
+
+
+def test_the_proxy_reaches_only_the_instagram_request(fake_get):
+    calls = fake_get(_FakeResponse(_tag_payload([_v1_media(0)])))
+    proxy = "http://user:pass@10.0.0.1:8080"
+    InstagramScrapeClient(proxy=proxy).search("rotina", limit=1)
+    assert calls[0]["proxies"] == {"http": proxy, "https": proxy}
+
+
+def test_without_proxy_the_request_keeps_the_environment_defaults(fake_get):
+    """proxies=None deixa o requests honrar um HTTPS_PROXY global do ambiente."""
+    calls = fake_get(_FakeResponse(_tag_payload([_v1_media(0)])))
+    InstagramScrapeClient().search("rotina", limit=1)
+    assert calls[0]["proxies"] is None
+
+
+def test_walled_with_a_proxy_blames_the_proxy_ip(fake_get):
+    """Com proxy configurado, "configure INSTAGRAM_PROXY" seria conselho já
+    seguido — o aviso tem que dizer que o IP DO PROXY caiu no muro."""
+    fake_get(_FakeResponse({}, status_code=302))
+    client = InstagramScrapeClient(proxy="http://10.0.0.1:8080")
+    client.search("rotina", limit=2)
+    assert "proxy" in client.last_fallback_reason.lower()
+    assert "também caiu" in client.last_fallback_reason
+
+
+# ---------- transporte Scrape.do ----------
+
+
+def test_scrapedo_routes_the_same_call_through_the_gateway(fake_get):
+    calls = fake_get(_FakeResponse(_tag_payload([_v1_media(0)])))
+    client = InstagramScrapeClient(scrapedo_token="sd_tok")
+
+    images = client.search("rotina matinal", limit=1)
+
+    call = calls[0]
+    assert call["url"] == "https://api.scrape.do/"
+    assert call["params"]["token"] == "sd_tok"
+    # O alvo é o MESMO endpoint da chamada direta, com a query embutida.
+    assert call["params"]["url"] == (
+        "https://www.instagram.com/api/v1/tags/web_info/?tag_name=rotinamatinal"
+    )
+    # Residencial: proxy de datacenter cai no mesmo balde do muro.
+    assert call["params"]["super"] == "true"
+    assert call["params"]["disableRedirection"] == "true"
+    # extraHeaders põe o x-ig-app-id POR CIMA do fingerprint deles (o prefixo
+    # sd- é o contrato); mandar o header cru não chegaria ao alvo.
+    assert call["params"]["extraHeaders"] == "true"
+    assert call["headers"]["sd-x-ig-app-id"]
+    assert "x-ig-app-id" not in call["headers"]
+    assert images and not is_mock_image(images[0])
+
+
+def test_scrapedo_carries_the_profile_endpoint_too(fake_get):
+    calls = fake_get(_FakeResponse(_profile_payload([_profile_node(0)])))
+    InstagramScrapeClient(scrapedo_token="t").search("@fulana", limit=1)
+    assert calls[0]["params"]["url"] == (
+        "https://www.instagram.com/api/v1/users/web_profile_info/?username=fulana"
+    )
+
+
+def test_scrapedo_bumps_the_timeout_to_survive_the_gateway_retries(fake_get):
+    """O gateway tenta vários IPs por dentro — os 20s da chamada direta
+    cancelariam a chamada no meio (a mesma lição do VISION_TIMEOUT)."""
+    calls = fake_get(_FakeResponse(_tag_payload([_v1_media(0)])))
+    InstagramScrapeClient(timeout=20, scrapedo_token="t").search("rotina", limit=1)
+    assert calls[0]["timeout"] == 60
+    # Um REQUEST_TIMEOUT_SECONDS acima do piso continua mandando.
+    calls = fake_get(_FakeResponse(_tag_payload([_v1_media(0)])))
+    InstagramScrapeClient(timeout=90, scrapedo_token="t").search("rotina", limit=1)
+    assert calls[0]["timeout"] == 90
+
+
+def test_scrapedo_wins_over_a_configured_proxy(fake_get):
+    calls = fake_get(_FakeResponse(_tag_payload([_v1_media(0)])))
+    client = InstagramScrapeClient(
+        proxy="http://10.0.0.1:8080", scrapedo_token="t"
+    )
+    client.search("rotina", limit=1)
+    assert calls[0]["url"] == "https://api.scrape.do/"
+    assert calls[0]["proxies"] is None
+
+
+def test_the_redirect_header_from_scrapedo_reads_as_the_login_wall(fake_get):
+    """Com disableRedirection, o muro volta como 200 + header apontando o
+    /accounts/login/ — e o remédio não é INSTAGRAM_PROXY (a chamada já saiu
+    por proxy): é gerar de novo, porque o IP do gateway rotaciona."""
+    fake_get(_FakeResponse(_tag_payload([_v1_media(0)]), headers={
+        "Scrape.do-Target-Redirected-Location":
+            "https://www.instagram.com/accounts/login/",
+    }))
+    client = InstagramScrapeClient(scrapedo_token="t")
+    images = client.search("rotina", limit=2)
+    assert all(is_mock_image(img) for img in images)
+    assert "página de login" in client.last_fallback_reason
+    assert "Scrape.do" in client.last_fallback_reason
+    assert "INSTAGRAM_PROXY" not in client.last_fallback_reason
+
+
+def test_scrapedo_gateway_errors_do_not_read_as_instagram_blocks(fake_get):
+    """401/429/502 vindos do gateway são token, concorrência e retries
+    esgotados — não "Instagram bloqueou", que mandaria investigar o lugar
+    errado."""
+    for status, needle in ((401, "token"), (429, "concorrência"), (502, "crédito")):
+        fake_get(_FakeResponse({}, status_code=status))
+        client = InstagramScrapeClient(scrapedo_token="t")
+        images = client.search("rotina", limit=2)
+        assert all(is_mock_image(img) for img in images)
+        assert needle in client.last_fallback_reason.lower()
+        assert "acesso anônimo" not in client.last_fallback_reason
+
+
 def test_timeout_falls_back_with_a_reason(fake_get):
     fake_get(requests.Timeout())
     client = InstagramScrapeClient(timeout=7)
@@ -443,3 +570,30 @@ def test_instagram_client_inherits_the_slide_floor_and_the_hints():
     # As dicas de casting não podem virar hashtag.
     assert "portrait" in client._hint_words
     assert "aesthetic" in client._hint_words
+
+
+def test_instagram_proxy_reaches_the_client_from_the_settings():
+    proxy = "http://user:pass@10.0.0.1:8080"
+    settings = Settings.from_env({
+        "IMAGE_PROVIDER": "instagram_scrape",
+        "INSTAGRAM_PROXY": proxy,
+    })
+    client = build_pinterest_client(settings)
+    assert client._proxies == {"http": proxy, "https": proxy}
+    # Sem a variável, o cliente sai sem proxy fixo (ambiente decide).
+    bare = build_pinterest_client(
+        Settings.from_env({"IMAGE_PROVIDER": "instagram_scrape"})
+    )
+    assert bare._proxies is None
+
+
+def test_scrapedo_token_reaches_the_client_from_the_settings():
+    settings = Settings.from_env({
+        "IMAGE_PROVIDER": "instagram_scrape",
+        "SCRAPEDO_TOKEN": "sd_tok",
+    })
+    client = build_pinterest_client(settings)
+    assert client._scrapedo_token == "sd_tok"
+    assert build_pinterest_client(
+        Settings.from_env({"IMAGE_PROVIDER": "instagram_scrape"})
+    )._scrapedo_token == ""
