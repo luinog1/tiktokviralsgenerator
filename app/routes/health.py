@@ -45,14 +45,12 @@ def health():
             # `pinterest-dl` é dependência opcional: ausente, o cliente de
             # scraping existe mas só sabe cair no mock.
             "pinterest_scrape_installed": pinterest_scrape_available(),
-            # De um IP de datacenter (Render…) o Instagram anônimo cai no muro
-            # de login; o proxy é a saída documentada — booleano, nunca a URL,
-            # que costuma carregar credencial.
-            "instagram_proxy_set": bool(settings.instagram_proxy),
-            # true = validação de TLS desligada nas chamadas do Instagram
-            # (portas-proxy de agregadores, tipo ScrapeOps, exigem isso).
-            "instagram_proxy_insecure": settings.instagram_proxy_insecure,
-            # Transporte alternativo: gateway do Scrape.do (vence o proxy).
+            # Transportes do Instagram sem token — booleanos, nunca o token.
+            # A Apify vence o Scrape.do quando os dois existem: ela raspa com
+            # sessão própria, e é a única com chance na busca por hashtag (o
+            # 302 do endpoint anônimo não é gate de IP — ver README v0.14).
+            "apify_token_set": bool(settings.apify_token),
+            "apify_actor_value": settings.apify_actor,
             "scrapedo_token_set": bool(settings.scrapedo_token),
         },
         # Diagnóstico LLM — booleanos, NUNCA valores secretos

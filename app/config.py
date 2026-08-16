@@ -63,22 +63,27 @@ class Settings:
     # Qual cliente de imagens usar. Ver IMAGE_PROVIDERS.
     image_provider: str
 
-    # Proxy usado SÓ nas chamadas do Instagram sem token. O Instagram libera e
-    # bloqueia o acesso anônimo por IP, e IPs de datacenter (Render, AWS…)
-    # caem praticamente sempre no muro de login — nenhum header resolve; o que
-    # resolve é sair por outro IP. Um HTTPS_PROXY global também funcionaria,
-    # mas mandaria Groq, Unsplash e ModelScope pelo proxy junto.
-    instagram_proxy: str
+    # --- Transportes do Instagram sem token ---
+    # O acesso anônimo direto não serve mais para hashtag: o
+    # /api/v1/tags/web_info/ responde 302 → /accounts/login/ em qualquer IP de
+    # saída (medido em 2026-08-16 de datacenter, de residencial doméstico e
+    # dos exits residenciais do ScrapeOps). Por isso o proxy próprio saiu — ele
+    # gastava dinheiro sem mudar a resposta — e sobraram dois serviços pagos,
+    # cada um com um contrato diferente:
 
-    # Portas-proxy de agregadores (ScrapeOps etc.) interceptam o TLS por
-    # design e exigem desligar a validação de certificado — só nas chamadas
-    # do Instagram, e só quando explicitamente ligado.
-    instagram_proxy_insecure: bool
-
-    # Alternativa gerida ao proxy: token do Scrape.do — as mesmas chamadas do
-    # Instagram saem pelo gateway deles (proxies residenciais, super=true).
-    # Com os dois definidos, o token vence.
+    # Scrape.do — as MESMAS chamadas da API web saem pelo gateway deles
+    # (proxies residenciais, super=true). Só troca o transporte: o payload e o
+    # parse são os mesmos. Contra o muro da hashtag ele não passa; serve ao
+    # caminho @perfil, cujo bloqueio (429) é cota por IP de verdade.
     scrapedo_token: str
+
+    # Apify — NÃO é proxy: é um actor que raspa com sessão própria e devolve
+    # dataset estruturado (parser próprio, ver _ig_entry_from_apify). É o único
+    # transporte com chance real na hashtag, e por isso vence os outros.
+    apify_token: str
+    # Qual actor rodar. Configurável porque o preço por resultado varia entre
+    # os actors de Instagram e o id é exatamente o tipo de coisa que muda.
+    apify_actor: str
 
     # LLM (OpenAI-compatible: Groq, OpenAI, Ollama, etc.) — usado para
     # composição de slides E ranking de imagens (mesma fonte).
@@ -163,9 +168,9 @@ class Settings:
                 "https://api.pinterest.com/v5",
             ),
             image_provider=image_provider,
-            instagram_proxy=_get("INSTAGRAM_PROXY"),
-            instagram_proxy_insecure=_bool(env.get("INSTAGRAM_PROXY_INSECURE")),  # type: ignore[union-attr]
             scrapedo_token=_get("SCRAPEDO_TOKEN"),
+            apify_token=_get("APIFY_TOKEN"),
+            apify_actor=_get("APIFY_ACTOR") or "apify~instagram-scraper",
             llm_provider=cls._provider(llm_provider_raw),
             llm_api_base_url=llm_base_raw,
             llm_api_key=llm_key_raw,

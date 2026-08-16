@@ -45,20 +45,18 @@ def fake_get(monkeypatch):
 
     def _install(response):
         calls = []
-        # Uma lista de respostas serve para simular o proxy rotativo: uma
-        # resposta por chamada, na ordem.
+        # Uma lista de respostas serve para simular respostas em sequência:
+        # uma resposta por chamada, na ordem.
         queue = list(response) if isinstance(response, list) else None
 
-        def _get(url, params=None, headers=None, timeout=None, proxies=None,
-                 allow_redirects=True, verify=True):
+        def _get(url, params=None, headers=None, timeout=None,
+                 allow_redirects=True):
             calls.append({
                 "url": url,
                 "params": params or {},
                 "headers": headers or {},
                 "timeout": timeout,
-                "proxies": proxies,
                 "allow_redirects": allow_redirects,
-                "verify": verify,
             })
             current = queue.pop(0) if queue is not None else response
             if isinstance(current, Exception):
@@ -69,6 +67,47 @@ def fake_get(monkeypatch):
         return calls
 
     return _install
+
+
+@pytest.fixture
+def fake_post(monkeypatch):
+    """Instala um fake de requests.post (a Apify) e devolve as chamadas."""
+
+    def _install(response):
+        calls = []
+        queue = list(response) if isinstance(response, list) else None
+
+        def _post(url, params=None, json=None, timeout=None):
+            calls.append(
+                {"url": url, "params": params or {}, "json": json or {}, "timeout": timeout}
+            )
+            current = queue.pop(0) if queue is not None else response
+            if isinstance(current, Exception):
+                raise current
+            return current
+
+        monkeypatch.setattr("app.adapters.pinterest_client.requests.post", _post)
+        return calls
+
+    return _install
+
+
+def _apify_item(i=0, width=1080, height=1350, **over):
+    """Item do dataset do apify/instagram-scraper (resultsType=posts)."""
+    item = {
+        "id": f"31415{i}",
+        "type": "Image",
+        "shortCode": f"Cabc{i}",
+        "caption": f"legenda {i}",
+        "url": f"https://www.instagram.com/p/Cabc{i}/",
+        "displayUrl": f"https://scontent.cdninstagram.com/apify{i}.jpg",
+        "alt": f"May be an image of 1 person, foto {i}",
+        "ownerUsername": "fulana",
+        "dimensionsWidth": width,
+        "dimensionsHeight": height,
+    }
+    item.update(over)
+    return item
 
 
 def _profile_node(i=0, width=1080, height=1440, is_video=False, code=None):
@@ -290,85 +329,185 @@ def test_html_instead_of_json_reads_as_the_login_wall(fake_get):
 
 
 def test_a_redirect_is_the_login_wall_and_is_not_followed(fake_get):
-    """De um IP no balde do muro, a API 302-redireciona para /accounts/login/.
-    Seguir o redirect só baixaria o HTML do login — o redirect já É a resposta,
-    e o motivo aponta o remédio (o IP de saída, não o código)."""
+    """A API 302-redireciona para /accounts/login/. Seguir o redirect só
+    baixaria o HTML do login — o redirect já É a resposta."""
     calls = fake_get(_FakeResponse({}, status_code=302))
     client = InstagramScrapeClient()
     images = client.search("rotina", limit=4)
     assert all(is_mock_image(img) for img in images)
     assert calls[0]["allow_redirects"] is False
     assert "página de login" in client.last_fallback_reason
-    assert "INSTAGRAM_PROXY" in client.last_fallback_reason
 
 
-def test_the_proxy_reaches_only_the_instagram_request(fake_get):
-    calls = fake_get(_FakeResponse(_tag_payload([_v1_media(0)])))
-    proxy = "http://user:pass@10.0.0.1:8080"
-    InstagramScrapeClient(proxy=proxy).search("rotina", limit=1)
-    assert calls[0]["proxies"] == {"http": proxy, "https": proxy}
-
-
-def test_without_proxy_the_request_keeps_the_environment_defaults(fake_get):
-    """proxies=None deixa o requests honrar um HTTPS_PROXY global do ambiente."""
-    calls = fake_get(_FakeResponse(_tag_payload([_v1_media(0)])))
-    InstagramScrapeClient().search("rotina", limit=1)
-    assert calls[0]["proxies"] is None
-
-
-def test_walled_with_a_proxy_blames_the_proxy_ip(fake_get):
-    """Com proxy configurado, "configure INSTAGRAM_PROXY" seria conselho já
-    seguido — o aviso tem que dizer que o IP DO PROXY caiu no muro."""
+def test_the_wall_never_blames_the_exit_ip(fake_get):
+    """O muro é gate do ENDPOINT, não do IP: medido em 2026-08-16, o 302 volta
+    igual de datacenter, de residencial doméstico e dos exits do ScrapeOps.
+    Este aviso já mandou "trocar o proxy por um residencial" — conselho que fez
+    o usuário pagar proxy à toa, e é o que o teste trava. O remédio agora é
+    APIFY_TOKEN (sessão própria) ou trocar de fonte."""
     fake_get(_FakeResponse({}, status_code=302))
-    client = InstagramScrapeClient(proxy="http://10.0.0.1:8080")
-    client.search("rotina", limit=2)
-    assert "proxy" in client.last_fallback_reason.lower()
-    assert "também caiu" in client.last_fallback_reason
+    for client in (
+        InstagramScrapeClient(),
+        InstagramScrapeClient(scrapedo_token="tok"),
+    ):
+        reason = client._wall_reason()
+        assert "não é do IP" in reason or "não do IP" in reason
+        assert "APIFY_TOKEN" in reason
+        assert "pinterest" in reason.lower()
+        assert "troque o proxy" not in reason.lower()
 
 
-def test_a_rotating_proxy_gets_three_tries_at_the_wall(fake_get):
-    """Pools rotativos (ScrapeOps etc.) sorteiam outro IP a cada conexão — um
-    exit no muro não condena os próximos, então vale repetir."""
-    calls = fake_get([
-        _FakeResponse({}, status_code=302),
-        _FakeResponse({}, status_code=302),
-        _FakeResponse(_tag_payload([_v1_media(0)])),
-    ])
-    client = InstagramScrapeClient(proxy="http://10.0.0.1:8080")
-    images = client.search("rotina", limit=1)
-    assert len(calls) == 3
-    assert not is_mock_image(images[0])
+def test_the_wall_is_not_retried(fake_get):
+    """Outro exit não passa por um gate de endpoint, e sem proxy o IP é sempre
+    o mesmo — repetir seria só latência dentro do POST /generate."""
+    calls = fake_get([_FakeResponse({}, status_code=302)] * 3)
+    client = InstagramScrapeClient()
+    images = client.search("rotina", limit=2)
+    assert len(calls) == 1
+    assert all(is_mock_image(img) for img in images)
+    assert "APIFY_TOKEN" in client.last_fallback_reason
+
+
+def test_the_rate_limit_falls_back_with_its_own_reason(fake_get):
+    calls = fake_get(_FakeResponse({}, status_code=429))
+    client = InstagramScrapeClient()
+    images = client.search("rotina", limit=2)
+    assert len(calls) == 1
+    assert all(is_mock_image(img) for img in images)
+    assert "429" in client.last_fallback_reason
+
+
+# ---------- transporte Apify ----------
+
+
+def test_apify_runs_the_actor_and_maps_the_dataset(fake_post):
+    """A Apify não é proxy: devolve o dataset DELA, com nomes de campo
+    próprios. A conversão acontece na fronteira, então o piso de resolução, o
+    casting por metadado e o `_to_image` seguem valendo sem saber da origem."""
+    calls = fake_post(_FakeResponse([_apify_item(0), _apify_item(1)]))
+    client = InstagramScrapeClient(apify_token="apify_tok", min_resolution=(1080, 1350))
+    images = client.search("rotina matinal", limit=2)
+
+    assert "apify~instagram-scraper/run-sync-get-dataset-items" in calls[0]["url"]
+    assert calls[0]["params"]["token"] == "apify_tok"
+    assert calls[0]["json"]["search"] == "rotinamatinal"
+    assert calls[0]["json"]["searchType"] == "hashtag"
+    assert calls[0]["json"]["resultsType"] == "posts"
+    assert [img.image_id for img in images] == ["ig-314150", "ig-314151"]
+    assert images[0].image_url == "https://scontent.cdninstagram.com/apify0.jpg"
+    assert images[0].source_url == "https://www.instagram.com/p/Cabc0/"
+    assert images[0].attribution_text == "@fulana no Instagram"
+    # O `alt` do actor é o mesmo sinal que alimenta o casting por metadado.
+    assert "1 person" in images[0].title
     assert client.last_fallback_reason == ""
 
 
-def test_still_walled_after_the_retries_falls_back_with_the_reason(fake_get):
-    calls = fake_get([_FakeResponse({}, status_code=302)] * 3)
-    client = InstagramScrapeClient(proxy="http://10.0.0.1:8080")
-    images = client.search("rotina", limit=2)
-    assert len(calls) == 3
-    assert all(is_mock_image(img) for img in images)
-    assert "também caiu" in client.last_fallback_reason
+def test_apify_wins_over_scrapedo(fake_post, fake_get):
+    """Com os dois configurados, a Apify vence: o Scrape.do só troca o IP, e
+    contra um gate de endpoint isso não passa."""
+    posts = fake_post(_FakeResponse([_apify_item(0)]))
+    gets = fake_get(_FakeResponse({}, status_code=302))
+    client = InstagramScrapeClient(apify_token="a", scrapedo_token="s")
+    images = client.search("rotina", limit=1)
+    assert len(posts) == 1 and gets == []
+    assert not is_mock_image(images[0])
 
 
-def test_without_a_proxy_the_wall_is_not_retried(fake_get):
-    """Sem proxy o IP de saída é sempre o mesmo — repetir seria só latência."""
-    calls = fake_get(_FakeResponse({}, status_code=302))
-    InstagramScrapeClient().search("rotina", limit=2)
-    assert len(calls) == 1
+def test_apify_uses_the_profile_url_for_an_at_handle(fake_post):
+    calls = fake_post(_FakeResponse([_apify_item(0)]))
+    InstagramScrapeClient(apify_token="a").search("@fulana", limit=2)
+    assert calls[0]["json"]["directUrls"] == ["https://www.instagram.com/fulana/"]
+    assert "search" not in calls[0]["json"]
 
 
-def test_an_insecure_proxy_disables_tls_verification_only_when_asked(fake_get):
-    """Portas-proxy de agregadores (ScrapeOps) interceptam o TLS e as docs
-    deles mandam desligar a validação — opt-in, nunca o default."""
-    calls = fake_get(_FakeResponse(_tag_payload([_v1_media(0)])))
-    InstagramScrapeClient(
-        proxy="http://scrapeops.mobile=true:key@residential-proxy.scrapeops.io:8181",
-        proxy_insecure=True,
+def test_apify_caps_the_billed_items_and_the_run(fake_post):
+    """Cada item do actor é pago e o run roda dentro do POST /generate: sem
+    `maxItems` uma fatura surpresa, sem `timeout` o gunicorn mata o worker
+    antes do fallback."""
+    calls = fake_post(_FakeResponse([_apify_item(0)]))
+    client = InstagramScrapeClient(apify_token="a", timeout=20)
+    client.search("rotina", limit=4)
+    wanted = calls[0]["json"]["resultsLimit"]
+    assert wanted == 12  # max(limit*3, 12)
+    assert calls[0]["params"]["maxItems"] == wanted
+    # O teto do run fica abaixo do timeout do cliente, que sobe para 90s por
+    # causa do cold start do actor.
+    assert client._timeout == 90
+    assert calls[0]["params"]["timeout"] < client._timeout
+
+
+def test_apify_skips_videos_and_takes_the_carousel_cover(fake_post):
+    fake_post(_FakeResponse([
+        _apify_item(0, type="Video", videoUrl="https://v/0.mp4"),
+        _apify_item(1, type="Sidecar", displayUrl="",
+                    images=["https://scontent.cdninstagram.com/capa.jpg",
+                            "https://scontent.cdninstagram.com/segunda.jpg"]),
+    ]))
+    images = InstagramScrapeClient(apify_token="a").search("rotina", limit=4)
+    assert [img.image_id for img in images] == ["ig-314151"]
+    assert images[0].image_url == "https://scontent.cdninstagram.com/capa.jpg"
+
+
+def test_apify_applies_the_slide_resolution_floor(fake_post):
+    """O piso é o mesmo dos outros caminhos: foto menor que o slide seria
+    ampliada no render e chegaria borrada ao feed."""
+    fake_post(_FakeResponse([
+        _apify_item(0, width=640, height=800),
+        _apify_item(1, width=1080, height=1350),
+    ]))
+    images = InstagramScrapeClient(
+        apify_token="a", min_resolution=(1080, 1350)
     ).search("rotina", limit=1)
-    assert calls[0]["verify"] is False
-    calls = fake_get(_FakeResponse(_tag_payload([_v1_media(0)])))
-    InstagramScrapeClient().search("rotina", limit=1)
-    assert calls[0]["verify"] is True
+    assert [img.image_id for img in images] == ["ig-314151"]
+
+
+def test_apify_gateway_errors_do_not_read_as_instagram_blocks(fake_post):
+    """401/402/404/408 são da Apify — "Instagram bloqueou" mandaria investigar
+    o lugar errado (o Instagram nem foi chamado por nós)."""
+    for status, needle in (
+        (401, "token"), (402, "crédito"), (404, "APIFY_ACTOR"), (408, "cold start")
+    ):
+        fake_post(_FakeResponse({}, status_code=status))
+        client = InstagramScrapeClient(apify_token="a")
+        images = client.search("rotina", limit=2)
+        assert all(is_mock_image(img) for img in images)
+        assert needle in client.last_fallback_reason
+        assert "Instagram" not in client.last_fallback_reason
+
+
+def test_apify_unusable_dataset_names_the_field_mismatch(fake_post):
+    """Dataset cheio e nada aproveitável = ou só vídeo, ou o actor usa outros
+    nomes de campo. A segunda é cara de descobrir sem esta pista."""
+    fake_post(_FakeResponse([{"foo": "bar"}, {"baz": 1}]))
+    client = InstagramScrapeClient(apify_token="a")
+    images = client.search("rotina", limit=2)
+    assert all(is_mock_image(img) for img in images)
+    assert "displayUrl" in client.last_fallback_reason
+
+
+def test_apify_non_list_payload_is_not_read_as_the_login_wall(fake_post):
+    fake_post(_FakeResponse({"error": {"type": "actor-not-found"}}))
+    client = InstagramScrapeClient(apify_token="a", apify_actor="eu~errado")
+    images = client.search("rotina", limit=2)
+    assert all(is_mock_image(img) for img in images)
+    assert "eu~errado" in client.last_fallback_reason
+    assert "login" not in client.last_fallback_reason
+
+
+def test_apify_timeout_names_apify_not_instagram(fake_post):
+    fake_post(requests.Timeout())
+    client = InstagramScrapeClient(apify_token="a")
+    images = client.search("rotina", limit=2)
+    assert all(is_mock_image(img) for img in images)
+    assert client.last_fallback_reason.startswith("A Apify não respondeu")
+
+
+def test_a_custom_actor_id_reaches_the_url(fake_post):
+    calls = fake_post(_FakeResponse([_apify_item(0)]))
+    InstagramScrapeClient(
+        apify_token="a", apify_actor="outro~scraper"
+    ).search("rotina", limit=1)
+    assert "/acts/outro~scraper/run-sync-get-dataset-items" in calls[0]["url"]
 
 
 # ---------- transporte Scrape.do ----------
@@ -418,20 +557,22 @@ def test_scrapedo_bumps_the_timeout_to_survive_the_gateway_retries(fake_get):
     assert calls[0]["timeout"] == 90
 
 
-def test_scrapedo_wins_over_a_configured_proxy(fake_get):
+def test_scrapedo_replaces_the_direct_call(fake_get):
+    """O Scrape.do é transporte: a chamada sai para o gateway deles em vez de
+    para o instagram.com, mas o payload e o parse são os mesmos."""
     calls = fake_get(_FakeResponse(_tag_payload([_v1_media(0)])))
-    client = InstagramScrapeClient(
-        proxy="http://10.0.0.1:8080", scrapedo_token="t"
-    )
-    client.search("rotina", limit=1)
+    client = InstagramScrapeClient(scrapedo_token="t")
+    images = client.search("rotina", limit=1)
     assert calls[0]["url"] == "https://api.scrape.do/"
-    assert calls[0]["proxies"] is None
+    assert calls[0]["params"]["token"] == "t"
+    assert not is_mock_image(images[0])
 
 
 def test_the_redirect_header_from_scrapedo_reads_as_the_login_wall(fake_get):
     """Com disableRedirection, o muro volta como 200 + header apontando o
-    /accounts/login/ — e o remédio não é INSTAGRAM_PROXY (a chamada já saiu
-    por proxy): é gerar de novo, porque o IP do gateway rotaciona."""
+    /accounts/login/. O remédio antigo — "gera de novo, o IP do gateway
+    rotaciona" — só queimava crédito (10x por chamada, com `super=true`): o
+    gate é do endpoint, então os exits residenciais deles caem no mesmo 302."""
     fake_get(_FakeResponse(_tag_payload([_v1_media(0)]), headers={
         "Scrape.do-Target-Redirected-Location":
             "https://www.instagram.com/accounts/login/",
@@ -440,8 +581,8 @@ def test_the_redirect_header_from_scrapedo_reads_as_the_login_wall(fake_get):
     images = client.search("rotina", limit=2)
     assert all(is_mock_image(img) for img in images)
     assert "página de login" in client.last_fallback_reason
-    assert "Scrape.do" in client.last_fallback_reason
-    assert "INSTAGRAM_PROXY" not in client.last_fallback_reason
+    assert "SCRAPEDO_TOKEN" in client.last_fallback_reason
+    assert "gerar de novo" not in client.last_fallback_reason
 
 
 def test_scrapedo_gateway_errors_do_not_read_as_instagram_blocks(fake_get):
@@ -622,19 +763,26 @@ def test_instagram_client_inherits_the_slide_floor_and_the_hints():
     assert "aesthetic" in client._hint_words
 
 
-def test_instagram_proxy_reaches_the_client_from_the_settings():
-    proxy = "http://user:pass@10.0.0.1:8080"
+def test_apify_settings_reach_the_client_and_win_over_scrapedo():
     settings = Settings.from_env({
         "IMAGE_PROVIDER": "instagram_scrape",
-        "INSTAGRAM_PROXY": proxy,
+        "APIFY_TOKEN": "apify_tok",
+        "APIFY_ACTOR": "outro~scraper",
+        "SCRAPEDO_TOKEN": "sd_tok",
     })
     client = build_pinterest_client(settings)
-    assert client._proxies == {"http": proxy, "https": proxy}
-    # Sem a variável, o cliente sai sem proxy fixo (ambiente decide).
+    assert client._apify_token == "apify_tok"
+    assert client._apify_actor == "outro~scraper"
+    # O Scrape.do continua chegando ao cliente; quem decide a precedência é o
+    # `search`, e é a Apify que vence (ver test_apify_wins_over_scrapedo).
+    assert client._scrapedo_token == "sd_tok"
+
     bare = build_pinterest_client(
         Settings.from_env({"IMAGE_PROVIDER": "instagram_scrape"})
     )
-    assert bare._proxies is None
+    assert bare._apify_token == ""
+    # Sem APIFY_ACTOR o default é o actor de Instagram da própria Apify.
+    assert bare._apify_actor == "apify~instagram-scraper"
 
 
 def test_scrapedo_token_reaches_the_client_from_the_settings():
@@ -647,15 +795,3 @@ def test_scrapedo_token_reaches_the_client_from_the_settings():
     assert build_pinterest_client(
         Settings.from_env({"IMAGE_PROVIDER": "instagram_scrape"})
     )._scrapedo_token == ""
-
-
-def test_proxy_insecure_reaches_the_client_from_the_settings():
-    settings = Settings.from_env({
-        "IMAGE_PROVIDER": "instagram_scrape",
-        "INSTAGRAM_PROXY": "http://scrapeops:key@residential-proxy.scrapeops.io:8181",
-        "INSTAGRAM_PROXY_INSECURE": "true",
-    })
-    assert build_pinterest_client(settings)._verify is False
-    assert build_pinterest_client(
-        Settings.from_env({"IMAGE_PROVIDER": "instagram_scrape"})
-    )._verify is True

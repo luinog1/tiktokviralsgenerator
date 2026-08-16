@@ -17,9 +17,11 @@ Variáveis de ambiente:
     PINTEREST_ACCESS_TOKEN   → token Pinterest
     PINTEREST_API_BASE_URL   → default: https://api.pinterest.com/v5
     UNSPLASH_ACCESS_KEY      → chave pública Unsplash (Access Key, não Secret Key)
-    INSTAGRAM_PROXY          → proxy só para as chamadas do Instagram sem token
-    SCRAPEDO_TOKEN           → as mesmas chamadas, saindo pelo gateway do
-                               Scrape.do (vence o proxy quando os dois existem)
+    APIFY_TOKEN              → roda um actor da Apify que raspa o Instagram e
+                               devolve dataset próprio (vence o Scrape.do)
+    APIFY_ACTOR              → default: apify~instagram-scraper
+    SCRAPEDO_TOKEN           → as mesmas chamadas da API web, saindo pelo
+                               gateway do Scrape.do
 """
 
 from __future__ import annotations
@@ -37,7 +39,6 @@ from typing import Any, Iterable, Protocol, runtime_checkable
 from urllib.parse import urlencode
 
 import requests
-import urllib3
 
 from app.config import IMAGE_PROVIDERS, Settings
 
@@ -663,6 +664,18 @@ _IG_USER_AGENT = (
 # o IP local está no muro (datacenter). A chamada sai pelos proxies deles.
 _SCRAPEDO_ENDPOINT = "https://api.scrape.do/"
 
+# Apify — `run-sync-get-dataset-items` roda o actor e devolve os itens na MESMA
+# resposta, sem precisar de polling do run nem de uma segunda chamada ao
+# dataset. É o que torna viável chamar de dentro do POST /generate. O teto
+# desse endpoint é 300s (depois disso ele responde 408), mas o nosso teto é
+# bem menor — ver `_APIFY_MIN_TIMEOUT`.
+_APIFY_ENDPOINT = "https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items"
+# O actor tem cold start (a máquina dele sobe antes de raspar), então o timeout
+# dimensionado para um GET de JSON cancelaria quase toda chamada no meio. 90s
+# fica acima do cold start típico e ainda abaixo do `--timeout 180` do gunicorn,
+# que precisa sobrar para o fallback acontecer (a mesma conta do VISION_TIMEOUT).
+_APIFY_MIN_TIMEOUT = 90
+
 
 def _ig_slug(text: str) -> str:
     """Hashtag a partir de texto livre: sem acento, sem espaço, minúscula."""
@@ -782,6 +795,53 @@ def _ig_entry_from_v1(media: Any) -> SimpleNamespace | None:
     )
 
 
+def _ig_entry_from_apify(item: Any) -> SimpleNamespace | None:
+    """Item do dataset da Apify → a MESMA entrada comum das outras duas formas.
+
+    Aqui está a diferença de fundo entre os dois serviços pagos: o Scrape.do é
+    transporte — devolve o payload do próprio Instagram, então o parser dele é
+    o mesmo de sempre. A Apify roda um *actor*, que raspa por conta própria e
+    devolve o dataset **dele**, com nomes de campo próprios. Convertendo aqui,
+    na fronteira, todo o resto do caminho (`_cut_pool`, o piso de resolução, o
+    casting por metadado, `_to_image`) continua valendo sem saber de onde veio.
+
+    Vídeo/reel fica de fora (o slide é uma foto) e o carrossel entra pela capa,
+    as mesmas regras de `_ig_entry_from_v1`.
+    """
+    if not isinstance(item, dict):
+        return None
+    if item.get("type") == "Video" or item.get("videoUrl") or item.get("isVideo"):
+        return None
+    # `images` só vem preenchido no carrossel (type=Sidecar); a capa é a
+    # primeira. `displayUrl` cobre o post de foto única e serve de fallback.
+    images = [str(u) for u in (item.get("images") or []) if u]
+    src = str(item.get("displayUrl") or "") or (images[0] if images else "")
+    if not src:
+        return None
+    try:
+        resolution = (
+            int(item.get("dimensionsWidth") or 0),
+            int(item.get("dimensionsHeight") or 0),
+        )
+    except (TypeError, ValueError):
+        resolution = (0, 0)
+    code = str(item.get("shortCode") or "")
+    return SimpleNamespace(
+        media_id=str(item.get("id") or code),
+        code=code,
+        src=src,
+        # O actor não publica uma thumb reduzida; sem ela, a visão baixa a
+        # foto cheia — custa mais token, mas é o que existe.
+        thumb="",
+        resolution=resolution,
+        # `alt` do actor é o accessibility caption do Instagram ("May be an
+        # image of 1 person…") — o mesmo sinal que alimenta o casting por
+        # metadado nas outras duas formas. Sem ele, a legenda serve.
+        alt=str(item.get("alt") or "") or str(item.get("caption") or ""),
+        username=str(item.get("ownerUsername") or ""),
+    )
+
+
 def _ig_tag_entries(payload: dict[str, Any]) -> list[Any]:
     """Fotos do payload de hashtag, nas DUAS formas que o endpoint responde.
 
@@ -825,8 +885,8 @@ def _instagram_reason(response: requests.Response) -> str:
     if code in (401, 403):
         return (
             f"Instagram bloqueou o acesso anônimo (HTTP {code}) — sem login, o "
-            "site libera e bloqueia por IP. Tente de outra rede ou configure "
-            "INSTAGRAM_PROXY."
+            "site libera e bloqueia por IP. Configure APIFY_TOKEN (raspa com "
+            "sessão própria) ou troque a fonte das fotos para o Pinterest."
         )
     if code == 429:
         return "Instagram está limitando a taxa de chamadas (HTTP 429)."
@@ -859,29 +919,81 @@ def _scrapedo_reason(response: requests.Response) -> str:
     return f"O Scrape.do respondeu HTTP {code}."
 
 
+def _apify_reason(response: requests.Response) -> str:
+    """Motivo legível de um HTTP de erro vindo da Apify.
+
+    Os códigos são DELES (token, créditos, actor inexistente, run estourado),
+    não do Instagram — pela mesma razão do `_scrapedo_reason`: "Instagram
+    bloqueou" mandaria investigar o lugar errado.
+    """
+    code = response.status_code
+    if code in (401, 403):
+        return (
+            f"A Apify recusou o token (HTTP {code}) — token errado, expirado "
+            "ou sem permissão para rodar o actor. Confira APIFY_TOKEN no "
+            "painel da Apify."
+        )
+    if code == 404:
+        return (
+            "A Apify não encontrou o actor (HTTP 404) — confira APIFY_ACTOR. "
+            "O id vai com til no lugar da barra: `apify~instagram-scraper`."
+        )
+    if code == 402:
+        return (
+            "A Apify recusou o run por falta de crédito (HTTP 402) — confira "
+            "o saldo/plano na conta."
+        )
+    if code == 408:
+        return (
+            "O actor da Apify não terminou a tempo (HTTP 408) — costuma ser "
+            "cold start somado a uma busca grande; gerar de novo com o actor "
+            "já aquecido costuma resolver."
+        )
+    if code == 429:
+        return (
+            "A Apify limitou a taxa de runs (HTTP 429) — tente gerar de novo "
+            "em alguns segundos."
+        )
+    return f"A Apify respondeu HTTP {code}."
+
+
 class InstagramScrapeClient:
     """Instagram sem token — os endpoints web anônimos do próprio site.
 
     São os mesmos endpoints que o `instagram-php-scraper` usa: o perfil em
     `/api/v1/users/web_profile_info/` e a hashtag em `/api/v1/tags/web_info/`,
-    ambos com o header `x-ig-app-id` do site. Não há credencial: o Instagram
-    libera (e bloqueia) o acesso anônimo por IP, então a busca funciona na
-    maior parte do tempo e cai no gradiente mock com o motivo quando o site
-    devolve a página de login — o mesmo contrato instável do
-    `pinterest_scrape`, com as mesmas ressalvas de compliance (ver README).
+    ambos com o header `x-ig-app-id` do site. Não há credencial.
+
+    **O endpoint de hashtag deixou de ser anônimo** (medido em 2026-08-16):
+    ele responde `302 → /accounts/login/` em toda saída testada — datacenter
+    (Render), IP residencial doméstico e os exits residenciais do ScrapeOps,
+    os três no mesmo 302, com e sem bootstrap de cookie (`csrftoken`). O HTML
+    de `/explore/tags/<tag>/` também não traz mais os posts embutidos. Ou
+    seja: o muro é gate do **endpoint**, não do IP, e nenhum proxy passa por
+    ele — o que resta é o motivo escrito na prévia (ver `_wall_reason`) e o
+    modo `instagram_pinterest`, onde o Pinterest preenche o carrossel.
+
+    `proxy` (`INSTAGRAM_PROXY`) foi **removido** por isso: ele custava dinheiro
+    e não mudava a resposta. Sobraram dois serviços pagos, que não são a mesma
+    coisa e por isso têm caminhos diferentes no código:
+
+    * `apify_token` (`APIFY_TOKEN`) — **não é proxy**: roda um actor que raspa
+      com sessão própria e devolve dataset estruturado (`_ig_entry_from_apify`).
+      É o único dos dois com chance real na hashtag, então **vence** quando os
+      dois estão configurados.
+    * `scrapedo_token` (`SCRAPEDO_TOKEN`) — transporte: as MESMAS chamadas da
+      API web saem pelo gateway deles (`super=true`). Payload e parse não
+      mudam. Contra o muro da hashtag não passa; serve ao caminho `@perfil`,
+      cujo `429` é cota por IP de verdade.
+
+    Sem nenhum dos dois, a chamada sai direta — o que ainda funciona para
+    `@perfil` até a cota do IP estourar. Os downloads do CDN seguem sempre
+    diretos, porque as URLs assinadas não são presas ao IP.
 
     A query vira **uma hashtag**: o Instagram não busca texto livre sem login.
     As palavras das queries de casting (HOOK/SCENE_QUERY_HINTS) são removidas
     antes — "#rotinamatinalwomanportrait" não existe — e um `@perfil` ou
     `#hashtag` digitados no tema/palavras-chave vencem a derivação.
-
-    De um IP no balde do muro (datacenter — Render, AWS…), `proxy` dá um IP de
-    saída só para estas chamadas (`INSTAGRAM_PROXY` no ambiente); os downloads
-    do CDN seguem diretos, porque as URLs assinadas não são presas ao IP.
-    `scrapedo_token` (`SCRAPEDO_TOKEN`) é a alternativa gerida: as MESMAS
-    chamadas saem pelo gateway do Scrape.do com proxies residenciais
-    (`super=true`) — o parse e os fallbacks não mudam, só o transporte. Com os
-    dois definidos, o Scrape.do vence.
     """
 
     name = "instagram_scrape"
@@ -892,30 +1004,27 @@ class InstagramScrapeClient:
         timeout: int = 20,
         min_resolution: tuple[int, int] = (0, 0),
         hint_words: Iterable[str] = (),
-        proxy: str = "",
-        proxy_insecure: bool = False,
         scrapedo_token: str = "",
+        apify_token: str = "",
+        apify_actor: str = "apify~instagram-scraper",
     ):
         self._scrapedo_token = scrapedo_token
-        # O gateway do Scrape.do tenta vários IPs por dentro antes de responder
-        # — os 20s dimensionados para a chamada direta cancelariam metade das
-        # chamadas no meio dos retries (a mesma lição do VISION_TIMEOUT).
-        self._timeout = max(timeout, 60) if scrapedo_token else timeout
+        self._apify_token = apify_token
+        self._apify_actor = apify_actor or "apify~instagram-scraper"
+        # Os dois serviços tentam vários IPs por dentro antes de responder (a
+        # Apify ainda sobe uma máquina antes disso), então os 20s dimensionados
+        # para a chamada direta cancelariam metade das chamadas no meio dos
+        # retries deles — a mesma lição do VISION_TIMEOUT.
+        if apify_token:
+            self._timeout = max(timeout, _APIFY_MIN_TIMEOUT)
+        elif scrapedo_token:
+            self._timeout = max(timeout, 60)
+        else:
+            self._timeout = timeout
         # O mesmo piso do pinterest_scrape: foto menor que o slide é ampliada
         # no render e chega ao feed borrada.
         self._min_resolution = min_resolution
         self._hint_words = {w.strip().lower() for w in hint_words if w.strip()}
-        # None deixa o requests honrar HTTPS_PROXY/HTTP_PROXY do ambiente.
-        self._proxies = {"http": proxy, "https": proxy} if proxy else None
-        # Portas-proxy de agregadores (ScrapeOps etc.) interceptam o TLS por
-        # design e as docs deles mandam desligar a validação de certificado.
-        # Opt-in explícito, e só para estas chamadas — que não carregam
-        # credencial nenhuma (o acesso é anônimo por definição).
-        self._verify = not proxy_insecure
-        if proxy_insecure:
-            # Sem isto, cada busca emitiria um InsecureRequestWarning — ruído
-            # permanente que ensina a ignorar warnings.
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         # Por que a última busca caiu no mock. Vazio = não caiu.
         self.last_fallback_reason = ""
 
@@ -933,19 +1042,24 @@ class InstagramScrapeClient:
         scope = f"@{username}" if username else f"#{tag}"
 
         try:
-            if username:
+            if self._apify_token:
+                entries = self._apify_entries(username, tag, limit)
+            elif username:
                 entries = self._profile_entries(username)
             else:
                 entries = _ig_tag_entries(
                     self._get_json("/api/v1/tags/web_info/", {"tag_name": tag})
                 )
         except requests.Timeout:
-            logger.warning("Instagram timeout — usando fallback mock.")
-            self.last_fallback_reason = f"Instagram não respondeu em {self._timeout}s."
+            logger.warning("%s timeout — usando fallback mock.", self._transport)
+            self.last_fallback_reason = (
+                f"{self._transport} não respondeu em {self._timeout}s."
+            )
             return MockPinterestClient().search(query, limit)
         except ValueError:
             # HTML (ou redirect) no lugar do JSON: o muro de login do Instagram.
-            # O redirect já chega com o motivo preenchido pelo `_get_json`.
+            # O redirect já chega com o motivo preenchido pelo `_get_json`, e a
+            # Apify preenche o dela — o muro só é o palpite de último caso.
             if not self.last_fallback_reason:
                 logger.warning(
                     "Instagram devolveu HTML (muro de login) — fallback mock."
@@ -953,9 +1067,12 @@ class InstagramScrapeClient:
                 self.last_fallback_reason = self._wall_reason()
             return MockPinterestClient().search(query, limit)
         except requests.RequestException as exc:
-            logger.warning("Instagram erro: %s — usando fallback mock.", type(exc).__name__)
+            logger.warning(
+                "%s erro: %s — usando fallback mock.",
+                self._transport, type(exc).__name__,
+            )
             self.last_fallback_reason = self.last_fallback_reason or (
-                f"Falha de rede ao chamar o Instagram ({type(exc).__name__})."
+                f"Falha de rede ao chamar {self._transport} ({type(exc).__name__})."
             )
             return MockPinterestClient().search(query, limit)
 
@@ -976,6 +1093,17 @@ class InstagramScrapeClient:
 
     # ---- helpers ----
 
+    @property
+    def _transport(self) -> str:
+        """Quem atendeu a chamada — o nome que vai no log e no motivo da
+        prévia. Um timeout da Apify escrito como "Instagram não respondeu"
+        mandaria investigar o Instagram, que nem foi chamado por nós."""
+        if self._apify_token:
+            return "A Apify"
+        if self._scrapedo_token:
+            return "O Scrape.do"
+        return "O Instagram"
+
     def _tag_from(self, query: str) -> str:
         tokens = str(query or "").split()
         explicit = next((t for t in tokens if t.startswith("#") and len(t) > 1), "")
@@ -985,67 +1113,50 @@ class InstagramScrapeClient:
         return _ig_slug("".join(words))
 
     def _wall_reason(self) -> str:
-        """O muro de login, com o remédio: a causa é o IP de saída, então o
-        aviso da prévia precisa dizer QUAL IP trocar — o do servidor, o do
-        proxy que já está configurado, ou o sorteado pelo Scrape.do."""
-        if self._scrapedo_token:
-            remedy = (
-                "a chamada saiu pelos proxies residenciais do Scrape.do e "
-                "mesmo assim caiu no muro — o IP muda a cada chamada, então "
-                "gerar de novo costuma resolver"
-            )
-        elif self._proxies:
-            remedy = (
-                "o IP do proxy configurado em INSTAGRAM_PROXY também caiu no "
-                "muro — troque o proxy por um de IP residencial/móvel"
-            )
-        else:
-            remedy = (
-                "IPs de datacenter (Render, AWS…) caem quase sempre nesse "
-                "balde — configure INSTAGRAM_PROXY com um proxy de IP "
-                "residencial ou rode de outra rede"
-            )
+        """O muro de login — e o remédio, que **não** é trocar de proxy.
+
+        Este aviso já mandou "trocar o proxy por um de IP residencial/móvel",
+        no diagnóstico de que o muro era gate de IP. O diagnóstico era falso, e
+        custou caro: medido em 2026-08-16, o `/api/v1/tags/web_info/` responde
+        `302 → /accounts/login/` em TODA saída testada — datacenter (Render),
+        IP residencial doméstico e os exits residenciais do ScrapeOps, os três
+        no mesmo 302. O gate é do **endpoint**, não do IP: nenhum proxy passa
+        por ele, e mandar caçar proxy melhor só queimava tempo e crédito.
+        """
         return (
-            "O Instagram devolveu a página de login em vez de dados — o "
-            f"acesso anônimo está bloqueado para este IP; {remedy}."
+            "O Instagram exige login neste endpoint — a busca anônima devolve "
+            "a página de login em QUALQUER IP de saída, então nem proxy nem "
+            "SCRAPEDO_TOKEN resolvem (o gate é do endpoint, não do IP). "
+            "Configure APIFY_TOKEN, que raspa com sessão própria em vez de só "
+            "trocar o IP, ou troque a fonte das fotos para o Pinterest sem "
+            "token (pinterest_scrape) ou o modo instagram_pinterest, que "
+            "preenche o carrossel com o Pinterest quando o Instagram cai."
         )
 
     def _get_json(self, path: str, params: dict[str, str]) -> dict[str, Any]:
         if self._scrapedo_token:
             response = self._get_via_scrapedo(path, params)
         else:
-            # Proxy rotativo (ScrapeOps etc.) sorteia outro IP de saída a cada
-            # conexão: um exit no muro não condena os próximos, então o muro
-            # com proxy configurado merece mais duas tentativas. Sem proxy o
-            # IP é sempre o mesmo e repetir seria só latência.
-            attempts = 3 if self._proxies else 1
-            for attempt in range(1, attempts + 1):
-                response = requests.get(
-                    f"{self._BASE}{path}",
-                    params=params,
-                    headers={
-                        "User-Agent": _IG_USER_AGENT,
-                        "x-ig-app-id": _IG_APP_ID,
-                        "Accept": "*/*",
-                        "Referer": f"{self._BASE}/",
-                    },
-                    timeout=self._timeout,
-                    proxies=self._proxies,
-                    verify=self._verify,
-                    # De um IP no balde do muro, a API 302-redireciona para
-                    # /accounts/login/. O redirect já É a resposta: segui-lo só
-                    # baixaria o HTML do login para falhar no json() logo
-                    # adiante.
-                    allow_redirects=False,
-                )
-                if not (300 <= response.status_code < 400):
-                    break
-                if attempt < attempts:
-                    logger.info(
-                        "Instagram devolveu o muro (HTTP %d) na tentativa "
-                        "%d/%d — repetindo por outro IP do proxy.",
-                        response.status_code, attempt, attempts,
-                    )
+            # Sem retry: o IP de saída é sempre o mesmo, então repetir só
+            # gastaria latência dentro do POST /generate. (Havia 3 tentativas
+            # aqui quando existia o INSTAGRAM_PROXY, sob a teoria de que outro
+            # exit do pool rotativo passaria pelo muro — teoria falsificada:
+            # o 302 é gate de endpoint. Ver `_wall_reason`.)
+            response = requests.get(
+                f"{self._BASE}{path}",
+                params=params,
+                headers={
+                    "User-Agent": _IG_USER_AGENT,
+                    "x-ig-app-id": _IG_APP_ID,
+                    "Accept": "*/*",
+                    "Referer": f"{self._BASE}/",
+                },
+                timeout=self._timeout,
+                # De um IP no balde do muro, a API 302-redireciona para
+                # /accounts/login/. O redirect já É a resposta: segui-lo só
+                # baixaria o HTML do login para falhar no json() logo adiante.
+                allow_redirects=False,
+            )
         if 300 <= response.status_code < 400:
             logger.warning(
                 "Instagram redirecionou a API para o login (HTTP %d) — "
@@ -1099,6 +1210,101 @@ class InstagramScrapeClient:
             self.last_fallback_reason = self._wall_reason()
             raise ValueError("login wall")
         return response
+
+    def _apify_entries(self, username: str, tag: str, limit: int) -> list[Any]:
+        """Roda o actor da Apify e converte o dataset dele nas entradas comuns.
+
+        `run-sync-get-dataset-items` roda e devolve os itens na MESMA resposta:
+        sem isso seriam três chamadas (start, polling do run, leitura do
+        dataset) dentro do `POST /generate`.
+
+        O pool pedido é 3× o limite (piso de 12) porque o piso de resolução e a
+        preferência por retrato descartam parte do resultado — mas nada perto
+        dos 40 pins que o Pinterest traz de graça: **cada item do actor é
+        pago**, então pool grande aqui é conta maior para jogar a maior parte
+        fora.
+        """
+        wanted = max(limit * 3, 12)
+        if username:
+            # Para perfil, a URL direta é mais previsível que `searchType=user`,
+            # que ainda passaria pela busca do Instagram para achar o mesmo
+            # perfil que já sabemos qual é.
+            payload = {
+                "directUrls": [f"{self._BASE}/{username}/"],
+                "resultsType": "posts",
+                "resultsLimit": wanted,
+            }
+        else:
+            payload = {
+                "search": tag,
+                "searchType": "hashtag",
+                # Uma hashtag só: a derivação já escolheu qual.
+                "searchLimit": 1,
+                "resultsType": "posts",
+                "resultsLimit": wanted,
+            }
+        response = requests.post(
+            _APIFY_ENDPOINT.format(actor=self._apify_actor),
+            params={
+                "token": self._apify_token,
+                # Teto de itens FATURADOS (actors pay-per-result). O
+                # `resultsLimit` acima é um pedido ao actor; este é o limite da
+                # conta, para um actor que ignore o pedido não virar surpresa
+                # na fatura.
+                "maxItems": wanted,
+                # Teto do run. Sem ele o actor herda o timeout da configuração
+                # DELE (que pode ser minutos): a resposta viria depois de o
+                # gunicorn já ter matado o worker, e worker morto não faz
+                # fallback. A folga é para o motivo chegar à prévia.
+                "timeout": max(self._timeout - 10, 30),
+                "format": "json",
+            },
+            json=payload,
+            timeout=self._timeout,
+        )
+        if response.status_code >= 400:
+            logger.warning(
+                "Apify HTTP %d: %s", response.status_code, response.text[:200]
+            )
+            self.last_fallback_reason = _apify_reason(response)
+            response.raise_for_status()
+        try:
+            items = response.json()
+        except ValueError:
+            # Sem isto, o `except ValueError` do `search` leria a resposta
+            # ilegível da Apify como muro de login do Instagram — a pista
+            # errada, e o Instagram nem foi chamado por nós.
+            self.last_fallback_reason = (
+                "A Apify respondeu algo que não é JSON — o actor pode ter "
+                "falhado no meio do run. Confira o run no painel da Apify."
+            )
+            raise
+        if not isinstance(items, list):
+            self.last_fallback_reason = (
+                "A Apify não devolveu uma lista de itens — confira se "
+                f"APIFY_ACTOR ({self._apify_actor}) é um actor de Instagram."
+            )
+            raise ValueError("apify dataset")
+        entries = [
+            entry
+            for entry in (_ig_entry_from_apify(item) for item in items)
+            if entry is not None
+        ]
+        logger.info(
+            "Apify devolveu %d itens (%d fotos utilizáveis) para %s.",
+            len(items), len(entries), f"@{username}" if username else f"#{tag}",
+        )
+        if items and not entries:
+            # Dataset cheio e nada aproveitável = ou veio só vídeo/reel, ou os
+            # nomes de campo do actor não são os que o mapeador espera. A
+            # segunda é a hipótese cara de descobrir sem esta pista.
+            self.last_fallback_reason = (
+                f"A Apify devolveu {len(items)} itens, mas nenhuma foto "
+                "utilizável — se a busca não era só de vídeos, o actor "
+                f"({self._apify_actor}) usa outros nomes de campo que o "
+                "esperado (displayUrl/images, dimensionsWidth/Height)."
+            )
+        return _ig_dedupe(entries)
 
     def _profile_entries(self, username: str) -> list[Any]:
         payload = self._get_json(
@@ -1219,9 +1425,9 @@ def _instagram_scrape_client(settings: Settings) -> InstagramScrapeClient:
         min_resolution=(settings.slide_width, settings.slide_height),
         # As palavras das queries de casting não entram na hashtag derivada.
         hint_words=f"{settings.hook_query_hints} {settings.scene_query_hints}".split(),
-        proxy=settings.instagram_proxy,
-        proxy_insecure=settings.instagram_proxy_insecure,
         scrapedo_token=settings.scrapedo_token,
+        apify_token=settings.apify_token,
+        apify_actor=settings.apify_actor,
     )
 
 
