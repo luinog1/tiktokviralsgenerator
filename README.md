@@ -1,10 +1,18 @@
 # ViralPost Studio
 
-Aplicação Flask que transforma o texto gerado pelo **goviral.ai** em um carrossel visual pronto para publicar — combinando o texto colado com fotos do Pinterest (API oficial **ou** busca sem token) ou do Unsplash, composição opcional via LLM e renderização estilo **TikTok photo post** (1080×1350, 4:5).
+Aplicação Flask que transforma o texto gerado pelo **goviral.ai** em um carrossel visual pronto para publicar — combinando o texto colado com fotos do Pinterest ou do Instagram (busca **sem token**) ou do Unsplash, composição opcional via LLM e renderização estilo **TikTok photo post** (1080×1350, 4:5).
 
 > **Status:** MVP v0.9 — Ready for building
 > **Stack:** Python 3.11 · Flask 3 · Jinja2 · WTForms · Pillow · Docker
 > **Idioma inicial:** Português (pt-BR)
+
+---
+
+## 🎯 O que mudou na v0.15
+
+- 🗑️ **A API oficial v5 do Pinterest foi removida — ela nunca chegou a buscar nada** — `PINTEREST_ACCESS_TOKEN`, `PINTEREST_API_BASE_URL`, o `PinterestV5Client` inteiro (busca + `validate_token`) e o provider `pinterest_v5` saíram. O motivo é o mesmo que criou o `pinterest_scrape` na v0.7: o `/search/pins/` da v5 exige **Standard Access**, aprovação manual da Pinterest que este projeto nunca teve — então o primeiro degrau da escada do `auto` era código que só sabia devolver `403`. Manter os dois caminhos custava um cliente inteiro para manter, uma variável que parecia obrigatória no `.env` e no `render.yaml`, e um diagnóstico a mais no `/health` sugerindo que faltava configurar um token. A `pinterest-dl` faz a mesma busca sem credencial nenhuma.
+- ✅ **A escada do `auto` encurtou para `UNSPLASH_ACCESS_KEY` → mock** — e continua **sem escolher scraping sozinho**, que era e segue sendo uma decisão de quem publica (ver [compliance](#️-limitações-e-compliance)). Para fotos do Pinterest, `IMAGE_PROVIDER=pinterest_scrape` — a escolha explícita de sempre.
+- ✅ **Um token esquecido no ambiente não muda mais nada** — quem tinha `PINTEREST_ACCESS_TOKEN` definido no Render pode apagá-lo, mas deixar não quebra nem desvia a escada: a variável simplesmente não é lida. Há teste travando exatamente isso, porque "sobrou no painel e mudou o comportamento" é o tipo de coisa que só aparece em produção.
 
 ---
 
@@ -336,7 +344,7 @@ Reaproveitar essa sessão no servidor significaria repassar seus cookies, ou sej
 - **Imagem 1 sempre com o hook sozinho, e nunca em branco** — uma caixa, sem texto de apoio e sem CTA, nos três caminhos de composição.
 - Ordenação no roteiro viral de 3 atos (`hook → problema → agitação → valor → prova → CTA`).
 - Renderização estilo sticker do TikTok — caixas brancas arredondadas com texto preto.
-- Busca de imagens via API oficial do Pinterest, via Pinterest **sem token** (`pinterest-dl`), via **Instagram sem token** (hashtag ou @perfil), via Unsplash ou mock — combinável (Instagram + Pinterest intercalados) e escolhível **por geração** no seletor "Fonte das fotos" dos formulários.
+- Busca de imagens via Pinterest **sem token** (`pinterest-dl`), via **Instagram sem token** (hashtag ou @perfil), via Unsplash ou mock — combinável (Instagram + Pinterest intercalados) e escolhível **por geração** no seletor "Fonte das fotos" dos formulários.
 - **Piso de resolução na busca sem token** — só foto que cobre o slide sem ser ampliada, com degradação em ordem quando o tema não tem acervo.
 - Ranking opcional de imagens por endpoint LLM (com fallback determinístico).
 - Qualificação por **visão** opcional (VLM): nota olhando a foto + posição automática do texto + assunto da foto (pessoa/cenário) para o casting.
@@ -398,10 +406,8 @@ python run.py
 | `FLASK_ENV` | `development` | Ambiente Flask |
 | `SECRET_KEY` | `dev-insecure-change-me` | **Definir em produção** |
 | `DEBUG` | `true` | Modo debug |
-| `IMAGE_PROVIDER` | `auto` | De onde vêm as fotos: `auto`, `pinterest_v5`, `pinterest_scrape`, `unsplash`, `instagram_scrape`, `instagram_pinterest` ou `mock`. O seletor "Fonte das fotos" dos formulários vence este valor por geração |
-| `PINTEREST_ACCESS_TOKEN` | (vazio) | Token da API oficial v5. Vazio → tenta Unsplash |
-| `PINTEREST_API_BASE_URL` | `https://api.pinterest.com/v5` | Base URL da API |
-| `UNSPLASH_ACCESS_KEY` | (vazio) | Access Key do Unsplash. Usada quando não há token Pinterest. Vazio → mock |
+| `IMAGE_PROVIDER` | `auto` | De onde vêm as fotos: `auto`, `pinterest_scrape`, `unsplash`, `instagram_scrape`, `instagram_pinterest` ou `mock`. O seletor "Fonte das fotos" dos formulários vence este valor por geração |
+| `UNSPLASH_ACCESS_KEY` | (vazio) | Access Key do Unsplash — a **única** fonte de imagens com chave. Vazio (com `auto`) → mock |
 | `APIFY_TOKEN` | (vazio) | Token da [Apify](https://apify.com): roda um **actor** que raspa o Instagram com sessão própria e devolve dataset estruturado. É o único transporte com chance na busca por hashtag, e **vence** o `SCRAPEDO_TOKEN` quando os dois existem |
 | `APIFY_ACTOR` | `apify~instagram-scraper` | Qual actor rodar (id com **til** no lugar da barra). Cobre hashtag e `@perfil` |
 | `SCRAPEDO_TOKEN` | (vazio) | Token do [Scrape.do](https://scrape.do): as mesmas chamadas da API web saem pelo gateway deles (proxies residenciais, `super=true`, 10x créditos). **Não** vence o muro da hashtag — é gate de endpoint; serve ao `429` do caminho `@perfil` |
@@ -431,11 +437,11 @@ Nenhum valor secreto é commitado. Tokens nunca cruzam para o frontend.
 
 ### De onde vêm as imagens
 
-Com `IMAGE_PROVIDER=auto` (o default), a prioridade é `PINTEREST_ACCESS_TOKEN` → `UNSPLASH_ACCESS_KEY` → **mock** (gradientes SVG sintéticos). Se as duas chaves estiverem vazias, o carrossel sai com gradientes coloridos em vez de fotos.
+Com `IMAGE_PROVIDER=auto` (o default), a escada é `UNSPLASH_ACCESS_KEY` → **mock** (gradientes SVG sintéticos). Sem a chave, o carrossel sai com gradientes coloridos em vez de fotos.
 
-O `/search/pins/` do Pinterest exige **Standard Access** (aprovação manual da Pinterest). O Unsplash não exige aprovação — crie um app em [unsplash.com/oauth/applications](https://unsplash.com/oauth/applications) e copie a **Access Key**.
+A API oficial v5 do Pinterest **foi removida na v0.15**: o `/search/pins/` dela exige **Standard Access** (aprovação manual da Pinterest) que este projeto nunca teve, então aquele degrau da escada nunca chegou a buscar nada. `PINTEREST_ACCESS_TOKEN` e `PINTEREST_API_BASE_URL` não são mais lidas.
 
-Sem nenhuma das duas, há a terceira via: `IMAGE_PROVIDER=pinterest_scrape` busca no Pinterest **sem token**, pela API interna do site (ver [Buscar fotos no Pinterest sem token](#buscar-fotos-no-pinterest-sem-token)). Ela nunca entra sozinha no modo `auto` — é escolha explícita, com as [ressalvas de compliance](#️-limitações-e-compliance) que vêm junto.
+O Unsplash não exige aprovação — crie um app em [unsplash.com/oauth/applications](https://unsplash.com/oauth/applications) e copie a **Access Key**. Para fotos do Pinterest, `IMAGE_PROVIDER=pinterest_scrape` busca **sem token**, pela API interna do site (ver [Buscar fotos no Pinterest sem token](#buscar-fotos-no-pinterest-sem-token)). Ele nunca entra sozinho no modo `auto` — é escolha explícita, com as [ressalvas de compliance](#️-limitações-e-compliance) que vêm junto.
 
 **Por que a mesma query devolve fotos diferentes agora:** o `/search/photos` do Unsplash ordena por relevância e essa ordem é estável — a página 1 de "café da manhã" é sempre a mesma. Não havia cache no app; era determinismo da API. Cada busca agora sorteia uma página entre 1 e 5 (`UnsplashClient._PAGE_WINDOW`), o que renova o resultado sem cair em fotos irrelevantes. A página escolhida aparece no log `INFO`. Se a query tem acervo curto e a página sorteada vem vazia, a busca reentra dentro do `total_pages` em vez de cair no gradiente mock.
 
@@ -443,11 +449,12 @@ Para confirmar o que está ativo:
 
 ```bash
 curl -s http://localhost:5000/health | python -m json.tool
-# providers.images        → "pinterest_v5" | "pinterest_scrape" | "unsplash" | "mock"
+# providers.images        → "pinterest_scrape" | "unsplash" | "instagram_scrape" | "mock"
 # providers.casting       → "woman" | "person" | "off"
 # providers.vision        → "configured" | "off"
 # images_diagnostic.using_mock → true quando o carrossel sai com gradiente
 # images_diagnostic.pinterest_scrape_installed → o pacote pinterest-dl está instalado?
+# images_diagnostic.apify_token_set → transporte do Instagram com chance na hashtag
 # vision_diagnostic.vision_model_value → o id do VLM, causa comum de 404
 ```
 
@@ -526,7 +533,7 @@ Cobertura (414 testes):
 - **Pinterest mock** — geração de SVGs sintéticos.
 - **Pinterest sem token** — mapeamento do pin para a forma que o app usa (id como string, link do pin, `alt` alimentando o casting por metadado), thumb `474x` com a extensão reescrita para `.jpg` (o caminho reduzido do CDN não serve PNG), retrato preferido quando há retrato suficiente e pool inteiro quando não há, resolução ausente que não derruba a seleção, ponto de corte sorteado entre buscas iguais, uma requisição por busca, timeout vindo das settings, e fallback com motivo em falha, resultado vazio, pin sem `src` e biblioteca não instalada.
 - **Piso de resolução** — pin menor que o slide fica de fora; foto grande deitada vence foto pequena em pé; sem acervo em alta o piso cai em vez de o carrossel virar gradiente; pin sem resolução não passa o piso; o piso vem de `SLIDE_WIDTH`×`SLIDE_HEIGHT`; e o `min_resolution` da biblioteca continua em `(0, 0)`, para a busca não paginar dentro do `POST /generate`.
-- **Escolha do provider** — `IMAGE_PROVIDER` default `auto` e valor desconhecido caindo em `auto`; o scraping só entra quando escolhido (nunca no `auto`) e vence o token oficial quando escolhido; `auto` continua preferindo token → Unsplash; `mock` ignora o token configurado; escolha impossível (Unsplash sem chave) desce a escada em vez de devolver um cliente quebrado.
+- **Escolha do provider** — `IMAGE_PROVIDER` default `auto` e valor desconhecido caindo em `auto` (inclusive o `pinterest_v5` removido); o scraping só entra quando escolhido, nunca no `auto`; `auto` prefere Unsplash e cai no mock sem chave; `mock` ignora a chave configurada; escolha impossível (Unsplash sem chave) desce a escada em vez de devolver um cliente quebrado; e um `PINTEREST_ACCESS_TOKEN` sobrando no ambiente não vira cliente nem desvia a escada.
 - **Prompt do roteiro** — a regra do hook sozinho e a ordem dos papéis chegam no prompt, e o orçamento de tokens cresce com o nº de slides (o teto fixo cortava o JSON de 12 slides).
 - **Unsplash** — rotação de páginas entre buscas iguais, reentrada quando a página sorteada passa do fim do acervo, motivo do fallback por status HTTP.
 - **Ranking** — correlação com `raw_text`, fallback sem corpus.
@@ -614,7 +621,6 @@ Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SL
 ## ⚠️ Limitações e compliance
 
 - **goviral.ai:** ferramenta externa sem API/token. O usuário é responsável por acessar via login Discord e colar o texto no formulário. O ViralPost Studio não automatiza o acesso.
-- **Pinterest (API oficial):** a busca usa a API oficial v5. Imagens retornadas podem não ter licença comercial — sempre verifique os termos antes de publicar. A atribuição é preservada na exportação.
 - **Pinterest sem token (`IMAGE_PROVIDER=pinterest_scrape`):** usa a biblioteca [pinterest-dl](https://github.com/sean1832/pinterest-dl), que lê a API **interna** do site. Três consequências que valem a leitura antes de ligar:
   1. **Termos de uso.** Acesso automatizado pode conflitar com os [Terms of Service do Pinterest](https://developers.pinterest.com/terms/). A biblioteca declara uso educacional e não é afiliada ao Pinterest. Ligar a opção é decisão de quem publica — por isso ela nunca entra sozinha no modo `auto`.
   2. **Contrato instável.** Uma API interna muda sem aviso e sem versionamento. Quando mudar, a busca falha e o carrossel cai no gradiente mock com o motivo no aviso da prévia — não quebra a aplicação, mas para de trazer fotos.
@@ -634,7 +640,7 @@ Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SL
 - [x] Aplicação funciona em modo mock sem credenciais.
 - [x] Briefing é validado (raw_text, theme, style, slides_count).
 - [x] TextComposer retorna estrutura consistente (slides + hashtags + caption).
-- [x] Cliente Pinterest é server-side e trata erros.
+- [x] Cliente de imagens é server-side e trata erros.
 - [x] LLM pode ser desligado (provider=mock).
 - [x] LLM possui fallback funcional (timeout → mock).
 - [x] Usuário pode escolher manualmente a imagem de cada slide.
@@ -659,7 +665,6 @@ Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SL
 
 1. Configurar `VISION_API_KEY` + `VISION_MODEL` na ModelScope (Qwen-VL) para o casting decidir por visão em vez de busca/metadado. É a única peça pendente das features desta versão — o resto já funciona sem chave.
 2. Configurar `LLM_API_BASE_URL` e `LLM_API_KEY` (ex.: Groq) para ativar o roteiro viral com LLM real. Modelos Groq suportados: `qwen/qwen3.6-27b`, `llama-3.3-70b-versatile`, `llama-3.1-8b-instant`, `mixtral-8x7b-32768`, `gemma2-9b-it` (consulte https://console.groq.com/docs/models para a lista atual).
-3. Validar escopos do token Pinterest para a busca de Pins — ou usar `IMAGE_PROVIDER=pinterest_scrape`, que dispensa o token.
 4. Adicionar mais estilos visuais (antes-e-depois, capa de carrossel, etc.).
 4. Persistência real (DB ou Redis) para multi-worker.
 5. Mover a chamada de visão para fora do `POST /generate` (fila ou refinamento sob demanda na prévia), tirando a latência do VLM do caminho da primeira renderização.

@@ -14,9 +14,10 @@ bp = Blueprint("health", __name__)
 @bp.route("/health")
 def health():
     settings = current_app.config["SETTINGS"]
-    # Nome real do cliente de imagens: "pinterest_v5" | "unsplash" | "mock".
-    # Antes isso era derivado só de `pinterest_configured`, então uma chave
-    # Unsplash válida ainda aparecia como "mock" aqui.
+    # Nome real do cliente de imagens: "pinterest_scrape" | "unsplash" |
+    # "instagram_scrape" | "instagram_pinterest" | "mock". Antes isso era
+    # derivado só de `pinterest_configured`, então uma chave Unsplash válida
+    # ainda aparecia como "mock" aqui.
     images_provider = getattr(build_pinterest_client(settings), "name", "unknown")
     payload = {
         "status": "ok",
@@ -25,7 +26,6 @@ def health():
         "providers": {
             "composer": settings.llm_provider,
             "images": images_provider,
-            "pinterest": "configured" if settings.pinterest_configured else "mock",
             "ranking": settings.llm_provider if settings.ranking_enabled else "disabled",
             "vision": "configured" if settings.vision_configured else "off",
             "casting": settings.hook_subject if settings.casting_enabled else "off",
@@ -40,7 +40,6 @@ def health():
             "active_client": images_provider,
             "using_mock": images_provider == "mock",
             "image_provider_env": settings.image_provider,
-            "pinterest_token_set": settings.pinterest_configured,
             "unsplash_key_set": bool(os.environ.get("UNSPLASH_ACCESS_KEY", "").strip()),
             # `pinterest-dl` é dependência opcional: ausente, o cliente de
             # scraping existe mas só sabe cair no mock.

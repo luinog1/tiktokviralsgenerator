@@ -185,7 +185,7 @@ def test_mock_ranking_without_corpus_returns_default():
 
 def test_settings_factory_picks_mock_when_no_token():
     settings = Settings.from_env({})
-    assert settings.pinterest_configured is False
+    assert settings.image_provider == "auto"
     assert settings.llm_provider == "mock"
     assert settings.llm_configured is True  # mock é "configurado" por definição
 

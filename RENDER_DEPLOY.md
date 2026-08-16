@@ -86,7 +86,7 @@ O `render.yaml` já configura:
 - Runtime: Docker
 - Health check: `/health`
 - Variáveis de ambiente com `SECRET_KEY` gerada automaticamente
-- Variáveis sensíveis (`PINTEREST_ACCESS_TOKEN`, `LLM_API_KEY`) marcadas como `sync: false` para você preencher no painel
+- Variáveis sensíveis (`UNSPLASH_ACCESS_KEY`, `LLM_API_KEY`, `APIFY_TOKEN`) marcadas como `sync: false` para você preencher no painel
 
 ---
 
@@ -96,8 +96,8 @@ Depois do primeiro deploy, no painel do serviço → **Environment**:
 
 | Variável | Valor |
 |----------|-------|
-| `PINTEREST_ACCESS_TOKEN` | (seu token da API v5 do Pinterest) |
-| `UNSPLASH_ACCESS_KEY` | (Access Key do Unsplash — sem isso e sem Pinterest, o carrossel sai com gradientes) |
+| `IMAGE_PROVIDER` | `auto` (só Unsplash), `pinterest_scrape` (sem token) ou `instagram_pinterest` |
+| `UNSPLASH_ACCESS_KEY` | (Access Key do Unsplash — com `auto` e sem ela, o carrossel sai com gradientes) |
 | `LLM_PROVIDER` | `mock` (default) ou `openai_compatible` |
 | `LLM_API_BASE_URL` | `https://api.groq.com/openai/v1` (se for usar Groq) |
 | `LLM_API_KEY` | `gsk_xxx...` |

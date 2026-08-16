@@ -12,13 +12,12 @@ import pytest
 from app.adapters.pinterest_client import (
     MockPinterestClient,
     PinterestScrapeClient,
-    PinterestV5Client,
     UnsplashClient,
     _pinimg_thumb,
     build_pinterest_client,
     is_mock_image,
 )
-from app.config import Settings
+from app.config import IMAGE_PROVIDERS, Settings
 
 
 class _FakeMedia:
@@ -517,19 +516,20 @@ def test_auto_never_picks_the_scraper_on_its_own():
     assert isinstance(build_pinterest_client(settings), MockPinterestClient)
 
 
-def test_the_scraper_wins_over_the_official_token_when_chosen():
-    settings = Settings.from_env({
-        "IMAGE_PROVIDER": "pinterest_scrape",
-        "PINTEREST_ACCESS_TOKEN": "pina_token",
-    })
-
-    assert isinstance(build_pinterest_client(settings), PinterestScrapeClient)
-
-
-def test_auto_still_prefers_the_official_token():
+def test_the_removed_official_token_is_ignored_everywhere(monkeypatch):
+    """A API oficial v5 saiu (exigia Standard Access que o projeto nunca teve).
+    Um PINTEREST_ACCESS_TOKEN sobrando no ambiente do Render não pode mudar
+    nada — nem virar um cliente, nem desviar a escada do `auto`."""
+    monkeypatch.setenv("UNSPLASH_ACCESS_KEY", "")
     settings = Settings.from_env({"PINTEREST_ACCESS_TOKEN": "pina_token"})
 
-    assert isinstance(build_pinterest_client(settings), PinterestV5Client)
+    assert isinstance(build_pinterest_client(settings), MockPinterestClient)
+    assert not hasattr(settings, "pinterest_access_token")
+    # E o valor não é mais um provider escolhível.
+    assert "pinterest_v5" not in IMAGE_PROVIDERS
+    assert Settings.from_env(
+        {"IMAGE_PROVIDER": "pinterest_v5"}
+    ).image_provider == "auto"
 
 
 def test_auto_still_prefers_unsplash_when_there_is_a_key(monkeypatch):
@@ -538,11 +538,9 @@ def test_auto_still_prefers_unsplash_when_there_is_a_key(monkeypatch):
     assert isinstance(build_pinterest_client(Settings.from_env({})), UnsplashClient)
 
 
-def test_forcing_mock_ignores_the_configured_token():
-    settings = Settings.from_env({
-        "IMAGE_PROVIDER": "mock",
-        "PINTEREST_ACCESS_TOKEN": "pina_token",
-    })
+def test_forcing_mock_ignores_a_configured_unsplash_key(monkeypatch):
+    monkeypatch.setenv("UNSPLASH_ACCESS_KEY", "chave")
+    settings = Settings.from_env({"IMAGE_PROVIDER": "mock"})
 
     assert isinstance(build_pinterest_client(settings), MockPinterestClient)
 
@@ -551,9 +549,6 @@ def test_an_impossible_choice_falls_back_down_the_ladder(monkeypatch):
     """IMAGE_PROVIDER=unsplash sem chave: melhor a escada de sempre que um
     cliente que só sabe responder erro."""
     monkeypatch.setenv("UNSPLASH_ACCESS_KEY", "")
-    settings = Settings.from_env({
-        "IMAGE_PROVIDER": "unsplash",
-        "PINTEREST_ACCESS_TOKEN": "pina_token",
-    })
+    settings = Settings.from_env({"IMAGE_PROVIDER": "unsplash"})
 
-    assert isinstance(build_pinterest_client(settings), PinterestV5Client)
+    assert isinstance(build_pinterest_client(settings), MockPinterestClient)

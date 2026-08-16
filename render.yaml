@@ -86,20 +86,15 @@ services:
       # herdam de LLM_* quando vazias.
 
       # --- De onde vêm as fotos ---
-      # auto (default) = PINTEREST_ACCESS_TOKEN → UNSPLASH_ACCESS_KEY → mock.
-      # pinterest_scrape busca no Pinterest SEM token (biblioteca pinterest-dl)
-      # e nunca é escolhido pelo `auto` — ver compliance no README.
+      # auto (default) = UNSPLASH_ACCESS_KEY → mock. A API oficial v5 do
+      # Pinterest foi removida (exigia Standard Access que o projeto nunca
+      # teve). pinterest_scrape busca no Pinterest SEM token (biblioteca
+      # pinterest-dl) e nunca é escolhido pelo `auto` — compliance no README.
       - key: IMAGE_PROVIDER
         value: auto
 
-      # --- Pinterest ---
-      - key: PINTEREST_ACCESS_TOKEN
-        sync: false  # ← defina no painel
-      - key: PINTEREST_API_BASE_URL
-        value: https://api.pinterest.com/v5
-
-      # --- Unsplash (fallback de imagens, gratuito e sem aprovação) ---
-      # Sem PINTEREST_ACCESS_TOKEN nem UNSPLASH_ACCESS_KEY o carrossel sai
+      # --- Unsplash (a única fonte de imagens com chave) ---
+      # Sem UNSPLASH_ACCESS_KEY e com IMAGE_PROVIDER=auto o carrossel sai
       # com gradientes mock. Confirme em /health → providers.images
       - key: UNSPLASH_ACCESS_KEY
         sync: false  # ← Access Key de https://unsplash.com/oauth/applications

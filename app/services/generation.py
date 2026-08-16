@@ -362,11 +362,11 @@ class GenerationService:
 
     def _warn_mock_images(self, warnings: list[str]) -> None:
         # Cuidado: um cliente real que caiu no fallback continua se chamando
-        # "unsplash"/"pinterest_v5" — por isso a checagem é no resultado.
+        # "unsplash"/"pinterest_scrape" — por isso a checagem é no resultado.
         reason = getattr(self._pinterest, "last_fallback_reason", "")
         detail = reason or (
-            "Nenhuma chave de imagens configurada — defina "
-            "UNSPLASH_ACCESS_KEY ou PINTEREST_ACCESS_TOKEN."
+            "Nenhuma fonte de imagens configurada — defina UNSPLASH_ACCESS_KEY "
+            "ou escolha IMAGE_PROVIDER=pinterest_scrape (sem token)."
         )
         message = f"Imagens em modo mock (gradientes sintéticos). Motivo: {detail}"
         if message not in warnings:

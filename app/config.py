@@ -29,13 +29,14 @@ def _bool(value: str | None, default: bool = False) -> bool:
 HOOK_SUBJECTS = ("woman", "person", "off")
 _DEFAULT_SCENE_HINTS = "aesthetic lifestyle travel food"
 
-# De onde vêm as fotos. "auto" mantém a escada histórica (token oficial →
-# chave do Unsplash → mock); os demais fixam um cliente. Os modos com
-# Instagram leem a API interna do site (sem token) — opt-in explícito, como o
-# pinterest_scrape: nunca entram sozinhos no "auto".
+# De onde vêm as fotos. "auto" é a escada curta (chave do Unsplash → mock);
+# os demais fixam um cliente. A API oficial v5 do Pinterest ("pinterest_v5")
+# foi removida — ela exigia Standard Access que o projeto nunca teve, e o
+# pinterest_scrape faz a mesma busca sem token. Os modos com Instagram e o
+# pinterest_scrape leem APIs internas dos sites — opt-in explícito: nunca
+# entram sozinhos no "auto".
 IMAGE_PROVIDERS = (
     "auto",
-    "pinterest_v5",
     "pinterest_scrape",
     "unsplash",
     "instagram_scrape",
@@ -55,10 +56,6 @@ class Settings:
     flask_env: str
     secret_key: str
     debug: bool
-
-    # Pinterest
-    pinterest_access_token: str
-    pinterest_api_base_url: str
 
     # Qual cliente de imagens usar. Ver IMAGE_PROVIDERS.
     image_provider: str
@@ -162,11 +159,6 @@ class Settings:
             flask_env=_get("FLASK_ENV", "development"),
             secret_key=_get("SECRET_KEY", "dev-insecure-change-me"),
             debug=_bool(env.get("DEBUG"), True),  # type: ignore[union-attr]
-            pinterest_access_token=_get("PINTEREST_ACCESS_TOKEN"),
-            pinterest_api_base_url=_get(
-                "PINTEREST_API_BASE_URL",
-                "https://api.pinterest.com/v5",
-            ),
             image_provider=image_provider,
             scrapedo_token=_get("SCRAPEDO_TOKEN"),
             apify_token=_get("APIFY_TOKEN"),
@@ -202,10 +194,6 @@ class Settings:
         if value in {"openai_compatible", "inference", "groq", "openai"}:
             return "openai_compatible"
         return "mock"
-
-    @property
-    def pinterest_configured(self) -> bool:
-        return bool(self.pinterest_access_token)
 
     @property
     def llm_configured(self) -> bool:

@@ -1,21 +1,22 @@
-"""Cliente de imagens — Pinterest (oficial ou scraping), Instagram, Unsplash e mock.
+"""Cliente de imagens — Pinterest e Instagram sem token, Unsplash e mock.
 
 Fluxo de prioridade (`IMAGE_PROVIDER=auto`, o default):
-1. PINTEREST_ACCESS_TOKEN definido → Pinterest v5 (requer Standard Access para /search)
-2. UNSPLASH_ACCESS_KEY definido    → Unsplash (gratuito, sem aprovação especial)
-3. Nenhuma chave                   → Mock SVG (sempre funciona)
+1. UNSPLASH_ACCESS_KEY definido → Unsplash (gratuito, sem aprovação especial)
+2. Nenhuma chave                → Mock SVG (sempre funciona)
 
-`IMAGE_PROVIDER=pinterest_scrape` troca tudo isso pelo Pinterest **sem token**
-(via `pinterest-dl`). `instagram_scrape` busca no Instagram sem token (a API
-interna do site, os mesmos endpoints do instagram-php-scraper) e
-`instagram_pinterest` combina as duas buscas, intercaladas. Todos são opt-in
-explícitos: scraping nunca entra sozinho.
+`IMAGE_PROVIDER=pinterest_scrape` troca isso pelo Pinterest **sem token** (via
+`pinterest-dl`). `instagram_scrape` busca no Instagram sem token (a API interna
+do site, os mesmos endpoints do instagram-php-scraper) e `instagram_pinterest`
+combina as duas buscas, intercaladas. Todos são opt-in explícitos: scraping
+nunca entra sozinho.
+
+A API oficial v5 do Pinterest foi removida: o `/search/pins/` dela exige
+Standard Access (aprovação manual da Pinterest), então o cliente nunca chegou a
+buscar nada — e o `pinterest_scrape` faz a mesma busca sem credencial.
 
 Variáveis de ambiente:
-    IMAGE_PROVIDER           → auto | pinterest_v5 | pinterest_scrape | unsplash
+    IMAGE_PROVIDER           → auto | pinterest_scrape | unsplash
                                | instagram_scrape | instagram_pinterest | mock
-    PINTEREST_ACCESS_TOKEN   → token Pinterest
-    PINTEREST_API_BASE_URL   → default: https://api.pinterest.com/v5
     UNSPLASH_ACCESS_KEY      → chave pública Unsplash (Access Key, não Secret Key)
     APIFY_TOKEN              → roda um actor da Apify que raspa o Instagram e
                                devolve dataset próprio (vence o Scrape.do)
@@ -46,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 # Prefixo dos ids gerados pelo MockPinterestClient. Serve para reconhecer
 # resultados mock *depois* da busca — um cliente real que caiu no fallback
-# continua se chamando "unsplash"/"pinterest_v5", então o nome do cliente não
+# continua se chamando "unsplash"/"pinterest_scrape", então o nome do cliente não
 # basta para saber se o carrossel saiu com gradiente sintético.
 MOCK_IMAGE_ID_PREFIX = "mock-"
 
@@ -257,140 +258,6 @@ class UnsplashClient:
             len(images), query[:80], page,
         )
         return images[:limit]
-
-
-# ---------------------------------------------------------------------------
-# Pinterest v5 — requer Standard Access para /search/pins/
-# ---------------------------------------------------------------------------
-
-class PinterestV5Client:
-    """Implementação real usando a API oficial v5 do Pinterest."""
-
-    name = "pinterest_v5"
-
-    def __init__(self, settings: Settings):
-        self._settings = settings
-        self._base = settings.pinterest_api_base_url.rstrip("/")
-        self._timeout = settings.request_timeout_seconds
-        # Por que a última busca caiu no mock. Vazio = não caiu.
-        self.last_fallback_reason = ""
-
-    def search(self, query: str, limit: int = 8) -> list[PinterestImage]:
-        if not self._settings.pinterest_configured:
-            raise RuntimeError("Pinterest não configurado — token ausente.")
-
-        self.last_fallback_reason = ""
-        try:
-            response = requests.get(
-                f"{self._base}/search/pins/",   # /pins/ — não /boards/
-                params={
-                    "query": query,
-                    "page_size": min(limit, 100),
-                },
-                headers={
-                    "Authorization": f"Bearer {self._settings.pinterest_access_token}",
-                    "Accept": "application/json",
-                },
-                timeout=self._timeout,
-            )
-            if response.status_code >= 400:
-                self._log_error(response)
-                self.last_fallback_reason = _http_reason("Pinterest", response)
-            response.raise_for_status()
-        except requests.Timeout:
-            logger.warning("Pinterest timeout — usando fallback mock.")
-            self.last_fallback_reason = f"Pinterest não respondeu em {self._timeout}s."
-            return MockPinterestClient().search(query, limit)
-        except requests.RequestException as exc:
-            logger.warning("Pinterest erro de rede: %s — usando fallback mock.", type(exc).__name__)
-            self.last_fallback_reason = self.last_fallback_reason or (
-                f"Falha de rede ao chamar o Pinterest ({type(exc).__name__})."
-            )
-            return MockPinterestClient().search(query, limit)
-
-        data = response.json() or {}
-        items: Iterable[dict[str, Any]] = data.get("items") or data.get("results") or []
-        images: list[PinterestImage] = []
-        for item in items:
-            pin = item.get("pin") or item
-            images.append(PinterestImage(
-                image_id=str(pin.get("id") or ""),
-                image_url=self._extract_image_url(pin),
-                source_url=pin.get("link") or f"https://www.pinterest.com/pin/{pin.get('id')}/",
-                title=str(pin.get("title") or pin.get("description") or "")[:200],
-                description=str(pin.get("description") or "")[:500],
-                attribution_text="Fonte: Pinterest",
-            ))
-        if not images:
-            logger.info("Pinterest sem resultados para query=%r — fallback mock.", query[:80])
-            self.last_fallback_reason = "Pinterest não retornou resultados para a busca."
-            return MockPinterestClient().search(query, limit)
-        logger.info("Pinterest retornou %d imagens para query=%r", len(images), query[:80])
-        return images[:limit]
-
-    def validate_token(self) -> dict[str, Any]:
-        """Testa se o token é válido. Útil para diagnóstico."""
-        if not self._settings.pinterest_configured:
-            return {"configured": False, "valid": False, "reason": "Token ausente"}
-        try:
-            response = requests.get(
-                f"{self._base}/user_account/",
-                headers={
-                    "Authorization": f"Bearer {self._settings.pinterest_access_token}",
-                    "Accept": "application/json",
-                },
-                timeout=self._timeout,
-            )
-        except requests.RequestException as exc:
-            return {"configured": True, "valid": False, "reason": str(exc)}
-
-        if response.status_code == 200:
-            data = response.json() or {}
-            return {
-                "configured": True,
-                "valid": True,
-                "username": data.get("username"),
-                "account_type": data.get("account_type"),
-            }
-        self._log_error(response)
-        return {
-            "configured": True,
-            "valid": False,
-            "status_code": response.status_code,
-            "reason": self._extract_error_message(response),
-        }
-
-    @staticmethod
-    def _log_error(response: requests.Response) -> None:
-        try:
-            err_data = response.json()
-            err_msg = err_data.get("message") or err_data.get("detail") or str(err_data)[:200]
-        except Exception:
-            err_msg = response.text[:200]
-        logger.warning("Pinterest API HTTP %d: %s", response.status_code, err_msg)
-
-    @staticmethod
-    def _extract_error_message(response: requests.Response) -> str:
-        try:
-            data = response.json() or {}
-            return str(data.get("message") or data.get("detail") or data)[:200]
-        except Exception:
-            return response.text[:200]
-
-    @staticmethod
-    def _extract_image_url(pin: dict[str, Any]) -> str:
-        media = pin.get("media") or {}
-        images = pin.get("images") or {}
-        for key in ("original", "large", "medium", "small"):
-            entry = images.get(key) or media.get(key)
-            if isinstance(entry, dict) and entry.get("url"):
-                return str(entry["url"])
-        media_images = media.get("images") or {}
-        for key in ("original", "large", "medium", "small"):
-            entry = media_images.get(key)
-            if isinstance(entry, dict) and entry.get("url"):
-                return str(entry["url"])
-        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1438,13 +1305,18 @@ def build_pinterest_client(settings: Settings, override: str = "") -> PinterestC
     vale só para aquela geração e vence o ambiente. Vazio ou desconhecido, o
     `IMAGE_PROVIDER` do ambiente decide, como sempre.
 
-    Em `auto` (default) vale a escada de sempre: token oficial → chave do
-    Unsplash → mock. O scraping (Pinterest sem token, Instagram e o modo
-    combinado) fica **de fora** do automático de propósito — ele lê APIs não
-    documentadas e as regras de uso dos sites são problema de quem publica
-    (ver README). Entrar sozinho num ambiente sem chave transformaria
-    "esqueci de configurar" em "estou raspando o Pinterest/Instagram", que
-    não é uma decisão que o app deva tomar pelo usuário.
+    Em `auto` (default) a escada é: chave do Unsplash → mock. A API oficial v5
+    do Pinterest era o primeiro degrau e **foi removida**: o `/search/pins/`
+    dela exige Standard Access (aprovação manual da Pinterest) que este projeto
+    nunca teve, então o degrau nunca chegou a rodar — e o `pinterest_scrape`,
+    que existe desde a v0.7, faz a mesma busca sem token nenhum.
+
+    O scraping (Pinterest sem token, Instagram e o modo combinado) fica **de
+    fora** do automático de propósito — ele lê APIs não documentadas e as
+    regras de uso dos sites são problema de quem publica (ver README). Entrar
+    sozinho num ambiente sem chave transformaria "esqueci de configurar" em
+    "estou raspando o Pinterest/Instagram", que não é uma decisão que o app
+    deva tomar pelo usuário.
 
     Uma escolha explícita que não dá para atender (provider sem credencial)
     cai na mesma escada com um aviso no log, em vez de devolver um cliente que
@@ -1473,20 +1345,13 @@ def build_pinterest_client(settings: Settings, override: str = "") -> PinterestC
             [_instagram_scrape_client(settings), _pinterest_scrape_client(settings)],
             name="instagram_pinterest",
         )
-    if choice == "pinterest_v5":
-        if settings.pinterest_configured:
-            return PinterestV5Client(settings)
-        logger.warning("IMAGE_PROVIDER=pinterest_v5 sem PINTEREST_ACCESS_TOKEN.")
     if choice == "unsplash":
         if unsplash_key:
             return UnsplashClient(unsplash_key, timeout=settings.request_timeout_seconds)
         logger.warning("IMAGE_PROVIDER=unsplash sem UNSPLASH_ACCESS_KEY.")
 
-    if settings.pinterest_configured:
-        logger.info("Usando cliente Pinterest v5.")
-        return PinterestV5Client(settings)
     if unsplash_key:
-        logger.info("Pinterest não configurado — usando Unsplash.")
+        logger.info("Usando Unsplash.")
         return UnsplashClient(
             access_key=unsplash_key,
             timeout=settings.request_timeout_seconds,
