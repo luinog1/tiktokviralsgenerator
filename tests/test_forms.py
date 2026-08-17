@@ -247,9 +247,35 @@ def test_slide_edit_form_merges_with_original(app):
         assert edited[0]["body"] == "Body editado 1"
         assert edited[0]["call_to_action"] == "Novo CTA"
         assert edited[0]["image_id"] == "img-2"
+        assert "image_options" not in edited[0]
         # Slide 2 ficou vazio — deve preservar o original
         assert edited[1]["headline"] == "Original 2"
         assert edited[1]["image_id"] == "img-1"
+
+
+def test_slide_edit_preserves_category_options_and_rejects_cross_category_image(app):
+    original_slides = [{
+        "headline": "Cena",
+        "role": "value",
+        "image_id": "scene-1",
+        "image_category": "scene",
+        "image_options": ["scene-1", "scene-2"],
+    }]
+    with app.test_request_context("/", method="POST", data={
+        "headlines-0": "Cena",
+        "selected_image_ids-0": "food-1",
+    }):
+        form = SlideEditForm()
+        form.headlines.append_entry("")
+        form.bodies.append_entry("")
+        form.ctas.append_entry("")
+        form.selected_image_ids.append_entry("")
+
+        edited = form.to_edited_slides(original_slides)
+
+    assert edited[0]["image_id"] == "scene-1"
+    assert edited[0]["image_category"] == "scene"
+    assert edited[0]["image_options"] == ["scene-1", "scene-2"]
 
 
 def test_slide_edit_form_reads_dragged_text_position(app):

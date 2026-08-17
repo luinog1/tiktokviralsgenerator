@@ -22,6 +22,7 @@ import json
 import logging
 import math
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -66,6 +67,9 @@ _SYSTEM_PROMPT = (
     "4. reason: no máximo 90 caracteres, em português.\n\n"
     "Penalize com score baixo: foto com texto/logo embutido, muito escura, "
     "muito poluída no centro, ou sem relação com o tema.\n"
+    "Compare o lote: imagens repetidas ou quase iguais, especialmente cards "
+    "de receita com o mesmo layout, devem receber score menor para preservar "
+    "variedade visual no carrossel.\n"
     "NÃO explique o raciocínio. Responda APENAS o JSON, uma entrada por imagem:\n"
     '{"results":[{"image_id":"","score":0.0,'
     '"anchor":"top","subject":"scene","reason":""}]}'
@@ -105,10 +109,10 @@ class VisionRankingProvider:
 
     name = "vision"
 
-    # Teto de imagens por chamada. Cada foto custa tokens de visão e o request
-    # é síncrono dentro do POST /generate — 8 já cobre um carrossel de 12
-    # slides, que reusa imagens em rotação.
-    MAX_IMAGES = 8
+    # Uma candidata por slide é o mínimo para as cotas serem verificadas pelo
+    # modelo. O formulário permite até 12 slides; sobras do pool só entram se
+    # houver espaço depois das quantidades pedidas.
+    MAX_IMAGES = 12
 
     def __init__(self, settings: Settings):
         self._settings = settings
@@ -116,7 +120,7 @@ class VisionRankingProvider:
         self._key = settings.vision_api_key
         self._model = settings.vision_model
         # Timeout próprio, não o `request_timeout_seconds` da busca de imagens:
-        # o VLM olha até 8 fotos numa chamada e leva dezenas de segundos.
+        # o VLM olha até 12 fotos numa chamada e leva dezenas de segundos.
         self._timeout = settings.vision_timeout_seconds
 
     def _post(
@@ -142,6 +146,7 @@ class VisionRankingProvider:
             ],
             "temperature": 0.1,
             "chat_template_kwargs": {"enable_thinking": False},
+            "response_format": _response_format(candidates),
             # Orçamento por imagem, não fixo: um veredicto ocupa ~60 tokens e 8
             # imagens estouravam os 900 que havia aqui.
             "max_tokens": 700 + 220 * len(candidates),
@@ -159,6 +164,15 @@ class VisionRankingProvider:
                 "repetindo sem o parâmetro."
             )
             payload.pop("chat_template_kwargs")
+            response = requests.post(
+                url, json=payload, headers=headers, timeout=self._timeout
+            )
+        if response.status_code == 400 and "response_format" in payload:
+            logger.info(
+                "Vision endpoint recusou response_format (HTTP 400) — "
+                "repetindo sem saída estruturada."
+            )
+            payload.pop("response_format")
             response = requests.post(
                 url, json=payload, headers=headers, timeout=self._timeout
             )
@@ -184,7 +198,7 @@ class VisionRankingProvider:
         judgeable = [
             img for img in images if img.vision_url and not is_mock_image(img)
         ]
-        candidates = _cap_across_pools(judgeable, self.MAX_IMAGES)
+        candidates = _cap_across_pools(judgeable, self.MAX_IMAGES, briefing)
         if not candidates:
             # Gradientes sintéticos não têm o que julgar visualmente.
             return []
@@ -199,11 +213,20 @@ class VisionRankingProvider:
         # Uma thumb que falhe aqui fica FORA da chamada em vez de ir como URL:
         # uma única URL inalcançável (o 403 do caminho 474x para .png, por
         # exemplo) derruba a requisição inteira, e perder um veredicto é mais
-        # barato que perder os oito.
+        # barato que perder parte das candidatas.
+        # Até 12 downloads sequenciais poderiam consumir todo o timeout do
+        # worker antes de o VLM começar. `map` preserva a ordem das candidatas.
+        with ThreadPoolExecutor(max_workers=min(4, len(candidates))) as executor:
+            data_uris = list(
+                executor.map(
+                    _download_as_data_uri,
+                    (img.vision_url for img in candidates),
+                )
+            )
+
         kept: list[PinterestImage] = []
         image_parts: list[dict[str, Any]] = []
-        for img in candidates:
-            data_uri = _download_as_data_uri(img.vision_url)
+        for img, data_uri in zip(candidates, data_uris):
             if not data_uri:
                 continue
             kept.append(img)
@@ -226,8 +249,14 @@ class VisionRankingProvider:
             "text": (
                 f"Tema do post: {briefing.get('theme') or '(sem tema)'}\n"
                 f"Texto do carrossel: {str(briefing.get('raw_text') or '')[:400]}\n\n"
+                "Cotas pedidas: "
+                f"{briefing.get('person_images_count', 1)} pessoa(s), "
+                f"{briefing.get('food_images_count', 0)} comida/bebida; "
+                "o restante deve ser scene.\n\n"
                 f"Avalie as {len(candidates)} imagens a seguir, na ordem. "
-                "Os image_id são: " + ", ".join(i.image_id for i in candidates)
+                "Devolva exatamente uma entrada para cada imagem, sem omitir "
+                "subject. Os image_id são: "
+                + ", ".join(i.image_id for i in candidates)
             ),
         }]
         content.extend(image_parts)
@@ -306,12 +335,18 @@ class VisionRankingProvider:
         return verdicts
 
 
-def _cap_across_pools(images: list[PinterestImage], cap: int) -> list[PinterestImage]:
-    """Corta em `cap` imagens sem deixar um pool de fora.
+def _cap_across_pools(
+    images: list[PinterestImage],
+    cap: int,
+    briefing: dict[str, Any] | None = None,
+) -> list[PinterestImage]:
+    """Corta em `cap` imagens cobrindo primeiro as cotas pedidas.
 
     Com o casting ligado a lista chega agrupada por pessoa, comida e cenário.
-    Um `[:cap]` cru gastaria a cota no primeiro pool e deixaria categorias sem
-    avaliação. Intercalar os pools mantém todos representados.
+    Intercalar igualmente dava o mesmo espaço a um hook pedido uma vez e a seis
+    cenas necessárias. A visão então não olhava várias fotos que de fato iam
+    para o carrossel. Primeiro reservamos uma candidata por slot solicitado;
+    o espaço restante vira folga, priorizando as categorias maiores.
     """
     if len(images) <= cap:
         return images
@@ -321,24 +356,98 @@ def _cap_across_pools(images: list[PinterestImage], cap: int) -> list[PinterestI
     if len(buckets) < 2:
         return images[:cap]
 
+    briefing = briefing or {}
+    try:
+        slides_count = max(int(briefing.get("slides_count") or 0), 0)
+        people = max(int(briefing.get("person_images_count") or 0), 0)
+        food = max(int(briefing.get("food_images_count") or 0), 0)
+    except (TypeError, ValueError):
+        slides_count = people = food = 0
+    targets = {
+        "hook": min(people, slides_count) if slides_count else 0,
+        "food": min(food, max(slides_count - people, 0)) if slides_count else 0,
+        "scene": max(slides_count - people - food, 0),
+    }
+
     picked: list[PinterestImage] = []
-    queues = list(buckets.values())
-    round_index = 0
+    indexes = {pool: 0 for pool in buckets}
+    for pool in ("hook", "food", "scene"):
+        queue = buckets.get(pool, [])
+        take = min(targets.get(pool, 0), len(queue), cap - len(picked))
+        picked.extend(queue[:take])
+        indexes[pool] = take
+
+    pool_order = list(buckets)
+    fill_order = sorted(
+        pool_order,
+        key=lambda pool: (targets.get(pool, 0), -pool_order.index(pool)),
+        reverse=True,
+    )
     while len(picked) < cap:
         progressed = False
-        for queue in queues:
-            if round_index < len(queue):
-                picked.append(queue[round_index])
+        for pool in fill_order:
+            queue = buckets[pool]
+            index = indexes.get(pool, 0)
+            if index < len(queue):
+                picked.append(queue[index])
+                indexes[pool] = index + 1
                 progressed = True
                 if len(picked) == cap:
                     break
         if not progressed:
             break
-        round_index += 1
     return picked
 
 
-# Timeout curto e por imagem para baixar as thumbs: são até 8 GETs sequenciais
+def _response_format(candidates: list[PinterestImage]) -> dict[str, Any]:
+    """Schema suportado pelo servidor OpenAI-compatible do vLLM.
+
+    `subject` obrigatório impede a resposta observada em produção: o modelo
+    avaliava score/anchor, mas omitia justamente a classificação usada na cota.
+    Gateways sem suporte recebem o retry sem este campo em :meth:`_post`.
+    """
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "image_verdicts",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "results": {
+                        "type": "array",
+                        "minItems": len(candidates),
+                        "maxItems": len(candidates),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "image_id": {
+                                    "type": "string",
+                                    "enum": [img.image_id for img in candidates],
+                                },
+                                "score": {"type": "number", "minimum": 0, "maximum": 1},
+                                "anchor": {
+                                    "type": "string",
+                                    "enum": list(_ANCHOR_POINTS),
+                                },
+                                "subject": {"type": "string", "enum": list(_SUBJECTS)},
+                                "reason": {"type": "string", "maxLength": 200},
+                            },
+                            "required": [
+                                "image_id", "score", "anchor", "subject", "reason"
+                            ],
+                            "additionalProperties": False,
+                        },
+                    }
+                },
+                "required": ["results"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+# Timeout curto e por imagem para baixar as thumbs: são até 12 GETs concorrentes
 # dentro do POST /generate, ANTES da chamada de visão (90s) — e a soma tem de
 # caber no --timeout 180 do gunicorn, senão o worker morre sem dar o fallback.
 _THUMB_FETCH_TIMEOUT_SECONDS = 10

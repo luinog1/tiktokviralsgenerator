@@ -144,6 +144,12 @@ def test_downloads_the_thumb_and_sends_the_bytes(monkeypatch, thumb_downloads):
     urls = [p["image_url"]["url"] for p in content if p["type"] == "image_url"]
     assert urls == [_FAKE_THUMB_DATA_URI]
     assert captured["headers"]["Authorization"] == "Bearer ms-fake-key"
+    schema = captured["json"]["response_format"]["json_schema"]["schema"]
+    item_schema = schema["properties"]["results"]["items"]
+    assert "subject" in item_schema["required"]
+    assert item_schema["properties"]["subject"]["enum"] == [
+        "woman", "man", "person", "food", "scene"
+    ]
 
 
 @pytest.mark.parametrize("failure", ["conexao", "http-403", "grande-demais"])
@@ -367,6 +373,27 @@ def test_retries_without_the_thinking_flag_when_the_gateway_rejects_it(monkeypat
     assert [v.image_id for v in verdicts] == ["ph0"]
 
 
+def test_retries_without_json_schema_when_an_older_gateway_rejects_it(monkeypatch):
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(dict(kwargs["json"]))
+        if "response_format" in kwargs["json"]:
+            return _Resp({"error": "unsupported response_format"}, status=400)
+        return _reply(
+            '{"results":[{"image_id":"ph0","score":0.7,'
+            '"anchor":"top","subject":"scene"}]}'
+        )
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    verdicts = VisionRankingProvider(_settings()).rank({}, _photos(1))
+
+    assert len(calls) == 3
+    assert "chat_template_kwargs" not in calls[1]
+    assert "response_format" not in calls[2]
+    assert verdicts[0].subject == "scene"
+
+
 def test_truncated_reply_without_json_names_the_cause(monkeypatch, caplog):
     """`finish_reason=length` com só raciocínio: o log tem de dizer o porquê."""
     monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp({"choices": [{
@@ -508,6 +535,39 @@ def test_cap_keeps_both_pools_represented(monkeypatch):
 
     sent = captured["json"]["messages"][1]["content"][0]["text"]
     assert "hook0" in sent and "scene0" in sent
+
+
+def test_cap_covers_every_requested_quota_before_spending_slack(monkeypatch):
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["json"] = kwargs["json"]
+        return _reply('{"results":[]}')
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    hook_photos = _photos(6)
+    food_photos = _photos(8)
+    scene_photos = _photos(10)
+    for i, image in enumerate(hook_photos):
+        image.image_id, image.pool = f"hook{i}", "hook"
+    for i, image in enumerate(food_photos):
+        image.image_id, image.pool = f"food{i}", "food"
+    for i, image in enumerate(scene_photos):
+        image.image_id, image.pool = f"scene{i}", "scene"
+
+    VisionRankingProvider(_settings()).rank(
+        {
+            "slides_count": 8,
+            "person_images_count": 1,
+            "food_images_count": 2,
+        },
+        hook_photos + food_photos + scene_photos,
+    )
+
+    sent = captured["json"]["messages"][1]["content"][0]["text"]
+    for image_id in ["hook0", "food0", "food1", *[f"scene{i}" for i in range(5)]]:
+        assert image_id in sent
+    assert len(captured["json"]["messages"][1]["content"]) == 13
 
 
 # ------------------------------------------------------------------ fallbacks

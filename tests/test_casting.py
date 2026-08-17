@@ -92,6 +92,85 @@ def test_requested_people_food_and_scene_quotas_are_applied():
     assert len(casting.image_ids) == len(set(casting.image_ids))
 
 
+def test_food_quota_stays_before_the_scene_reserved_for_the_promo():
+    images = [
+        _image("pessoa", POOL_HOOK),
+        _image("comida-1", POOL_FOOD),
+        _image("comida-2", POOL_FOOD),
+        _image("cena", POOL_SCENE),
+    ]
+
+    casting = cast_carousel(
+        _slides("hook", "value", "value", "cta"),
+        images,
+        person_images_count=1,
+        food_images_count=2,
+    )
+
+    assert casting.categories == ["person", "food", "food", "scene"]
+    assert casting.image_ids[-1] == "cena"
+
+
+def test_scene_options_never_offer_known_people_or_food():
+    images = [
+        _image("pessoa", POOL_HOOK),
+        _image("outra-pessoa", POOL_SCENE),
+        _image("comida", POOL_SCENE),
+        _image("cena", POOL_SCENE),
+    ]
+    verdicts = [
+        _verdict("pessoa", "woman"),
+        _verdict("outra-pessoa", "person"),
+        _verdict("comida", "food"),
+        _verdict("cena", "scene"),
+    ]
+
+    casting = cast_carousel(_slides("hook", "value"), images, verdicts)
+
+    assert casting.categories == ["person", "scene"]
+    assert casting.image_options[1] == ["cena"]
+
+
+def test_unjudged_pool_results_do_not_bypass_a_partial_vision_response():
+    images = [
+        _image("hook-rejeitado", POOL_HOOK),
+        _image("food-nao-visto", POOL_FOOD),
+        _image("scene-confirmada", POOL_SCENE),
+    ]
+    verdicts = [
+        _verdict("hook-rejeitado", "scene"),
+        _verdict("scene-confirmada", "scene"),
+    ]
+
+    casting = cast_carousel(
+        _slides("hook", "value", "cta"),
+        images,
+        verdicts,
+        food_images_count=1,
+    )
+
+    assert "food-nao-visto" not in casting.image_options[1]
+    assert casting.image_ids[1] in {"hook-rejeitado", "scene-confirmada"}
+    assert any("0 de 1" in warning for warning in casting.warnings)
+
+
+def test_strict_vision_uses_a_neutral_background_when_no_safe_scene_exists():
+    images = [
+        _image("pessoa", POOL_HOOK),
+        _image("comida", POOL_FOOD),
+    ]
+    verdicts = [
+        _verdict("pessoa", "woman"),
+        _verdict("comida", "food"),
+    ]
+
+    casting = cast_carousel(_slides("hook", "value"), images, verdicts)
+
+    assert casting.image_ids == ["pessoa", ""]
+    assert casting.categories == ["person", "scene"]
+    assert any("fundo neutro" in warning for warning in casting.warnings)
+
+
 def test_smoothie_and_fruit_metadata_count_as_food():
     images = [
         _image("pessoa", POOL_HOOK),
@@ -107,6 +186,22 @@ def test_smoothie_and_fruit_metadata_count_as_food():
 
     assert casting.image_ids[1] == "smoothie"
     assert not casting.warnings
+
+
+def test_photo_described_as_a_person_does_not_enter_the_food_quota():
+    images = [
+        _image("hook", POOL_HOOK, title="a woman smiling"),
+        _image("pessoa-com-bebida", POOL_FOOD, title="woman drinking smoothie"),
+        _image("comida", POOL_FOOD, title="fresh berry smoothie bowl"),
+        _image("cena", POOL_SCENE, title="bright kitchen interior"),
+    ]
+
+    casting = cast_carousel(
+        _slides("hook", "value", "cta"), images, food_images_count=1
+    )
+
+    assert casting.image_ids[1] == "comida"
+    assert "pessoa-com-bebida" not in casting.image_options[1]
 
 
 def test_vision_can_reject_a_false_food_pool_result():
@@ -258,6 +353,9 @@ def test_apply_casting_writes_the_image_id_on_each_slide():
 
     assert slides[0]["image_id"] == "retrato"
     assert all(s["image_id"] for s in slides)
+    assert slides[0]["image_category"] == "person"
+    assert slides[1]["image_category"] == "scene"
+    assert slides[1]["image_options"] == ["cena"]
 
 
 # ------------------------------------------- sinal do metadado (sem visão)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.adapters import (
     PinterestClient,
@@ -37,6 +38,30 @@ from app.services.pinned_person import load_pinned
 from app.services.session_store import SessionStore, StoredProject, get_store
 
 logger = logging.getLogger(__name__)
+
+
+def _media_identity(image: PinterestImage) -> str:
+    """Identidade estável do mesmo arquivo servido em tamanhos diferentes.
+
+    O Pinterest pode devolver o mesmo pin com IDs distintos entre buscas e
+    caminhos `originals/`, `736x/` ou `474x/`. Deduplicar só por `image_id`
+    deixa essas cópias aparecerem como fotos diferentes no carrossel.
+    """
+    try:
+        parts = urlsplit(image.image_url or "")
+    except ValueError:
+        return ""
+    host = (parts.hostname or "").lower()
+    path = parts.path.rstrip("/")
+    if not host or not path:
+        return ""
+    if host == "i.pinimg.com" or host.endswith(".pinimg.com"):
+        pieces = path.split("/")
+        if len(pieces) > 2 and (pieces[1] == "originals" or pieces[1].endswith("x")):
+            path = "/" + "/".join(pieces[2:])
+        if "." in path.rsplit("/", 1)[-1]:
+            path = path.rsplit(".", 1)[0]
+    return f"{host}{path}".lower()
 
 
 @dataclass
@@ -230,6 +255,7 @@ class GenerationService:
             "keywords": keywords or [],
             "raw_text": raw_text[:600],
             "style": style,
+            "slides_count": slides_count,
             "instagram_images_count": self._instagram_images_count,
             "person_images_count": person_images_count,
             "food_images_count": food_images_count,
@@ -362,10 +388,14 @@ class GenerationService:
         # ocorrência ganha, então o pool de hook mantém o rótulo.
         images: list[PinterestImage] = []
         seen: set[str] = set()
+        seen_media: set[str] = set()
         for img in hook_images + food_images + scene_images:
-            if img.image_id in seen:
+            media_key = _media_identity(img)
+            if img.image_id in seen or (media_key and media_key in seen_media):
                 continue
             seen.add(img.image_id)
+            if media_key:
+                seen_media.add(media_key)
             images.append(img)
 
         if not images:
@@ -527,9 +557,11 @@ class GenerationService:
         if not anchors:
             return
         for i, slide in enumerate(slides):
-            image_id = slide.get("image_id") or ordered_images[
-                i % len(ordered_images)
-            ].image_id
+            image_id = slide.get("image_id")
+            if not image_id and "image_category" not in slide:
+                image_id = ordered_images[i % len(ordered_images)].image_id
+            if not image_id and "image_category" in slide:
+                continue
             position = anchors.get(image_id)
             if position is None:
                 continue

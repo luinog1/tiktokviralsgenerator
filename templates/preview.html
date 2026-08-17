@@ -154,7 +154,7 @@
           <!-- Mini-galeria para escolher imagem deste slide -->
           <label>Imagem</label>
           <div class="mini-gallery" data-slide="{{ i }}">
-            {% for img in images %}
+            {% for img in image_options_for_slide[i] %}
             <button type="button"
                     class="mini-thumb{% if (form.selected_image_ids[i].data or '') == img.image_id %} selected{% endif %}"
                     data-image-id="{{ img.image_id }}"

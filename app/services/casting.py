@@ -91,6 +91,8 @@ class CastingResult:
     """Uma imagem por slide, na ordem dos slides."""
 
     image_ids: list[str] = field(default_factory=list)
+    categories: list[str] = field(default_factory=list)
+    image_options: list[list[str]] = field(default_factory=list)
     hook_image_id: str = ""
     # "vision" | "metadata" | "pool" | "fallback" — de onde veio a escolha do
     # hook, para o aviso na prévia dizer a verdade sobre o que aconteceu.
@@ -114,6 +116,7 @@ def cast_carousel(
         return result
 
     subjects = _subjects_by_id(verdicts)
+    strict_vision = bool(subjects)
     scores = {
         v.image_id: float(getattr(v, "score", 0.0) or 0.0)
         for v in (verdicts or [])
@@ -128,10 +131,11 @@ def cast_carousel(
         hook_subject,
         preferred_hook_ids or set(),
     )
-    result.hook_image_id = hook_image.image_id
+    hook_image_id = "" if strict_vision and hook_source == "fallback" else hook_image.image_id
+    result.hook_image_id = hook_image_id
     result.hook_source = hook_source
 
-    if hook_source == "fallback":
+    if hook_source == "fallback" and not strict_vision:
         result.warnings.append(
             "Nenhuma foto com pessoa foi encontrada para o hook — o slide 1 "
             "ficou com a melhor foto disponível. Troque pela galeria na prévia."
@@ -158,11 +162,34 @@ def cast_carousel(
         affinity=lambda image: _food_affinity(image, subjects),
         exclude=hook_image.image_id,
     )
-    scene_pool = _scene_pool(images, subjects, scores, exclude=hook_image.image_id)
+    scene_pool = _scene_pool(
+        images,
+        subjects,
+        scores,
+        exclude=hook_image.image_id if hook_source != "fallback" else "",
+    )
+
+    person_options = (
+        [hook_image] + person_pool if hook_source != "fallback" else person_pool
+    )
+    pools = {
+        "person": person_options,
+        "food": food_pool,
+        "scene": scene_pool,
+    }
 
     result.image_ids = [""] * len(slides)
-    result.image_ids[hook_index] = hook_image.image_id
-    used = {hook_image.image_id}
+    result.categories = [""] * len(slides)
+    result.image_options = [[] for _ in slides]
+    result.image_ids[hook_index] = hook_image_id
+    result.categories[hook_index] = "person"
+    result.image_options[hook_index] = _image_ids(person_options)
+    if hook_image.image_id not in result.image_options[hook_index]:
+        result.image_options[hook_index].append(hook_image.image_id)
+    used = {hook_image_id} if hook_image_id else set()
+    repeat_indexes = {"person": 0, "food": 0, "scene": 0}
+    repeated_roles: set[str] = set()
+    neutral_slots = 1 if strict_vision and not hook_image_id else 0
     matched_people = 0 if hook_source == "fallback" else 1
     matched_food = 0
     roles = _category_sequence(
@@ -174,22 +201,39 @@ def cast_carousel(
         (i for i in range(len(slides)) if i != hook_index),
         roles,
     ):
-        candidates = {
-            "person": person_pool,
-            "food": food_pool,
-            "scene": scene_pool,
-        }[role]
+        candidates = pools[role]
+        result.categories[index] = role
+        result.image_options[index] = _image_ids(candidates)
         image = _pick_unused(candidates, used)
+        if image is None and candidates:
+            # A cota continua correta quando faltam fotos distintas: repetir
+            # dentro da categoria é preferível a vazar pessoa/comida para um
+            # slide de cenário. Com pools normais, o ramo não é usado.
+            image = candidates[repeat_indexes[role] % len(candidates)]
+            repeat_indexes[role] += 1
+            repeated_roles.add(role)
         if image is not None:
             if role == "person":
                 matched_people += 1
             elif role == "food":
                 matched_food += 1
         else:
-            image = _pick_unused(images, used)
+            # Se a busca não trouxe a categoria pedida, use primeiro cenário
+            # confirmado/seguro. Isso pode deixar a cota abaixo do solicitado,
+            # mas nunca cria pessoas ou comida extras. O último recurso só
+            # existe para o caso extremo de não haver cenário algum no acervo.
+            image = _pick_unused(scene_pool, used)
+            if image is None and scene_pool:
+                image = scene_pool[0]
             if image is None:
-                image = candidates[0] if candidates else images[0]
+                if strict_vision:
+                    result.image_ids[index] = ""
+                    neutral_slots += 1
+                    continue
+                image = images[0]
         result.image_ids[index] = image.image_id
+        if image.image_id not in result.image_options[index]:
+            result.image_options[index].append(image.image_id)
         used.add(image.image_id)
 
     if matched_people < person_images_count:
@@ -201,6 +245,20 @@ def cast_carousel(
         result.warnings.append(
             f"Foram encontradas {matched_food} de {food_images_count} foto(s) de "
             "comida; os outros slides usaram as melhores imagens disponíveis."
+        )
+    if repeated_roles:
+        labels = {"person": "pessoa", "food": "comida", "scene": "cenário"}
+        repeated = ", ".join(labels[role] for role in sorted(repeated_roles))
+        result.warnings.append(
+            "O acervo não tinha fotos distintas suficientes em "
+            f"{repeated}; as cotas foram preservadas repetindo apenas dentro "
+            "da própria categoria."
+        )
+    if neutral_slots:
+        result.warnings.append(
+            f"O VLM não confirmou uma categoria segura para {neutral_slots} "
+            "slide(s); foi usado fundo neutro para não inserir pessoa, comida "
+            "ou cenário fora da cota."
         )
 
     logger.info(
@@ -222,8 +280,12 @@ def apply_casting(slides: list[dict[str, Any]], casting: CastingResult) -> None:
     `image_id` no slide já é o campo que a prévia, o form de edição e o export
     consultam antes de cair na rotação — o casting só precisa preenchê-lo.
     """
-    for slide, image_id in zip(slides, casting.image_ids):
+    for index, (slide, image_id) in enumerate(zip(slides, casting.image_ids)):
         slide["image_id"] = image_id
+        if index < len(casting.categories):
+            slide["image_category"] = casting.categories[index]
+        if index < len(casting.image_options):
+            slide["image_options"] = list(casting.image_options[index])
 
 
 def _subjects_by_id(verdicts: list[Any] | None) -> dict[str, str]:
@@ -289,13 +351,17 @@ def _person_affinity(
     Assim uma foto confirmada pelo modelo nunca perde para uma que só veio da
     busca certa, e o metadado desempata quando não há VLM configurado.
     """
-    subject = subjects.get(image.image_id, "")
-    if subject:
+    if image.image_id in subjects:
+        subject = subjects[image.image_id]
         if subject == hook_subject:
             return 5
         if subject in PERSON_SUBJECTS:
             return 4
         return 0  # o modelo olhou e disse que não tem pessoa
+    if subjects:
+        return 0  # houve visão no lote, mas esta candidata não foi confirmada
+    if _describes_food(image):
+        return 0
     if _describes_person(image):
         return 3
     if image.pool == POOL_HOOK:
@@ -357,6 +423,11 @@ def _pick_unused(
     return next((img for img in candidates if img.image_id not in used), None)
 
 
+def _image_ids(images: list[PinterestImage]) -> list[str]:
+    """IDs únicos, preservando a ordem de preferência do pool."""
+    return list(dict.fromkeys(img.image_id for img in images if img.image_id))
+
+
 def _category_sequence(
     person_count: int, food_count: int, scene_count: int
 ) -> list[str]:
@@ -373,14 +444,24 @@ def _category_sequence(
                 continue
             sequence.append(role)
             remaining[role] -= 1
+    # O print promocional, quando existe, substitui o último slide depois do
+    # casting. Reservar cenário no fim impede que ele apague uma cota de comida
+    # ou pessoa em carrosséis curtos.
+    if scene_count > 0 and sequence and sequence[-1] != "scene":
+        scene_index = max(i for i, role in enumerate(sequence) if role == "scene")
+        sequence[scene_index], sequence[-1] = sequence[-1], sequence[scene_index]
     return sequence
 
 
 def _food_affinity(image: PinterestImage, subjects: dict[str, str]) -> int:
     """Quanto a foto serve à cota de comida."""
-    subject = subjects.get(image.image_id, "")
-    if subject:
+    if image.image_id in subjects:
+        subject = subjects[image.image_id]
         return 4 if subject == FOOD_SUBJECT else 0
+    if subjects:
+        return 0
+    if _describes_person(image):
+        return 0
     if _describes_food(image):
         return 3
     return 2 if image.pool == POOL_FOOD else 0
@@ -388,14 +469,14 @@ def _food_affinity(image: PinterestImage, subjects: dict[str, str]) -> int:
 
 def _scene_affinity(image: PinterestImage, subjects: dict[str, str]) -> int:
     """Espelho de :func:`_person_affinity` — maior = mais cara de b-roll."""
-    subject = subjects.get(image.image_id, "")
-    if subject == SCENE_SUBJECT:
-        return 3
-    if subject in (*PERSON_SUBJECTS, FOOD_SUBJECT):
+    if image.image_id in subjects:
+        subject = subjects[image.image_id]
+        return 3 if subject == SCENE_SUBJECT else 0
+    if subjects:
         return 0
     if _describes_person(image) or _describes_food(image):
         return 0
-    if image.pool == POOL_FOOD:
+    if image.pool in (POOL_HOOK, POOL_FOOD):
         return 0
     return 2 if image.pool == POOL_SCENE else 1
 

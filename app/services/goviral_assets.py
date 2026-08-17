@@ -92,8 +92,15 @@ def assign_promo_slide(
     gallery = pick_gallery()
     if not gallery or len(slides) < 2:
         return
+    # Com casting novo, o último slide é reservado como cenário. Se não há
+    # cenário na cota, o promo não pode apagar uma foto de pessoa/comida que o
+    # usuário pediu explicitamente. Slides antigos não têm a categoria.
+    if slides[-1].get("image_category") not in (None, "", "scene"):
+        return
     images.extend(gallery)
     slides[-1]["image_id"] = gallery[0].image_id
+    slides[-1]["image_category"] = "promo"
+    slides[-1]["image_options"] = [image.image_id for image in gallery]
     warnings.append(
         "A última imagem recebeu um print do GoViral app — há mais "
         f"{len(gallery) - 1} alternativa(s) na galeria da prévia."

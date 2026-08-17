@@ -70,6 +70,21 @@ def test_last_slide_gets_the_app_print_and_gallery_grows(fake_assets):
     assert len(images) == GALLERY_SIZE
     assert slides[-1]["image_id"] in {img.image_id for img in images}
     assert warnings and "GoViral" in warnings[0]
+    assert slides[-1]["image_category"] == "promo"
+    assert len(slides[-1]["image_options"]) == GALLERY_SIZE
+
+
+def test_promo_does_not_replace_an_explicit_food_quota(fake_assets):
+    slides = _slides(3)
+    slides[-1]["image_category"] = "food"
+    images: list[PinterestImage] = []
+    warnings: list[str] = []
+
+    assign_promo_slide(slides, images, warnings)
+
+    assert slides[-1]["image_id"] == "foto-2"
+    assert images == []
+    assert warnings == []
 
 
 def test_hook_and_middle_slides_keep_their_photos(fake_assets):

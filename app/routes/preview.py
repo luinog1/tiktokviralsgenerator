@@ -49,6 +49,7 @@ SUBJECT_LABELS = {
     "woman": "👤 mulher",
     "man": "👤 homem",
     "person": "👤 pessoa",
+    "food": "comida/bebida",
     "scene": "🏞 cenário",
 }
 
@@ -190,18 +191,37 @@ def preview(project_id: str):
     carousel = project.carousel or {}
     slides = project.edited_slides or carousel.get("slides", [])
     images = project.images or []
+    images_by_id = {str(image.get("image_id") or ""): image for image in images}
     style = project.style or "quote"
 
     # Pré-selecionar imagem para cada slide (índice % imagens)
     image_for_slide: list[dict | None] = []
+    image_options_for_slide: list[list[dict]] = []
     for i, slide in enumerate(slides):
         # Se houver image_id no slide editado, usar; senão round-robin
         img_id = slide.get("image_id") if isinstance(slide, dict) else None
         if img_id:
             img = next((im for im in images if im["image_id"] == img_id), None)
+        elif isinstance(slide, dict) and "image_category" in slide:
+            img = None
         else:
             img = images[i % len(images)] if images else None
         image_for_slide.append(img)
+        option_ids = slide.get("image_options") if isinstance(slide, dict) else None
+        if isinstance(option_ids, list):
+            options = [
+                images_by_id[str(option)]
+                for option in option_ids
+                if str(option) in images_by_id
+            ]
+        else:
+            # Projetos antigos não guardavam alternativas por categoria.
+            options = list(images)
+        if img and all(
+            option.get("image_id") != img.get("image_id") for option in options
+        ):
+            options.insert(0, img)
+        image_options_for_slide.append(options)
 
     form = SlideEditForm()
     # Pré-popular campos
@@ -210,7 +230,12 @@ def preview(project_id: str):
         form.bodies.append_entry(slide.get("body", ""))
         form.ctas.append_entry(slide.get("call_to_action", ""))
         form.selected_image_ids.append_entry(
-            slide.get("image_id") or (images[i % len(images)]["image_id"] if images else "")
+            slide.get("image_id")
+            or (
+                ""
+                if "image_category" in slide
+                else (images[i % len(images)]["image_id"] if images else "")
+            )
         )
         form.text_positions.append_entry(_position_field(slide))
         form.box_positions.append_entry(_box_positions_field(slide))
@@ -222,6 +247,7 @@ def preview(project_id: str):
         slides=slides,
         images=images,
         image_for_slide=image_for_slide,
+        image_options_for_slide=image_options_for_slide,
         style=style,
         form=form,
         role_labels=ROLE_LABELS,
@@ -330,7 +356,7 @@ def _build_slides_and_images(slides_data, images):
         img = None
         if img_id:
             img = next((im for im in images if im["image_id"] == img_id), None)
-        if not img and images:
+        if not img and images and "image_category" not in s:
             img = images[i % len(images)]
         if img:
             image_objs.append(

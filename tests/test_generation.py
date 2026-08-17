@@ -168,6 +168,9 @@ def test_visual_quotas_reach_the_saved_slides():
     assert chosen.count(POOL_HOOK) == 2
     assert chosen.count(POOL_FOOD) == 2
     assert chosen.count(POOL_SCENE) == 2
+    assert outcome.project.briefing["slides_count"] == 6
+    assert all("image_category" in slide for slide in outcome.project.carousel["slides"])
+    assert all("image_options" in slide for slide in outcome.project.carousel["slides"])
 
 
 def test_instagram_quota_prefers_the_profile_photo_for_the_hook():
@@ -238,6 +241,31 @@ def test_overlapping_pools_are_deduped():
 
     ids = [img["image_id"] for img in outcome.project.images]
     assert len(ids) == len(set(ids))
+
+
+def test_same_pinterest_file_with_different_pin_ids_is_deduped():
+    class _SameMediaClient(_FakeClient):
+        def search(self, query: str, limit: int = 10) -> list[PinterestImage]:
+            self.queries.append((query, limit))
+            call = len(self.queries)
+            return [
+                PinterestImage(
+                    image_id=f"pin-{call}-{i}",
+                    image_url=(
+                        "https://i.pinimg.com/"
+                        + ("originals" if call == 1 else "736x")
+                        + f"/aa/bb/same-{i}.{'png' if call == 1 else 'jpg'}"
+                    ),
+                    source_url=f"https://pinterest/pin/{call}-{i}",
+                    title="",
+                )
+                for i in range(limit)
+            ]
+
+    client = _SameMediaClient()
+    outcome = _run(client, _service(client))
+
+    assert len(outcome.project.images) == 6
 
 
 def test_a_failing_pool_does_not_sink_the_generation():

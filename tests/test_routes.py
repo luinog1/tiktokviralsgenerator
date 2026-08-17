@@ -156,6 +156,73 @@ def test_preview_unknown_project_returns_404(client):
     assert response.status_code == 404
 
 
+def test_preview_gallery_only_offers_images_from_the_slide_category(client):
+    images = [
+        {
+            "image_id": image_id,
+            "image_url": f"https://img/{image_id}.jpg",
+            "source_url": "https://source",
+            "title": image_id,
+            "description": "",
+            "attribution_text": "Teste",
+            "pool": category,
+        }
+        for image_id, category in [
+            ("person-1", "hook"),
+            ("food-1", "food"),
+            ("scene-1", "scene"),
+            ("scene-2", "scene"),
+        ]
+    ]
+    slides = [
+        {
+            "headline": "Hook",
+            "role": "hook",
+            "image_id": "person-1",
+            "image_category": "person",
+            "image_options": ["person-1"],
+        },
+        {
+            "headline": "Comida",
+            "role": "value",
+            "image_id": "food-1",
+            "image_category": "food",
+            "image_options": ["food-1"],
+        },
+        {
+            "headline": "Cena",
+            "role": "cta",
+            "image_id": "scene-1",
+            "image_category": "scene",
+            "image_options": ["scene-1", "scene-2"],
+        },
+    ]
+    project = get_store().create(
+        briefing={"theme": "teste"},
+        carousel={"slides": slides, "hashtags": [], "caption": ""},
+        images=images,
+        ranking=[
+            {"image_id": "person-1", "score": 0.9, "subject": "woman"},
+            {"image_id": "food-1", "score": 0.8, "subject": "food"},
+            {"image_id": "scene-1", "score": 0.7, "subject": "scene"},
+        ],
+        style="quote",
+        slides_count=3,
+        raw_text="teste",
+    )
+
+    body = client.get(f"/preview/{project.project_id}").get_data(as_text=True)
+    gallery = re.search(
+        r'<div class="mini-gallery" data-slide="2">(.*?)</div>', body, re.S
+    ).group(1)
+
+    assert 'data-image-id="scene-1"' in gallery
+    assert 'data-image-id="scene-2"' in gallery
+    assert 'data-image-id="person-1"' not in gallery
+    assert 'data-image-id="food-1"' not in gallery
+    assert "comida/bebida" in body
+
+
 # --------------------------------- modo roteiro: um bloco por imagem, na ordem
 def test_create_form_renders_the_script_section(client):
     body = client.get("/create").data.decode("utf-8")

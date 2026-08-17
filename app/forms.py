@@ -465,6 +465,14 @@ class SlideEditForm(FlaskForm):
             image_id = (
                 self.selected_image_ids[i].data if i < len(self.selected_image_ids.entries) else ""
             )
+            has_image_options = isinstance(orig.get("image_options"), list)
+            image_options = [
+                str(option)
+                for option in (orig.get("image_options") or [])
+                if str(option or "")
+            ]
+            if has_image_options and image_id not in image_options:
+                image_id = str(orig.get("image_id") or "")
             raw_pos = (
                 self.text_positions[i].data if i < len(self.text_positions.entries) else ""
             )
@@ -491,6 +499,10 @@ class SlideEditForm(FlaskForm):
                 "box_positions": _parse_box_positions(raw_boxes),
                 "box_scales": _parse_box_scales(raw_scales),
             }
+            if "image_category" in orig:
+                slide["image_category"] = orig.get("image_category", "")
+            if has_image_options:
+                slide["image_options"] = image_options
             # O slide de hook é uma caixa só. A prévia já entrega apoio e CTA
             # como leitura apenas, então aqui não se perde edição nenhuma — é a
             # trava contra um POST montado à mão, que reintroduziria as caixas
