@@ -56,6 +56,8 @@ def generate():
             language=briefing["language"],
             script_blocks=briefing["script_blocks"],
             use_pinned_person=briefing["use_pinned_person"],
+            person_images_count=briefing["person_images_count"],
+            food_images_count=briefing["food_images_count"],
         )
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("Falha de geração: %s", type(exc).__name__)

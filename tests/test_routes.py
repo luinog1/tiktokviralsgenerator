@@ -85,6 +85,8 @@ def test_create_form_renders(client):
     assert "Briefing do carrossel" in body
     assert "goviral.ai" in body
     assert "raw_text" in body
+    assert "person_images_count" in body
+    assert "food_images_count" in body
 
 
 def test_generate_full_flow_creates_project(client):
@@ -501,6 +503,8 @@ def test_goviral_page_renders(client):
     assert "Gerador de hooks e scripts" in body
     assert "content-brief" in body
     assert "raw_text" in body
+    assert "person_images_count" in body
+    assert "food_images_count" in body
     assert "instagram_images_count" in body
 
 
@@ -525,6 +529,22 @@ def test_goviral_panel_generates_the_carousel_without_asking_slide_count(client)
     # 3 imagens: os campos da prévia param no índice 2.
     assert "text_positions-2" in body
     assert "text_positions-3" not in body
+
+
+def test_goviral_visual_quotas_are_saved_with_the_project(client):
+    response = client.post("/goviral", data={
+        "raw_text": GOVIRAL_PANEL,
+        "theme": "smoothie de frutas",
+        "style": "sticker",
+        "person_images_count": "1",
+        "food_images_count": "1",
+    })
+
+    project_id = response.headers["Location"].rsplit("/", 1)[-1]
+    project = get_store().get(project_id)
+    assert project is not None
+    assert project.briefing["person_images_count"] == 1
+    assert project.briefing["food_images_count"] == 1
 
 
 def test_goviral_rejects_text_that_is_not_the_panel(client):

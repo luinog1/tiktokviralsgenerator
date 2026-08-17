@@ -172,6 +172,22 @@
         {% endif %}
       </div>
     </div>
+    <div class="grid-2">
+      <div class="field">
+        <label for="person_images_count">{{ form.person_images_count.label.text }}</label>
+        {{ form.person_images_count(id="person_images_count", class_="input") }}
+        {% if form.person_images_count.errors %}
+          <ul class="errors">{% for err in form.person_images_count.errors %}<li>{{ err }}</li>{% endfor %}</ul>
+        {% endif %}
+      </div>
+      <div class="field">
+        <label for="food_images_count">{{ form.food_images_count.label.text }}</label>
+        {{ form.food_images_count(id="food_images_count", class_="input") }}
+        {% if form.food_images_count.errors %}
+          <ul class="errors">{% for err in form.food_images_count.errors %}<li>{{ err }}</li>{% endfor %}</ul>
+        {% endif %}
+      </div>
+    </div>
     <p class="small muted">
       No modo <strong>Instagram + Pinterest</strong>, uma foto do Instagram é
       priorizada para o hook e a cota restante vai para os outros slides; o
@@ -179,6 +195,11 @@
       <code>@perfil</code> para o Instagram — o perfil é removido da query do
       Pinterest — ou <code>#hashtag</code>, que continua como palavra de busca.
       A cota não altera os modos de fonte única.
+    </p>
+    <p class="small muted">
+      As cotas de pessoas/modelos e comida são aplicadas aos resultados finais;
+      as imagens restantes vêm de cenário geral. O app exige fotos que cubram
+      o tamanho do slide para não ampliar imagens pequenas.
     </p>
 
     {% include "_pinned_person.html" %}

@@ -48,7 +48,7 @@ _ANCHOR_POINTS: dict[str, tuple[float, float]] = {
 # Assunto da foto. O carrossel de lifestyle abre com uma pessoa em cena e segue
 # com cenário — para montar isso o casting precisa saber o que tem em cada foto,
 # e o metadado do Unsplash não diz de forma confiável.
-_SUBJECTS = ("woman", "man", "person", "scene")
+_SUBJECTS = ("woman", "man", "person", "food", "scene")
 
 _SYSTEM_PROMPT = (
     "Você seleciona fotos de fundo para carrosséis do TikTok (photo post 4:5). "
@@ -61,8 +61,8 @@ _SYSTEM_PROMPT = (
     f"{', '.join(_ANCHOR_POINTS)}.\n"
     "3. subject: o que a foto mostra em primeiro plano. Escolha uma de: "
     "woman (mulher em cena), man (homem em cena), person (pessoa sem dar para "
-    "dizer, ou mais de uma), scene (sem pessoa em destaque: lugar, comida, "
-    "objeto, interior, paisagem).\n"
+    "dizer, ou mais de uma), food (comida, bebida, smoothie, fruta ou refeição), "
+    "scene (sem pessoa nem comida em destaque: lugar, objeto, interior, paisagem).\n"
     "4. reason: no máximo 90 caracteres, em português.\n\n"
     "Penalize com score baixo: foto com texto/logo embutido, muito escura, "
     "muito poluída no centro, ou sem relação com o tema.\n"
@@ -79,7 +79,7 @@ class VisionVerdict:
     image_id: str
     score: float
     anchor: str = ""
-    # "woman" | "man" | "person" | "scene" | "" (o modelo não classificou).
+    # "woman" | "man" | "person" | "food" | "scene" | "" (não classificou).
     # Leitura do enquadramento de uma foto de banco de imagens, usada só para
     # escolher qual slide recebe qual foto.
     subject: str = ""
@@ -309,10 +309,9 @@ class VisionRankingProvider:
 def _cap_across_pools(images: list[PinterestImage], cap: int) -> list[PinterestImage]:
     """Corta em `cap` imagens sem deixar um pool de fora.
 
-    Com o casting ligado a lista chega como [fotos de retrato] + [fotos de
-    cenário]. Um `[:cap]` cru gastaria a cota toda no primeiro pool e o modelo
-    nunca veria as fotos de cenário — o casting então classificaria metade das
-    fotos no escuro. Intercalar os pools mantém os dois representados.
+    Com o casting ligado a lista chega agrupada por pessoa, comida e cenário.
+    Um `[:cap]` cru gastaria a cota no primeiro pool e deixaria categorias sem
+    avaliação. Intercalar os pools mantém todos representados.
     """
     if len(images) <= cap:
         return images
@@ -388,9 +387,13 @@ _SUBJECT_ALIASES = {
     "male": "man", "boy": "man", "guy": "man", "homem": "man",
     "people": "person", "human": "person", "pessoa": "person",
     "portrait": "person", "couple": "person",
-    "place": "scene", "food": "scene", "object": "scene", "landscape": "scene",
+    "place": "scene", "object": "scene", "landscape": "scene",
     "interior": "scene", "nature": "scene", "cenario": "scene",
     "cenário": "scene", "none": "scene", "no-person": "scene",
+    "meal": "food", "dish": "food", "smoothie": "food", "fruit": "food",
+    "fruits": "food", "beverage": "food", "drink": "food", "comida": "food",
+    "refeicao": "food", "refeição": "food", "fruta": "food",
+    "bebida": "food", "food": "food",
 }
 
 

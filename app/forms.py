@@ -69,6 +69,19 @@ INSTAGRAM_IMAGE_COUNT_CHOICES = [
     for count in range(1, MAX_SCRIPT_BLOCKS + 1)
 ]
 
+PERSON_IMAGE_COUNT_CHOICES = [
+    (str(count), "1 foto (hook recomendado)" if count == 1 else f"{count} fotos")
+    for count in range(1, MAX_SCRIPT_BLOCKS + 1)
+]
+
+FOOD_IMAGE_COUNT_CHOICES = [
+    (
+        str(count),
+        "Nenhuma" if count == 0 else "1 foto" if count == 1 else f"{count} fotos",
+    )
+    for count in range(0, MAX_SCRIPT_BLOCKS + 1)
+]
+
 # Rótulo de cada campo do roteiro, pelo papel do slide naquela posição. O papel
 # vem de `viral_script_roles`, a mesma função que decide o papel real no
 # carrossel — assim o que o formulário promete é o que o render entrega.
@@ -188,6 +201,18 @@ class BriefingForm(FlaskForm):
         default="1",
         validators=[DataRequired(message="Escolha quantas fotos vêm do Instagram.")],
     )
+    person_images_count = SelectField(
+        "Fotos com pessoas/modelos",
+        choices=PERSON_IMAGE_COUNT_CHOICES,
+        default="1",
+        validators=[DataRequired(message="Escolha quantas fotos mostram pessoas.")],
+    )
+    food_images_count = SelectField(
+        "Fotos de comida",
+        choices=FOOD_IMAGE_COUNT_CHOICES,
+        default="0",
+        validators=[DataRequired(message="Escolha quantas fotos mostram comida.")],
+    )
     # Só aparece no formulário quando há pessoa fixada (ver template). Desligado
     # por padrão: repetir a pessoa é escolha por carrossel, não estado global.
     use_pinned_person = BooleanField(
@@ -259,6 +284,13 @@ class BriefingForm(FlaskForm):
         instagram_images_count = min(
             int(self.instagram_images_count.data or 1), slides_count
         )
+        person_images_count = min(
+            int(self.person_images_count.data or 1), slides_count
+        )
+        food_images_count = min(
+            int(self.food_images_count.data or 0),
+            max(slides_count - person_images_count, 0),
+        )
         return {
             "theme": (self.theme.data or "").strip(),
             "raw_text": raw_text,
@@ -272,6 +304,8 @@ class BriefingForm(FlaskForm):
             "use_pinned_person": bool(self.use_pinned_person.data),
             "image_source": (self.image_source.data or "").strip(),
             "instagram_images_count": instagram_images_count,
+            "person_images_count": person_images_count,
+            "food_images_count": food_images_count,
         }
 
 
@@ -336,6 +370,18 @@ class GoviralForm(FlaskForm):
         choices=INSTAGRAM_IMAGE_COUNT_CHOICES,
         default="1",
         validators=[DataRequired(message="Escolha quantas fotos vêm do Instagram.")],
+    )
+    person_images_count = SelectField(
+        "Fotos com pessoas/modelos",
+        choices=PERSON_IMAGE_COUNT_CHOICES,
+        default="1",
+        validators=[DataRequired(message="Escolha quantas fotos mostram pessoas.")],
+    )
+    food_images_count = SelectField(
+        "Fotos de comida",
+        choices=FOOD_IMAGE_COUNT_CHOICES,
+        default="0",
+        validators=[DataRequired(message="Escolha quantas fotos mostram comida.")],
     )
     # Mesmo comportamento do checkbox no BriefingForm: opt-in por carrossel.
     use_pinned_person = BooleanField(
@@ -465,6 +511,8 @@ __all__ = [
     "LANGUAGE_CHOICES",
     "IMAGE_SOURCE_CHOICES",
     "INSTAGRAM_IMAGE_COUNT_CHOICES",
+    "PERSON_IMAGE_COUNT_CHOICES",
+    "FOOD_IMAGE_COUNT_CHOICES",
     "MODE_CHOICES",
     "MAX_SCRIPT_BLOCKS",
     "script_field_labels",

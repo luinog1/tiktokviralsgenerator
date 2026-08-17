@@ -302,11 +302,11 @@ def test_resolution_floor_prefers_photos_that_cover_the_slide(fake_get):
     assert images[0].image_id == "ig-90001"
 
 
-def test_without_high_res_stock_the_floor_gives_way(fake_get):
+def test_without_high_res_stock_the_floor_stays_strict(fake_get):
     fake_get(_FakeResponse(_tag_payload([_v1_media(0, width=474, height=711)])))
     client = InstagramScrapeClient(min_resolution=(1080, 1350))
     images = client.search("rotina", limit=1)
-    assert not is_mock_image(images[0])
+    assert is_mock_image(images[0])
 
 
 # ---------- fallbacks ----------

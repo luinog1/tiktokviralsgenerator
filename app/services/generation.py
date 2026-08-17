@@ -25,7 +25,13 @@ from app.adapters.goviral_parser import goviral_blocks
 from app.adapters.script_parser import compose_from_blocks, labeled_blocks
 from app.adapters.vision_provider import VisionRankingProvider, build_vision_provider
 from app.config import Settings
-from app.services.casting import POOL_HOOK, POOL_SCENE, apply_casting, cast_carousel
+from app.services.casting import (
+    POOL_FOOD,
+    POOL_HOOK,
+    POOL_SCENE,
+    apply_casting,
+    cast_carousel,
+)
 from app.services.goviral_assets import assign_promo_slide
 from app.services.pinned_person import load_pinned
 from app.services.session_store import SessionStore, StoredProject, get_store
@@ -52,6 +58,8 @@ class GenerationService:
     # mas a busca precisa de folga: nem toda foto da query de retrato traz
     # alguém em cena, e é a galeria da prévia que absorve as sobras.
     HOOK_POOL_SIZE = 6
+    FOOD_POOL_SIZE = 8
+    FOOD_QUERY_HINTS = "food meal smoothie fruit breakfast healthy dish beverage"
 
     def __init__(
         self,
@@ -106,6 +114,8 @@ class GenerationService:
         language: str = "pt-BR",
         script_blocks: list[str] | None = None,
         use_pinned_person: bool = False,
+        person_images_count: int = 1,
+        food_images_count: int = 0,
     ) -> GenerationOutcome:
         """Gera o carrossel.
 
@@ -185,10 +195,32 @@ class GenerationService:
         if not carousel.slides:
             warnings.append("Nenhum slide gerado — texto colado está vazio ou inválido.")
 
+        person_images_count = min(max(int(person_images_count or 1), 1), slides_count)
+        food_images_count = min(
+            max(int(food_images_count or 0), 0),
+            max(slides_count - person_images_count, 0),
+        )
+        if person_images_count > 1 or food_images_count:
+            if self._settings.casting_enabled:
+                warnings.append(
+                    f"Cotas visuais: {person_images_count} pessoa(s), "
+                    f"{food_images_count} foto(s) de comida e o restante em cenário geral."
+                )
+            else:
+                warnings.append(
+                    "As cotas de pessoas e comida precisam do casting ligado; "
+                    "HOOK_SUBJECT=off manteve uma busca única sem restrição por assunto."
+                )
+
         # 2. Buscar imagens
         query = self._build_query(theme, niche, keywords, raw_text)
         images = self._search_images(
-            query, slides_count, warnings, use_pinned_person=use_pinned_person
+            query,
+            slides_count,
+            warnings,
+            use_pinned_person=use_pinned_person,
+            person_images_count=person_images_count,
+            food_images_count=food_images_count,
         )
 
         # 3. Ranking — visão primeiro (olha a foto), texto como fallback
@@ -199,6 +231,8 @@ class GenerationService:
             "raw_text": raw_text[:600],
             "style": style,
             "instagram_images_count": self._instagram_images_count,
+            "person_images_count": person_images_count,
+            "food_images_count": food_images_count,
         }
         vision_verdicts = self._see_safely(briefing, images, warnings)
         if vision_verdicts:
@@ -229,6 +263,8 @@ class GenerationService:
                 vision_verdicts,
                 hook_subject=self._settings.hook_subject,
                 preferred_hook_ids=preferred_hook_ids,
+                person_images_count=person_images_count,
+                food_images_count=food_images_count,
             )
             apply_casting(carousel_dict["slides"], casting)
             warnings.extend(casting.warnings)
@@ -264,12 +300,14 @@ class GenerationService:
         slides_count: int,
         warnings: list[str],
         use_pinned_person: bool = False,
+        person_images_count: int = 1,
+        food_images_count: int = 0,
     ) -> list[PinterestImage]:
-        """Busca as fotos do carrossel — em dois pools quando há casting.
+        """Busca as fotos do carrossel em pools de pessoa, comida e cenário.
 
         Uma query só devolve o que o tema pede, e "rotina matinal" raramente
-        devolve retrato na primeira página. Com casting ligado, a busca é feita
-        duas vezes — retrato e cenário — e cada foto carrega de qual pool veio,
+        devolve retrato na primeira página. Com casting ligado, cada assunto
+        pedido ganha uma busca própria e cada foto carrega o pool de origem,
         que é o sinal que sobrevive mesmo sem VLM configurado.
 
         Com a pessoa fixada ligada, o pool de retrato vem dos pins relacionados
@@ -284,30 +322,47 @@ class GenerationService:
                 )
             return self._search_pool(query, max(slides_count, 6), "", warnings)
 
+        person_images_count = min(max(person_images_count, 1), slides_count)
+        food_images_count = min(
+            max(food_images_count, 0),
+            max(slides_count - person_images_count, 0),
+        )
+
         hook_images: list[PinterestImage] = []
         if use_pinned_person:
             hook_images = self._pinned_person_pool(warnings)
         if not hook_images:
             hook_images = self._search_pool(
                 f"{query} {self._settings.hook_query_hints}".strip(),
-                self.HOOK_POOL_SIZE,
+                max(self.HOOK_POOL_SIZE, person_images_count * 2),
                 POOL_HOOK,
                 warnings,
             )
-        scene_images = self._search_pool(
-            f"{query} {self._settings.scene_query_hints}".strip(),
-            max(slides_count, 6),
-            POOL_SCENE,
-            warnings,
-        )
+        food_images: list[PinterestImage] = []
+        if food_images_count:
+            food_images = self._search_pool(
+                f"{query} {self.FOOD_QUERY_HINTS}".strip(),
+                max(self.FOOD_POOL_SIZE, food_images_count * 2),
+                POOL_FOOD,
+                warnings,
+            )
+        general_count = max(slides_count - person_images_count - food_images_count, 0)
+        scene_images: list[PinterestImage] = []
+        if general_count:
+            scene_images = self._search_pool(
+                f"{query} {self._settings.scene_query_hints}".strip(),
+                max(general_count * 2, 6),
+                POOL_SCENE,
+                warnings,
+            )
 
-        # As duas buscas se sobrepõem ("café mulher" e "café estética" trazem a
-        # mesma foto às vezes). Sem deduplicar, a mesma foto apareceria duas
+        # As buscas se sobrepõem ("café mulher" e "café estética" trazem a
+        # mesma foto às vezes). Sem deduplicar, a mesma foto apareceria várias
         # vezes na galeria e os mapas por image_id ficariam ambíguos. A primeira
         # ocorrência ganha, então o pool de hook mantém o rótulo.
         images: list[PinterestImage] = []
         seen: set[str] = set()
-        for img in hook_images + scene_images:
+        for img in hook_images + food_images + scene_images:
             if img.image_id in seen:
                 continue
             seen.add(img.image_id)
@@ -338,7 +393,8 @@ class GenerationService:
             return []
 
         for img in images:
-            img.pool = pool
+            if not img.pool:
+                img.pool = pool
 
         # Sem casting, os avisos saem aqui; com casting, quem avisa é o
         # `_search_images`, senão o mesmo aviso apareceria duas vezes.

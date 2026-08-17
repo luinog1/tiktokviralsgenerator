@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from itertools import zip_longest
 from types import SimpleNamespace
 from typing import Any, Iterable, Protocol, runtime_checkable
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
@@ -184,9 +184,15 @@ class UnsplashClient:
     # cai rápido depois das primeiras páginas.
     _PAGE_WINDOW = 5
 
-    def __init__(self, access_key: str, timeout: int = 20):
+    def __init__(
+        self,
+        access_key: str,
+        timeout: int = 20,
+        target_size: tuple[int, int] = (1080, 1350),
+    ):
         self._access_key = access_key
         self._timeout = timeout
+        self._target_size = target_size
         # Por que a última busca caiu no mock. Vazio = não caiu.
         self.last_fallback_reason = ""
 
@@ -250,9 +256,12 @@ class UnsplashClient:
         for item in results:
             urls = item.get("urls") or {}
             user = item.get("user") or {}
+            full_url = (
+                urls.get("raw") or urls.get("full") or urls.get("regular") or ""
+            )
             images.append(PinterestImage(
                 image_id=str(item.get("id") or ""),
-                image_url=urls.get("regular") or urls.get("full") or "",
+                image_url=_sized_unsplash_url(full_url, self._target_size),
                 thumb_url=urls.get("small") or urls.get("thumb") or "",
                 source_url=item.get("links", {}).get("html") or "",
                 title=str(item.get("alt_description") or query)[:200],
@@ -268,6 +277,26 @@ class UnsplashClient:
             len(images), query[:80], page,
         )
         return images[:limit]
+
+
+def _sized_unsplash_url(url: str, target_size: tuple[int, int]) -> str:
+    """Pede ao CDN uma imagem final que já cobre o slide em alta qualidade."""
+    if not url:
+        return ""
+    width, height = target_size
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.update({
+        "w": str(max(int(width), 1)),
+        "h": str(max(int(height), 1)),
+        "fit": "crop",
+        "crop": "entropy",
+        "q": "85",
+        "auto": "format",
+    })
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -345,16 +374,14 @@ def _covers_slide(media: Any, minimum: tuple[int, int]) -> bool:
 def _cut_pool(medias: list[Any], limit: int, min_resolution: tuple[int, int]) -> list[Any]:
     """O recorte comum das buscas sem token (Pinterest e Instagram).
 
-    Alta resolução e retrato primeiro, com as exigências caindo em ordem quando
-    o acervo não dá para elas, e o ponto de corte sorteado para a mesma busca
-    não devolver sempre as mesmas fotos. Ver `PinterestScrapeClient._select`
-    para o porquê de cada correção.
+    O piso de resolução é estrito. Retrato continua sendo preferência, mas uma
+    foto pequena nunca substitui uma foto grande: se o acervo não atingir o
+    piso, a fonte devolve menos resultados ou cai no fallback. O ponto de corte
+    sorteado evita que a mesma busca devolva sempre as mesmas fotos.
     """
     sharp = [m for m in medias if _covers_slide(m, min_resolution)]
-    portrait = [m for m in medias if _is_portrait(m)]
-    for pool in ([m for m in sharp if _is_portrait(m)], sharp, portrait, medias):
-        if len(pool) >= limit:
-            break
+    portrait = [m for m in sharp if _is_portrait(m)]
+    pool = portrait if len(portrait) >= limit else sharp
     start = random.randint(0, max(0, len(pool) - limit))
     return pool[start : start + limit]
 
@@ -434,6 +461,13 @@ class PinterestScrapeClient:
             return MockPinterestClient().search(query, limit)
 
         selected = self._select(medias, limit)
+        if not selected:
+            self.last_fallback_reason = (
+                "O Pinterest não retornou fotos com resolução suficiente para "
+                f"o slide ({self._min_resolution[0]}x{self._min_resolution[1]})."
+            )
+            logger.warning(self.last_fallback_reason)
+            return MockPinterestClient().search(query, limit)
         logger.info(
             "Pinterest (scraping) retornou %d imagens para query=%r "
             "(pool de %d, %d acima do piso de %dx%d)",
@@ -496,10 +530,8 @@ class PinterestScrapeClient:
         por relevância e essa ordem é estável: sem isso o mesmo tema devolveria
         as mesmas fotos toda vez, o que parece cache do app e não é.
 
-        As duas exigências caem em ordem quando o tema não tem acervo para elas:
-        primeiro a orientação, depois a resolução. Um carrossel com foto pequena
-        ainda é melhor que um carrossel de gradientes — e a foto pequena aparece
-        na galeria da prévia, onde dá para trocar.
+        A orientação pode ceder quando não há retratos suficientes; o piso de
+        resolução não cede, porque ampliar uma origem pequena degrada o PNG final.
         """
         return _cut_pool(medias, limit, self._min_resolution)
 
@@ -939,9 +971,9 @@ class InstagramScrapeClient:
         # no render e chega ao feed borrada.
         self._min_resolution = min_resolution
         self._hint_words = {w.strip().lower() for w in hint_words if w.strip()}
-        # O casting faz duas buscas (hook e cenário), mas @perfil e hashtag
-        # resolvem para a mesma URL da Apify. Reusar o dataset evita pagar e
-        # esperar um segundo run idêntico dentro da mesma geração.
+        # O casting faz buscas por pessoa, comida e cenário, mas @perfil e
+        # hashtag resolvem para a mesma URL da Apify. Reusar o dataset evita
+        # pagar e esperar runs idênticos dentro da mesma geração.
         self._apify_cache: dict[str, list[Any]] = {}
         # Por que a última busca caiu no mock. Vazio = não caiu.
         self.last_fallback_reason = ""
@@ -1026,6 +1058,13 @@ class InstagramScrapeClient:
             return MockPinterestClient().search(query, limit)
 
         selected = _cut_pool(entries, limit, self._min_resolution)
+        if not selected:
+            self.last_fallback_reason = (
+                "O Instagram não retornou fotos com resolução suficiente para "
+                f"o slide ({self._min_resolution[0]}x{self._min_resolution[1]})."
+            )
+            logger.warning(self.last_fallback_reason)
+            return MockPinterestClient().search(query, limit)
         logger.info(
             "Instagram retornou %d imagens para %s (pool de %d, %d acima do piso)",
             len(selected), scope, len(entries),
@@ -1412,7 +1451,7 @@ class CombinedImageClient:
             return client.search(query, limit=limit), True
 
         carryover = self._source_carryover.get(name, [])
-        if pool == "scene" and carryover:
+        if pool and pool != "hook" and carryover:
             found = carryover[:limit]
             self._source_carryover[name] = carryover[len(found):]
             return found, False
@@ -1434,6 +1473,8 @@ class CombinedImageClient:
         # posts e cobrança. O que sobrou fica em memória para o segundo pool.
         self._source_remaining[name] = 0
         if pool == "hook":
+            for image in real:
+                image.pool = image.pool or "hook"
             self._source_carryover[name] = real[1:]
             return real[:1], True
         return real[:limit], True
@@ -1536,14 +1577,22 @@ def build_pinterest_client(
         logger.info("Fonte de imagens: Unsplash + Pinterest.")
         return CombinedImageClient(
             [
-                UnsplashClient(unsplash_key, timeout=settings.request_timeout_seconds),
+                UnsplashClient(
+                    unsplash_key,
+                    timeout=settings.request_timeout_seconds,
+                    target_size=(settings.slide_width, settings.slide_height),
+                ),
                 _pinterest_scrape_client(settings),
             ],
             name="unsplash_pinterest",
         )
     if choice == "unsplash":
         if unsplash_key:
-            return UnsplashClient(unsplash_key, timeout=settings.request_timeout_seconds)
+            return UnsplashClient(
+                unsplash_key,
+                timeout=settings.request_timeout_seconds,
+                target_size=(settings.slide_width, settings.slide_height),
+            )
         logger.warning("IMAGE_PROVIDER=unsplash sem UNSPLASH_ACCESS_KEY.")
 
     if unsplash_key:
@@ -1551,6 +1600,7 @@ def build_pinterest_client(
         return UnsplashClient(
             access_key=unsplash_key,
             timeout=settings.request_timeout_seconds,
+            target_size=(settings.slide_width, settings.slide_height),
         )
 
     logger.info("Nenhuma chave de imagens configurada — usando cliente mock.")

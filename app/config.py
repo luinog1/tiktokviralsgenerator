@@ -27,7 +27,7 @@ def _bool(value: str | None, default: bool = False) -> bool:
 # demais trazem cenário/estética. Os termos entram na busca de imagens porque
 # uma query genérica raramente devolve retrato na primeira página.
 HOOK_SUBJECTS = ("woman", "person", "off")
-_DEFAULT_SCENE_HINTS = "aesthetic lifestyle travel food"
+_DEFAULT_SCENE_HINTS = "aesthetic lifestyle travel interior workspace"
 
 # De onde vêm as fotos. "auto" é a escada curta (chave do Unsplash → mock);
 # os demais fixam um cliente. A API oficial v5 do Pinterest ("pinterest_v5")

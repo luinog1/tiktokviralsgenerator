@@ -9,6 +9,7 @@ from __future__ import annotations
 from app.adapters.pinterest_client import PinterestImage
 from app.adapters.vision_provider import VisionVerdict
 from app.services.casting import (
+    POOL_FOOD,
     POOL_HOOK,
     POOL_SCENE,
     apply_casting,
@@ -64,6 +65,70 @@ def test_scene_photos_fill_the_rest_and_the_person_is_not_reused():
 
     assert casting.image_ids[0] == "retrato"
     assert set(casting.image_ids[1:]) == {"praia", "cafe"}
+
+
+def test_requested_people_food_and_scene_quotas_are_applied():
+    images = [
+        _image("pessoa-1", POOL_HOOK),
+        _image("pessoa-2", POOL_HOOK),
+        _image("comida-1", POOL_FOOD),
+        _image("comida-2", POOL_FOOD),
+        _image("cena-1", POOL_SCENE),
+        _image("cena-2", POOL_SCENE),
+    ]
+
+    casting = cast_carousel(
+        _slides("hook", *["value"] * 4, "cta"),
+        images,
+        person_images_count=2,
+        food_images_count=2,
+    )
+
+    pool_by_id = {image.image_id: image.pool for image in images}
+    chosen_pools = [pool_by_id[image_id] for image_id in casting.image_ids]
+    assert chosen_pools.count(POOL_HOOK) == 2
+    assert chosen_pools.count(POOL_FOOD) == 2
+    assert chosen_pools.count(POOL_SCENE) == 2
+    assert len(casting.image_ids) == len(set(casting.image_ids))
+
+
+def test_smoothie_and_fruit_metadata_count_as_food():
+    images = [
+        _image("pessoa", POOL_HOOK),
+        _image("smoothie", POOL_SCENE, title="fresh berry smoothie bowl with fruit"),
+        _image("cena", POOL_SCENE, title="bright kitchen interior"),
+    ]
+
+    casting = cast_carousel(
+        _slides("hook", "value", "cta"),
+        images,
+        food_images_count=1,
+    )
+
+    assert casting.image_ids[1] == "smoothie"
+    assert not casting.warnings
+
+
+def test_vision_can_reject_a_false_food_pool_result():
+    images = [
+        _image("pessoa", POOL_HOOK),
+        _image("pool-errou", POOL_FOOD),
+        _image("cena", POOL_SCENE),
+    ]
+    verdicts = [
+        _verdict("pessoa", "woman"),
+        _verdict("pool-errou", "scene"),
+        _verdict("cena", "scene"),
+    ]
+
+    casting = cast_carousel(
+        _slides("hook", "value", "cta"),
+        images,
+        verdicts,
+        food_images_count=1,
+    )
+
+    assert any("0 de 1" in warning for warning in casting.warnings)
 
 
 def test_a_man_serves_as_hook_when_no_woman_was_found():

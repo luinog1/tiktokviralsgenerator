@@ -77,11 +77,12 @@ services:
       # "off" desliga e volta à rotação simples de imagens.
       - key: HOOK_SUBJECT
         value: woman
-      # Ajuste fino das duas buscas de imagem, se quiser outro visual.
+      # Ajuste fino dos pools de pessoa e cenário, se quiser outro visual.
+      # O pool de comida usa termos próprios (food, smoothie, fruit etc.).
       # Ambas têm default no código — declare aqui só para mudar:
       #   HOOK_QUERY_HINTS   → termos da busca do slide 1  (default: retrato)
       #   SCENE_QUERY_HINTS  → termos das demais           (default: estética,
-      #                        viagem, comida)
+      #                        viagem, interior, workspace)
       # Idem RANKING_API_BASE_URL / RANKING_API_KEY / RANKING_MODEL, que
       # herdam de LLM_* quando vazias.
 

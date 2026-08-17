@@ -6,7 +6,7 @@ import pytest
 
 from app.adapters.pinterest_client import PinterestImage
 from app.config import Settings
-from app.services.casting import POOL_HOOK, POOL_SCENE
+from app.services.casting import POOL_FOOD, POOL_HOOK, POOL_SCENE
 from app.services.generation import GenerationService
 from app.services.session_store import reset_store
 
@@ -97,6 +97,13 @@ def test_hook_query_asks_for_a_person():
     assert "woman" in client.queries[0][0].lower()
 
 
+def test_default_scene_query_does_not_request_food():
+    client = _FakeClient()
+    _run(client, _service(client))
+
+    assert "food" not in client.queries[1][0].lower().split()
+
+
 def test_each_photo_remembers_which_pool_it_came_from():
     client = _FakeClient()
     outcome = _run(client, _service(client))
@@ -119,6 +126,48 @@ def test_pool_aware_client_receives_hook_and_scene_explicitly():
     _run(client, _service(client))
 
     assert client.pools == [POOL_HOOK, POOL_SCENE]
+
+
+def test_food_quota_adds_a_distinct_food_search_pool():
+    class _PoolAwareClient(_FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.pools = []
+
+        def search_pool(self, query, limit=10, *, pool=""):
+            self.pools.append(pool)
+            return self.search(query, limit=limit)
+
+    client = _PoolAwareClient()
+    outcome = _run(
+        client,
+        _service(client),
+        slides_count=6,
+        person_images_count=2,
+        food_images_count=2,
+    )
+
+    assert client.pools == [POOL_HOOK, POOL_FOOD, POOL_SCENE]
+    assert "smoothie" in client.queries[1][0].lower()
+    pools = {image["pool"] for image in outcome.project.images}
+    assert pools == {POOL_HOOK, POOL_FOOD, POOL_SCENE}
+
+
+def test_visual_quotas_reach_the_saved_slides():
+    client = _FakeClient()
+    outcome = _run(
+        client,
+        _service(client),
+        slides_count=6,
+        person_images_count=2,
+        food_images_count=2,
+    )
+
+    pool_by_id = {image["image_id"]: image["pool"] for image in outcome.project.images}
+    chosen = [pool_by_id[slide["image_id"]] for slide in outcome.project.carousel["slides"]]
+    assert chosen.count(POOL_HOOK) == 2
+    assert chosen.count(POOL_FOOD) == 2
+    assert chosen.count(POOL_SCENE) == 2
 
 
 def test_instagram_quota_prefers_the_profile_photo_for_the_hook():

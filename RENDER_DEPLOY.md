@@ -121,6 +121,24 @@ cota escolhida em `resultsLimit`, `maxItems` e `limit`; portanto, escolher uma
 foto não dispara mais o pool mínimo antigo de 12 itens pagos. O mesmo dataset é
 reutilizado entre hook e cenário, evitando dois runs iguais para o mesmo perfil.
 
+### Cotas de pessoas, comida e alta resolução
+
+Não há variável nova no Render. Em cada geração, os formulários `/goviral` e
+`/create` oferecem **Fotos com pessoas/modelos** e **Fotos de comida**. A cota
+de pessoas inclui o hook; comida cobre refeições, smoothie, frutas e bebidas;
+o restante usa cenário geral. O app separa as buscas, deduplica resultados e
+intercala as categorias para reduzir repetição entre hashtags e palavras-chave.
+
+Com `VISION_ENABLED=true`, o Qwen-VL configurado classifica cada candidata como
+`woman`, `man`, `person`, `food` ou `scene`; essa leitura vence o texto e o pool
+de origem. Sem visão, as cotas continuam funcionando por metadados e pelas
+queries separadas, com menor precisão.
+
+Pinterest e Instagram agora só aceitam fotos que cubram `SLIDE_WIDTH` ×
+`SLIDE_HEIGHT` (1080×1350 por padrão). O piso não é relaxado: se a fonte só
+trouxer arquivos menores, ela cai no fallback e o motivo aparece na prévia. O
+Unsplash pede ao CDN a imagem já em 1080×1350, `fit=crop`, qualidade 85.
+
 Depois do deploy, confirme em `/health`:
 
 ```json

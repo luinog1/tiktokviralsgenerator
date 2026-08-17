@@ -276,14 +276,14 @@ def test_resolution_beats_orientation_when_both_cannot_be_had(install_fake):
     assert all(img.image_id.startswith("20") for img in images)
 
 
-def test_a_small_photo_is_still_better_than_a_gradient(install_fake):
-    """Tema sem acervo em alta: o piso cai em vez de o carrossel virar mock."""
+def test_a_small_photo_is_rejected_instead_of_being_upscaled(install_fake):
+    """O piso é estrito: uma origem pequena nunca entra no PNG final."""
     install_fake(_lo_res(6))
 
     images = PinterestScrapeClient(min_resolution=(1080, 1350)).search("tema", limit=4)
 
     assert len(images) == 4
-    assert not any(is_mock_image(img) for img in images)
+    assert all(is_mock_image(img) for img in images)
 
 
 def test_a_pin_without_resolution_does_not_pass_the_floor(install_fake):

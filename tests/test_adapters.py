@@ -416,6 +416,28 @@ def test_successful_unsplash_search_leaves_no_fallback_reason(monkeypatch):
     assert client.last_fallback_reason == ""
 
 
+def test_unsplash_requests_the_final_slide_size_at_high_quality(monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+
+    from app.adapters.pinterest_client import UnsplashClient
+
+    payload = _unsplash_payload("high-quality")
+    monkeypatch.setattr(
+        "app.adapters.pinterest_client.requests.get",
+        lambda *a, **k: _FakeResponse(200, payload),
+    )
+
+    image = UnsplashClient(
+        access_key="chave-boa", target_size=(1080, 1350)
+    ).search("smoothie", limit=1)[0]
+    params = parse_qs(urlsplit(image.image_url).query)
+
+    assert params["w"] == ["1080"]
+    assert params["h"] == ["1350"]
+    assert params["fit"] == ["crop"]
+    assert params["q"] == ["85"]
+
+
 # ---------- a regra do slide 1: o hook sozinho, numa caixa ----------
 
 

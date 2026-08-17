@@ -229,6 +229,24 @@ def generate():
             f"para {len(blocks)}, o número de imagens deste carrossel."
         )
 
+    requested_person_images = int(form.person_images_count.data or 1)
+    person_images_count = min(requested_person_images, len(blocks))
+    if requested_person_images > len(blocks):
+        warnings.append(
+            f"A cota de pessoas foi ajustada de {requested_person_images} "
+            f"para {len(blocks)}, o número de imagens deste carrossel."
+        )
+    requested_food_images = int(form.food_images_count.data or 0)
+    food_images_count = min(
+        requested_food_images,
+        max(len(blocks) - person_images_count, 0),
+    )
+    if requested_food_images > food_images_count:
+        warnings.append(
+            f"A cota de comida foi ajustada de {requested_food_images} "
+            f"para {food_images_count} para caber no carrossel."
+        )
+
     # O corpus da busca de fotos, do ranking e da visão é o texto LIMPO, não o
     # painel colado: com os rótulos dentro, um tema vazio faria a query virar
     # "Content Dashboard Last updated".
@@ -250,6 +268,8 @@ def generate():
             slides_count=len(blocks),
             script_blocks=blocks,
             use_pinned_person=bool(form.use_pinned_person.data),
+            person_images_count=person_images_count,
+            food_images_count=food_images_count,
         )
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("Falha de geração pelo painel: %s", type(exc).__name__)

@@ -452,7 +452,8 @@ def test_parses_the_subject_of_each_photo(monkeypatch):
 @pytest.mark.parametrize("raw,expected", [
     ("female", "woman"), ("girl", "woman"), ("mulher", "woman"),
     ("male", "man"), ("people", "person"), ("portrait", "person"),
-    ("food", "scene"), ("landscape", "scene"), ("no-person", "scene"),
+    ("food", "food"), ("smoothie", "food"), ("fruit", "food"),
+    ("landscape", "scene"), ("no-person", "scene"),
     ("WOMAN", "woman"), (" woman ", "woman"),
 ])
 def test_accepts_the_synonyms_vlms_actually_return(monkeypatch, raw, expected):

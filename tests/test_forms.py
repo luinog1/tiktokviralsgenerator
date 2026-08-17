@@ -40,6 +40,8 @@ def test_briefing_validates_required_fields(app):
         # Sem seletor no POST (cliente antigo), a fonte fica com o ambiente.
         assert briefing["image_source"] == ""
         assert briefing["instagram_images_count"] == 1
+        assert briefing["person_images_count"] == 1
+        assert briefing["food_images_count"] == 0
 
 
 def test_briefing_carries_the_image_source_choice(app):
@@ -52,11 +54,50 @@ def test_briefing_carries_the_image_source_choice(app):
         "script_mode": "auto",
         "image_source": "instagram_pinterest",
         "instagram_images_count": "2",
+        "person_images_count": "2",
+        "food_images_count": "1",
     }):
         form = BriefingForm()
         assert form.validate_on_submit(), form.errors
         assert form.to_briefing()["image_source"] == "instagram_pinterest"
         assert form.to_briefing()["instagram_images_count"] == 2
+        assert form.to_briefing()["person_images_count"] == 2
+        assert form.to_briefing()["food_images_count"] == 1
+
+
+def test_visual_quotas_never_exceed_the_carousel_size(app):
+    with app.test_request_context("/", method="POST", data={
+        "raw_text": "Texto válido com mais de vinte caracteres para passar.",
+        "theme": "alimentação saudável",
+        "language": "pt-BR",
+        "style": "sticker",
+        "slides_count": "3",
+        "script_mode": "auto",
+        "person_images_count": "2",
+        "food_images_count": "3",
+    }):
+        form = BriefingForm()
+        assert form.validate_on_submit(), form.errors
+        briefing = form.to_briefing()
+        assert briefing["person_images_count"] == 2
+        assert briefing["food_images_count"] == 1
+
+
+@pytest.mark.parametrize("field", ["person_images_count", "food_images_count"])
+def test_briefing_rejects_unknown_visual_quota(app, field):
+    data = {
+        "raw_text": "Texto válido com mais de vinte caracteres para passar.",
+        "theme": "alimentação saudável",
+        "language": "pt-BR",
+        "style": "sticker",
+        "slides_count": "3",
+        "script_mode": "auto",
+        field: "99",
+    }
+    with app.test_request_context("/", method="POST", data=data):
+        form = BriefingForm()
+        assert not form.validate_on_submit()
+        assert field in form.errors
 
 
 def test_instagram_count_never_exceeds_the_carousel_size(app):

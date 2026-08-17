@@ -2,9 +2,17 @@
 
 Aplicação Flask que transforma uma ideia em um roteiro de hooks e scripts e em um carrossel visual pronto para publicar — usando um endpoint LLM OpenAI-compatible, fotos do Pinterest ou do Instagram (busca **sem token**) ou do Unsplash, e renderização estilo **TikTok photo post** (1080×1350, 4:5). Painéis antigos do goviral.ai continuam podendo ser importados, mas não são necessários.
 
-> **Status:** MVP v0.20 — cota de fotos do Instagram por carrossel
+> **Status:** MVP v0.21 — cotas de pessoas e comida + resolução estrita
 > **Stack:** Python 3.11 · Flask 3 · Jinja2 · WTForms · Pillow · Docker
 > **Idioma inicial:** Português (pt-BR)
+
+---
+
+## 🎯 O que mudou na v0.21
+
+- ✅ **Quantidade de pessoas/modelos e comida por carrossel** — os formulários `/goviral` e `/create` ganharam **"Fotos com pessoas/modelos"** (1 a 12, incluindo o hook) e **"Fotos de comida"** (0 a 12). A soma é limitada ao número real de slides; o restante fica para cenário geral. Não há variável nova no Render: a escolha é feita em cada geração, como a cota do Instagram.
+- ✅ **Três buscas para reduzir repetição** — pessoa, comida e cenário usam pools e queries separados. O pool de comida inclui refeições, smoothie, frutas e bebidas; imagens repetidas entre pools são deduplicadas e o casting intercala as categorias, usando cada foto uma vez antes de repetir. O Qwen-VL configurado agora distingue `food` de `scene`; seu veredicto vence metadados e o pool de origem.
+- ✅ **Alta resolução virou requisito, não preferência** — Pinterest e Instagram só aceitam origens que cubram `SLIDE_WIDTH`×`SLIDE_HEIGHT` (1080×1350 por padrão). O piso não cai mais quando o acervo é fraco; a fonte devolve menos fotos ou fallback com aviso em vez de ampliar arquivo pequeno. No Unsplash, o CDN recebe `w=1080`, `h=1350`, `fit=crop` e `q=85` para entregar a imagem final no tamanho do slide.
 
 ---
 
@@ -252,7 +260,7 @@ Dentro de um campo, a **linha em branco** manda o texto seguinte para a outra ca
 
 Blocos em branco são descartados e o carrossel encolhe: se você abrir 6 campos e preencher 4, saem 4 slides. No modo roteiro o app **não** inventa CTA nem hashtag que você não escreveu — o texto é seu.
 
-### Casting: hook com pessoa, resto com cenário
+### Casting: cotas de pessoa, comida e cenário
 
 O problema: uma busca por `"rotina matinal"` devolve xícara, caderno e janela na primeira página — quase nunca o retrato que um hook precisa. Ranquear melhor não resolve, porque a foto de pessoa simplesmente não está no resultado.
 
@@ -260,13 +268,13 @@ A solução tem três camadas, cada uma cobrindo a falha da anterior:
 
 | Camada | Sinal | Vale quando |
 | --- | --- | --- |
-| **1. Busca em dois pools** | A query roda duas vezes: `"<tema> woman portrait lifestyle aesthetic"` e `"<tema> aesthetic lifestyle travel food"`. Cada foto lembra de qual pool veio. | Sempre — é o que garante que existe foto de pessoa no conjunto. |
-| **2. Metadado** | Palavras no título/descrição (`woman`, `girl`, `portrait`, `mulher`…). O Unsplash descreve as fotos como "a woman sitting on a bed". | Sem VLM configurado. |
-| **3. Visão** | O VLM olha a foto e classifica o assunto. Vence as outras duas: a busca de retrato às vezes devolve paisagem, e o metadado às vezes está vazio. | `VISION_ENABLED=true`. |
+| **1. Busca em pools** | A query roda separadamente para pessoa, comida (incluindo smoothie/frutas) e cenário geral. Cada foto lembra de qual pool veio. | Sempre — garante candidatos para cada cota pedida. |
+| **2. Metadado** | Palavras no título/descrição (`woman`, `portrait`, `smoothie`, `fruit`, `comida`…). | Sem VLM configurado. |
+| **3. Visão** | O VLM olha a foto e classifica `woman`, `man`, `person`, `food` ou `scene`. Vence as outras duas camadas. | `VISION_ENABLED=true`. |
 
 O resultado é gravado como `image_id` em cada slide — o mesmo campo que a galeria da prévia edita. Ou seja: o casting é um **palpite inicial**, não uma trava. Discordou? Troque a foto na prévia com um clique.
 
-Se nenhuma foto de pessoa aparecer em nenhuma das camadas, o slide de hook fica com a foto melhor ranqueada e um aviso amarelo aparece na prévia — o app diz o que não conseguiu em vez de fingir que deu certo.
+Se uma cota não puder ser atendida, o slide recebe a melhor imagem ainda não usada e um aviso amarelo aparece na prévia — o app diz o que não conseguiu em vez de fingir que deu certo.
 
 ---
 
@@ -435,10 +443,11 @@ python run.py
    - **Distribuir de uma vez** — dentro do modo por imagem, abra "Colar o roteiro inteiro e distribuir", cole tudo e clique no botão. O servidor divide por `Imagem N:`, `2.`, `---`, intervalo de duas linhas em branco ou parágrafos e preenche os campos, que continuam editáveis.
    - **Texto corrido** — cole tudo numa caixa só e deixe o LLM estruturar. Se você escrever `Imagem 1:`, `Imagem 2:`… na frente dos trechos, o LLM **não entra**: cada trecho vai para a foto que você indicou (ver [O rótulo diz a imagem, a linha em branco diz a caixa](#o-rótulo-diz-a-imagem-a-linha-em-branco-diz-a-caixa)).
 6. Preencha tema, estilo (**sticker** recomendado — ou quote/list/tutorial/story) e as palavras-chave da busca de imagens.
-7. Clique em "Gerar carrossel". Com o casting ligado, a imagem 1 recebe uma foto com pessoa e as demais recebem cenário.
-8. Na prévia, cada slide mostra seu papel e de onde veio a foto do hook (visão, metadado ou busca). Edite os textos e troque a imagem pela galeria.
-9. No estilo `sticker`, **arraste cada caixa** sobre a foto para reposicionar (duplo clique volta ao padrão) e use o controle de tamanho de cada caixa se quiser texto maior. Clique em "Salvar edições" para gravar.
-10. Exporte: **ZIP** (carrossel completo) ou **PNG** (slide único) ou **Markdown** (texto).
+7. Escolha quantas fotos devem mostrar pessoas/modelos e quantas devem mostrar comida. A cota de pessoas inclui a imagem 1 (hook); os demais slides são preenchidos por comida e cenário geral conforme as quantidades.
+8. Clique em "Gerar carrossel". Com o Qwen-VL configurado, a classificação visual confirma pessoa, comida e cenário; sem ele, o app usa metadados e o pool da busca.
+9. Na prévia, cada slide mostra seu papel e de onde veio a foto do hook (visão, metadado ou busca). Edite os textos e troque a imagem pela galeria.
+10. No estilo `sticker`, **arraste cada caixa** sobre a foto para reposicionar (duplo clique volta ao padrão) e use o controle de tamanho de cada caixa se quiser texto maior. Clique em "Salvar edições" para gravar.
+11. Exporte: **ZIP** (carrossel completo) ou **PNG** (slide único) ou **Markdown** (texto).
 
 ---
 
@@ -461,7 +470,7 @@ python run.py
 | `RANKING_ENABLED` | `true` | Liga/desliga ranking de imagens (reusa LLM) |
 | `HOOK_SUBJECT` | `woman` | Casting da imagem 1: `woman`, `person` ou `off` (desliga o casting) |
 | `HOOK_QUERY_HINTS` | (auto) | Termos da busca de retrato. Vazio → `<HOOK_SUBJECT> portrait lifestyle aesthetic` |
-| `SCENE_QUERY_HINTS` | `aesthetic lifestyle travel food` | Termos da busca das imagens secundárias |
+| `SCENE_QUERY_HINTS` | `aesthetic lifestyle travel interior workspace` | Termos da busca do cenário geral; comida usa um pool próprio |
 | `VISION_ENABLED` | `false` | Ranking **olhando** a foto + posição automática do texto |
 | `VISION_API_BASE_URL` | (herda `LLM_*`) | Endpoint OpenAI-compatible com suporte a `image_url` |
 | `VISION_API_KEY` | (herda `LLM_*`) | Token do provider de visão |
@@ -487,6 +496,10 @@ A API oficial v5 do Pinterest **foi removida na v0.15**: o `/search/pins/` dela 
 O Unsplash não exige aprovação — crie um app em [unsplash.com/oauth/applications](https://unsplash.com/oauth/applications) e copie a **Access Key**. Para fotos do Pinterest, `IMAGE_PROVIDER=pinterest_scrape` busca **sem token**, pela API interna do site (ver [Buscar fotos no Pinterest sem token](#buscar-fotos-no-pinterest-sem-token)). Ele nunca entra sozinho no modo `auto` — é escolha explícita, com as [ressalvas de compliance](#️-limitações-e-compliance) que vêm junto.
 
 No modo `instagram_pinterest`, o campo **Fotos do Instagram no modo combinado** controla a mistura. O valor padrão é `1`: o actor busca uma foto do perfil/hashtag para o hook e o Pinterest completa o b-roll. Se a query contém `@perfil`, o handle não é repassado ao Pinterest; se contém `#hashtag`, o `#` sai, mas a palavra continua na busca complementar. A escolha é por geração e não exige variável de ambiente nova.
+
+Os campos **Fotos com pessoas/modelos** e **Fotos de comida** também valem por geração e independem da fonte escolhida. O padrão continua sendo `1` pessoa (o hook) e `0` comida. Quando comida é pedida, a busca ganha um pool próprio com termos de refeições, smoothie, frutas e bebidas; o cenário geral deixa de pedir `food` por padrão. A soma das duas cotas nunca ultrapassa o número real de slides.
+
+O piso de qualidade é o tamanho final do slide. Pinterest e Instagram descartam qualquer origem comprovadamente menor que `SLIDE_WIDTH`×`SLIDE_HEIGHT`; medida ausente também não passa. O Unsplash entrega uma transformação do CDN no tamanho final, com qualidade `85`. Assim o renderer não precisa ampliar uma foto pequena para chegar a 1080×1350.
 
 **Por que a mesma query devolve fotos diferentes agora:** o `/search/photos` do Unsplash ordena por relevância e essa ordem é estável — a página 1 de "café da manhã" é sempre a mesma. Não havia cache no app; era determinismo da API. Cada busca agora sorteia uma página entre 1 e 5 (`UnsplashClient._PAGE_WINDOW`), o que renova o resultado sem cair em fotos irrelevantes. A página escolhida aparece no log `INFO`. Se a query tem acervo curto e a página sorteada vem vazia, a busca reentra dentro do `total_pages` em vez de cair no gradiente mock.
 
@@ -526,7 +539,7 @@ curl -s http://localhost:5000/health | python -m json.tool
 │   │   └── vision_provider.py  # VLM — nota + posição do texto + assunto da foto
 │   ├── services/
 │   │   ├── generation.py      # Orquestração do carrossel
-│   │   ├── casting.py         # Qual foto em qual slide (hook = pessoa)
+│   │   ├── casting.py         # Cotas por slide (pessoa, comida, cenário)
 │   │   ├── session_store.py   # Persistência leve (TTL)
 │   │   └── slide_renderer.py  # Pillow — overlay de texto em imagem
 │   └── routes/
@@ -558,7 +571,7 @@ pip install -r requirements-dev.txt
 pytest -v tests/
 ```
 
-Cobertura (414 testes):
+Cobertura (511 testes):
 - **Pessoa fixada** — round-trip de gravar/ler/esquecer em `instance/pinned_person.json`; URL do pin canonizada (domínio regional e sufixos viram `www.pinterest.com/pin/<id>/`); foto que não é pin (Unsplash, mock, goviral_assets) não é fixável e a rota explica com 422; `related()` do cliente de scrape mapeia os pins para a forma do app, aplica o piso de resolução e devolve `[]` em falha (sem mock — quem chama tem fallback melhor); com o checkbox ligado o pool de hook vem dos relacionados (uma query só, a de cenário) e o slide 1 recebe uma foto deles; ninguém fixado, provider sem `related`, relacionados vazios/erro e casting desligado caem na busca de sempre com o motivo nos avisos; com o checkbox desligado nada muda; o formulário carrega o checkbox até o serviço.
 - **Painel do goviral** — o dashboard colado com `Ctrl+A` vira um bloco por imagem (hook numa linha só, parágrafos nas duas caixas); preâmbulo antes do `Hook` descartado sem lista de interface; rótulos nunca chegam ao slide; texto na mesma linha do rótulo ou na seguinte; rótulos das duas colunas antes dos dois textos; `Position` decidindo a ordem; painel sem cabeçalho `Script` dividido pelo `Paragraph 1`; parágrafo multi-linha na mesma caixa; `Paragraph 3` na caixa de baixo; reconhecido pela metade (sem `Hook`, sem texto, só scripts) responde "não é painel"; `Imagem N:` continua sendo do `labeled_blocks`; e as rotas — `/goviral` gera sem perguntar nº de slides, 422 com motivo quando não é painel, `/goviral/parse` mostra a distribuição, o "distribuir" do briefing entende o painel e o painel na caixa única pula o composer.
 - **TextComposer** — split em slides, hashtags, texto curto, texto vazio, e as linhas em branco do texto colado sobrevivendo à limpeza das hashtags (colapsá-las fazia todos os slides saírem com o roteiro inteiro).
@@ -567,7 +580,7 @@ Cobertura (414 testes):
 - **Roteiro por imagem** — primeira linha vira headline e o resto o body, rótulos `Imagem N:` removidos, campo vazio herda o papel, blocos além do nº de slides descartados, hashtags e CTA preservados.
 - **A imagem 1 é uma caixa só** — o bloco de duas linhas vira uma frase (sem virar headline + apoio) e o hook não é cortado no limite de headline, no roteiro manual **e** no caminho LLM (onde o corte de 70 vinha antes de o slide ser reconhecido como hook); o composer mock devolve o hook sem body nem CTA, com o primeiro trecho e nada mais, e mantém as duas caixas nos outros slides; no LLM o body e o CTA do slide 1 são apagados mesmo quando o modelo os escreve **sem colar o apoio na frase** (a frase mandada no lugar da headline ainda vira o hook), o papel do slide 1 é `hook` independente do que o modelo rotule, e o slide 1 nunca sai sem texto nas quatro formas de o modelo desobedecer ao prompt; a prévia entrega os campos de apoio e CTA da imagem 1 em leitura apenas e a gravação limpa os dois; um hook longo continua validando no formulário de edição.
 - **Distribuição do roteiro colado** — separadores `Imagem N:`, `2.`, `---` e parágrafo; teto no nº de slides com o total encontrado reportado; texto vazio e contagem inválida.
-- **Casting** — hook recebe pessoa por visão, por metadado (`alt_description`) e por pool de busca, nessa ordem; parte do corpo ("woman's hands") não conta como retrato; fotos de cenário nunca caem no slide 1; aviso quando não há foto com pessoa; `HOOK_SUBJECT=off` volta à rotação.
+- **Casting** — hook recebe pessoa por visão, por metadado (`alt_description`) e por pool de busca, nessa ordem; cotas ajustáveis de pessoa e comida chegam aos slides; smoothie/frutas/bebidas contam como comida; categorias são intercaladas e fotos únicas vencem repetição; aviso quando uma cota não pode ser atendida; `HOOK_SUBJECT=off` desliga a restrição por assunto.
 - **Roteiro viral** — distribuição de papéis por nº de slides, ordem `hook…cta`, CTA só no fecho, sem texto duplicado entre headline e body.
 - **SlideRenderer** — resolução de fonte TrueType, auto-ajuste do corpo da fonte, caixas brancas do estilo sticker, ausência de overlay escuro, posição do hook vs. valor, quebra de palavra longa, remoção de emoji.
 - **Uma caixa por linha** — cada linha do bloco ganha uma caixa com a largura da própria linha (linha curta não herda a largura da longa); as caixas se sobrepõem para a pilha sair contínua, sem vão entre elas; headline e corpo continuam sendo dois blocos separados; a altura da caixa não muda por a linha ter ou não descendente.
@@ -578,13 +591,13 @@ Cobertura (414 testes):
 - **Reposicionamento** — `pos_x`/`pos_y` vencem a âncora do papel, clamp dentro do canvas, slide sem posição mantém o comportamento antigo, e cada caixa (`box_positions`) move-se sem arrastar as outras.
 - **Pinterest mock** — geração de SVGs sintéticos.
 - **Pinterest sem token** — mapeamento do pin para a forma que o app usa (id como string, link do pin, `alt` alimentando o casting por metadado), thumb `474x` com a extensão reescrita para `.jpg` (o caminho reduzido do CDN não serve PNG), retrato preferido quando há retrato suficiente e pool inteiro quando não há, resolução ausente que não derruba a seleção, ponto de corte sorteado entre buscas iguais, uma requisição por busca, timeout vindo das settings, e fallback com motivo em falha, resultado vazio, pin sem `src` e biblioteca não instalada.
-- **Piso de resolução** — pin menor que o slide fica de fora; foto grande deitada vence foto pequena em pé; sem acervo em alta o piso cai em vez de o carrossel virar gradiente; pin sem resolução não passa o piso; o piso vem de `SLIDE_WIDTH`×`SLIDE_HEIGHT`; e o `min_resolution` da biblioteca continua em `(0, 0)`, para a busca não paginar dentro do `POST /generate`.
+- **Piso de resolução** — pin menor que o slide fica de fora; foto grande deitada vence foto pequena em pé; sem acervo em alta o piso permanece estrito e a fonte cai no fallback com motivo; pin sem resolução não passa o piso; o Unsplash pede o tamanho final ao CDN; o piso vem de `SLIDE_WIDTH`×`SLIDE_HEIGHT`; e o `min_resolution` da biblioteca continua em `(0, 0)`, para a busca não paginar dentro do `POST /generate`.
 - **Escolha do provider** — `IMAGE_PROVIDER` default `auto` e valor desconhecido caindo em `auto` (inclusive o `pinterest_v5` removido); o scraping só entra quando escolhido, nunca no `auto`; `auto` prefere Unsplash e cai no mock sem chave; `mock` ignora a chave configurada; escolha impossível (Unsplash sem chave) desce a escada em vez de devolver um cliente quebrado; e um `PINTEREST_ACCESS_TOKEN` sobrando no ambiente não vira cliente nem desvia a escada.
 - **Prompt do roteiro** — a regra do hook sozinho e a ordem dos papéis chegam no prompt, e o orçamento de tokens cresce com o nº de slides (o teto fixo cortava o JSON de 12 slides).
 - **Unsplash** — rotação de páginas entre buscas iguais, reentrada quando a página sorteada passa do fim do acervo, motivo do fallback por status HTTP.
 - **Ranking** — correlação com `raw_text`, fallback sem corpus.
-- **Visão (VLM)** — baixa a thumb (não a foto cheia) e manda os bytes em base64, com o content-type do CDN preservado; thumb que não baixa (rede, HTTP 4xx, grande demais) fica fora da chamada e é avisada no log, e sem nenhuma thumb a chamada nem sai; teto de imagens por chamada equilibrado entre os dois pools, orçamento de tokens que cresce com o nº de imagens, `enable_thinking: false` no pedido e repetição sem o campo quando o gateway devolve 400, parse de âncora → `pos_*` e de `subject` (com sinônimos: `female`/`girl` → `woman`), `<think>`/cerca markdown na resposta, JSON vindo em `reasoning_content` com `content` vazio, `content` devolvido como lista de partes, recuperação dos veredictos inteiros de uma resposta cortada no limite de tokens (inclusive com `}` dentro de string), nota fora de faixa, `image_id` alucinado ou duplicado, gradiente mock sem chamada, timeout e 404 caindo no ranking textual, e resposta inútil registrada no log com `finish_reason` e o conteúdo.
-- **Busca em dois pools** — uma query por papel, cada foto marcada com sua origem, fotos repetidas entre os pools deduplicadas, falha de uma busca não derruba a geração.
+- **Visão (VLM)** — baixa a thumb (não a foto cheia) e manda os bytes em base64, com o content-type do CDN preservado; thumb que não baixa (rede, HTTP 4xx, grande demais) fica fora da chamada e é avisada no log, e sem nenhuma thumb a chamada nem sai; teto de imagens por chamada equilibrado entre todos os pools, orçamento de tokens que cresce com o nº de imagens, `enable_thinking: false` no pedido e repetição sem o campo quando o gateway devolve 400, parse de âncora → `pos_*` e de `subject` (incluindo `food` e sinônimos como `smoothie`/`fruit`), `<think>`/cerca markdown na resposta, JSON vindo em `reasoning_content` com `content` vazio, `content` devolvido como lista de partes, recuperação dos veredictos inteiros de uma resposta cortada no limite de tokens (inclusive com `}` dentro de string), nota fora de faixa, `image_id` alucinado ou duplicado, gradiente mock sem chamada, timeout e 404 caindo no ranking textual, e resposta inútil registrada no log com `finish_reason` e o conteúdo.
+- **Busca em três pools** — queries distintas para pessoa, comida e cenário, cada foto marcada com sua origem, fotos repetidas entre os pools deduplicadas, falha de uma busca não derruba a geração.
 - **Settings** — mock vs LLM configurado, compatibilidade reversa, visão desligada por default e herança das credenciais `LLM_*`, `HOOK_*`/`SCENE_QUERY_HINTS` customizáveis.
 - **Forms** — validação de `raw_text` (mín 20 chars) só no modo automático, mínimo de 2 blocos no modo roteiro, `theme`, `style`, `slides_count`, parse de `text_positions`, `box_positions` e `box_scales` (inclui valores inválidos e escalas fora dos limites), POST legado sem o campo de modo continua válido.
 - **Visão** — timeout próprio (não o HTTP da busca de imagens), default com folga acima dele, e fallback silencioso em timeout/404/JSON ilegível.
@@ -695,7 +708,7 @@ Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SL
 - [x] Roteiro colado inteiro é distribuído entre os campos e continua editável.
 - [x] Texto colado com `Imagem N:` vai para as fotos indicadas, sem LLM no caminho.
 - [x] A imagem 1 mostra o hook sozinho e nunca sai sem texto.
-- [x] Primeira foto recebe pessoa; as demais, cenário — com aviso quando não dá.
+- [x] Cotas ajustáveis distribuem pessoas, comida e cenário — com aviso quando não dá.
 - [x] A busca sem token descarta foto que o slide precisaria ampliar.
 - [x] Prévia é editável (headline + body + CTA por slide).
 - [x] Posição e tamanho de cada caixa são ajustáveis na prévia e o PNG exportado respeita o ajuste.

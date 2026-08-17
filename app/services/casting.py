@@ -5,15 +5,14 @@ post de lifestyle o slide 1 é o que para o scroll, e o que para o scroll é uma
 pessoa em cena — não um prato de comida. Rotação não garante isso, porque a
 ordem vinha do ranking de relevância, que não olha o assunto da foto.
 
-Aqui o slide de `hook` recebe uma foto com pessoa e os demais recebem cenário
-(estética, viagem, comida, objeto). Três fontes de sinal, em ordem de confiança:
+Aqui o slide de `hook` recebe uma foto com pessoa e os demais obedecem às cotas
+de pessoa, comida e cenário geral. Três fontes de sinal, em ordem de confiança:
 
 1. `subject` do VLM — o modelo olhou a foto e disse o que tem nela.
 2. Título/descrição da foto — o Unsplash escreve "a woman sitting on a bed".
    Descreve *aquela* foto, então vale mais que a busca que a trouxe.
-3. `pool` da imagem — de qual das duas buscas ela veio (a query do hook pede
-   retrato; a de cenário pede estética). É o sinal que faz o casting funcionar
-   sem visão configurada, que é o estado padrão do projeto.
+3. `pool` da imagem — de qual busca ela veio (pessoa, comida ou cenário). É o
+   sinal que faz o casting funcionar sem visão configurada.
 
 Sem nenhum dos três sinais, o hook fica com a foto melhor ranqueada e o aviso
 diz isso — o carrossel sai, mas o usuário sabe que precisa trocar a foto.
@@ -34,9 +33,11 @@ logger = logging.getLogger(__name__)
 # de imagens, não identificação de indivíduo — servem só para escolher o
 # enquadramento do slide de hook.
 PERSON_SUBJECTS = ("woman", "man", "person")
+FOOD_SUBJECT = "food"
 SCENE_SUBJECT = "scene"
 
 POOL_HOOK = "hook"
+POOL_FOOD = "food"
 POOL_SCENE = "scene"
 
 # Palavras que denunciam pessoa no título/descrição da foto. O Unsplash escreve
@@ -57,6 +58,16 @@ _PARTIAL_WORDS = frozenset({
     "hair", "cabelo", "eye", "eyes", "olho", "olhos", "skin", "pele",
 })
 
+_FOOD_WORDS = frozenset({
+    "food", "meal", "dish", "plate", "breakfast", "lunch", "dinner",
+    "snack", "dessert", "smoothie", "juice", "drink", "beverage",
+    "fruit", "fruits", "berry", "berries", "banana", "orange", "apple",
+    "coffee", "latte", "salad", "bowl", "recipe", "comida", "refeicao",
+    "refeição", "prato", "cafe", "café", "almoco", "almoço", "jantar",
+    "lanche", "sobremesa", "suco",
+    "bebida", "fruta", "frutas", "receita",
+})
+
 _WORD_RE = re.compile(r"[a-zà-ÿ]+")
 
 
@@ -67,6 +78,12 @@ def _describes_person(image: PinterestImage) -> bool:
     if not words & _PERSON_WORDS:
         return False
     return not (words & _PARTIAL_WORDS)
+
+
+def _describes_food(image: PinterestImage) -> bool:
+    """O título/alt descreve comida, bebida, frutas ou uma refeição?"""
+    text = f"{image.title} {image.description}".lower()
+    return bool(set(_WORD_RE.findall(text)) & _FOOD_WORDS)
 
 
 @dataclass
@@ -88,6 +105,8 @@ def cast_carousel(
     *,
     hook_subject: str = "woman",
     preferred_hook_ids: set[str] | None = None,
+    person_images_count: int = 1,
+    food_images_count: int = 0,
 ) -> CastingResult:
     """Escolhe a foto de cada slide. Não muta nada — devolve os image_ids."""
     result = CastingResult()
@@ -118,23 +137,81 @@ def cast_carousel(
             "ficou com a melhor foto disponível. Troque pela galeria na prévia."
         )
 
-    scene_pool = _scene_pool(images, subjects, scores, exclude=hook_image.image_id)
-    if not scene_pool:
-        scene_pool = [img for img in images if img.image_id != hook_image.image_id]
-    if not scene_pool:
-        scene_pool = [hook_image]
+    person_images_count = min(max(int(person_images_count or 1), 1), len(slides))
+    food_images_count = min(
+        max(int(food_images_count or 0), 0),
+        max(len(slides) - person_images_count, 0),
+    )
+    scene_images_count = len(slides) - person_images_count - food_images_count
 
-    scene_cursor = 0
-    for index in range(len(slides)):
-        if index == hook_index:
-            result.image_ids.append(hook_image.image_id)
-            continue
-        result.image_ids.append(scene_pool[scene_cursor % len(scene_pool)].image_id)
-        scene_cursor += 1
+    person_pool = _subject_pool(
+        images,
+        subjects,
+        scores,
+        affinity=lambda image: _person_affinity(image, subjects, hook_subject),
+        exclude=hook_image.image_id,
+    )
+    food_pool = _subject_pool(
+        images,
+        subjects,
+        scores,
+        affinity=lambda image: _food_affinity(image, subjects),
+        exclude=hook_image.image_id,
+    )
+    scene_pool = _scene_pool(images, subjects, scores, exclude=hook_image.image_id)
+
+    result.image_ids = [""] * len(slides)
+    result.image_ids[hook_index] = hook_image.image_id
+    used = {hook_image.image_id}
+    matched_people = 0 if hook_source == "fallback" else 1
+    matched_food = 0
+    roles = _category_sequence(
+        person_images_count - 1,
+        food_images_count,
+        scene_images_count,
+    )
+    for index, role in zip(
+        (i for i in range(len(slides)) if i != hook_index),
+        roles,
+    ):
+        candidates = {
+            "person": person_pool,
+            "food": food_pool,
+            "scene": scene_pool,
+        }[role]
+        image = _pick_unused(candidates, used)
+        if image is not None:
+            if role == "person":
+                matched_people += 1
+            elif role == "food":
+                matched_food += 1
+        else:
+            image = _pick_unused(images, used)
+            if image is None:
+                image = candidates[0] if candidates else images[0]
+        result.image_ids[index] = image.image_id
+        used.add(image.image_id)
+
+    if matched_people < person_images_count:
+        result.warnings.append(
+            f"Foram encontradas {matched_people} de {person_images_count} foto(s) "
+            "com pessoa/modelo; os outros slides usaram as melhores imagens disponíveis."
+        )
+    if matched_food < food_images_count:
+        result.warnings.append(
+            f"Foram encontradas {matched_food} de {food_images_count} foto(s) de "
+            "comida; os outros slides usaram as melhores imagens disponíveis."
+        )
 
     logger.info(
-        "Casting: hook=%s (%s) · %d foto(s) de cenário para %d slide(s).",
-        hook_image.image_id, hook_source, len(scene_pool), len(slides),
+        "Casting: hook=%s (%s) · pessoas=%d/%d · comida=%d/%d · %d slide(s).",
+        hook_image.image_id,
+        hook_source,
+        matched_people,
+        person_images_count,
+        matched_food,
+        food_images_count,
+        len(slides),
     )
     return result
 
@@ -235,11 +312,13 @@ def _scene_pool(
 ) -> list[PinterestImage]:
     """Fotos de cenário, melhores primeiro.
 
-    "geralmente" cenário, não "só" cenário: uma segunda foto com pessoa entra
-    se sobrar espaço, mas atrás de todas as de cenário — é o que dá ao
-    carrossel a cara de hook + b-roll em vez de álbum de retratos.
+    Pessoa e comida ficam fora desta lista; quando o acervo geral não basta, o
+    fallback do chamador escolhe outra imagem e mantém o carrossel utilizável.
     """
-    candidates = [img for img in images if img.image_id != exclude]
+    candidates = [
+        img for img in images
+        if img.image_id != exclude and _scene_affinity(img, subjects) > 0
+    ]
     if not candidates:
         return []
     return sorted(
@@ -252,14 +331,71 @@ def _scene_pool(
     )
 
 
+def _subject_pool(
+    images: list[PinterestImage],
+    subjects: dict[str, str],
+    scores: dict[str, float],
+    *,
+    affinity,
+    exclude: str,
+) -> list[PinterestImage]:
+    """Candidatas confirmadas por visão, metadado ou pool de busca."""
+    candidates = [
+        img for img in images
+        if img.image_id != exclude and affinity(img) > 0
+    ]
+    return sorted(
+        candidates,
+        key=lambda img: (affinity(img), scores.get(img.image_id, 0.0)),
+        reverse=True,
+    )
+
+
+def _pick_unused(
+    candidates: list[PinterestImage], used: set[str]
+) -> PinterestImage | None:
+    return next((img for img in candidates if img.image_id not in used), None)
+
+
+def _category_sequence(
+    person_count: int, food_count: int, scene_count: int
+) -> list[str]:
+    """Intercala categorias para evitar blocos repetitivos no carrossel."""
+    remaining = {
+        "food": max(food_count, 0),
+        "scene": max(scene_count, 0),
+        "person": max(person_count, 0),
+    }
+    sequence: list[str] = []
+    while any(remaining.values()):
+        for role in ("food", "scene", "person"):
+            if remaining[role] <= 0:
+                continue
+            sequence.append(role)
+            remaining[role] -= 1
+    return sequence
+
+
+def _food_affinity(image: PinterestImage, subjects: dict[str, str]) -> int:
+    """Quanto a foto serve à cota de comida."""
+    subject = subjects.get(image.image_id, "")
+    if subject:
+        return 4 if subject == FOOD_SUBJECT else 0
+    if _describes_food(image):
+        return 3
+    return 2 if image.pool == POOL_FOOD else 0
+
+
 def _scene_affinity(image: PinterestImage, subjects: dict[str, str]) -> int:
     """Espelho de :func:`_person_affinity` — maior = mais cara de b-roll."""
     subject = subjects.get(image.image_id, "")
     if subject == SCENE_SUBJECT:
         return 3
-    if subject in PERSON_SUBJECTS:
+    if subject in (*PERSON_SUBJECTS, FOOD_SUBJECT):
         return 0
-    if _describes_person(image):
+    if _describes_person(image) or _describes_food(image):
+        return 0
+    if image.pool == POOL_FOOD:
         return 0
     return 2 if image.pool == POOL_SCENE else 1
 
@@ -269,7 +405,9 @@ __all__ = [
     "cast_carousel",
     "apply_casting",
     "PERSON_SUBJECTS",
+    "FOOD_SUBJECT",
     "SCENE_SUBJECT",
     "POOL_HOOK",
+    "POOL_FOOD",
     "POOL_SCENE",
 ]
