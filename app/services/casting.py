@@ -9,8 +9,11 @@ Aqui o slide de `hook` recebe uma foto com pessoa e os demais obedecem às cotas
 de pessoa, comida e cenário geral. Três fontes de sinal, em ordem de confiança:
 
 1. `subject` do VLM — o modelo olhou a foto e disse o que tem nela.
-2. Título/descrição da foto — o Unsplash escreve "a woman sitting on a bed".
-   Descreve *aquela* foto, então vale mais que a busca que a trouxe.
+2. `alt`/descrição da foto — o Unsplash escreve "a woman sitting on a bed".
+   Descreve *aquela* foto, então vale mais que a busca que a trouxe. Só o
+   **foco** conta: uma xícara no fundo de uma foto de quarto não gasta a cota
+   de comida, porque a cota limita o que a foto MOSTRA, não o que dá para ver
+   nela. Ver :func:`_focus`.
 3. `pool` da imagem — de qual busca ela veio (pessoa, comida ou cenário). É o
    sinal que faz o casting funcionar sem visão configurada.
 
@@ -81,22 +84,54 @@ _FOOD_WORDS = frozenset({
     "bebida", "fruta", "frutas", "receita",
 })
 
+# Depois destas palavras vem o cenário, não o assunto: "a bedroom **with** a
+# cup of coffee" é foto de quarto com um café em cima da mesa. "of"/"de" ficam
+# de fora de propósito — "a cup of coffee" e "xícara de café" são a xícara em
+# primeiro plano, não um café ao fundo.
+_BACKGROUND_WORDS = frozenset({
+    "with", "beside", "behind", "background", "near", "next",
+    "com", "atras", "atrás", "fundo", "perto", "junto",
+})
+
 _WORD_RE = re.compile(r"[a-zà-ÿ]+")
 
 
-def _describes_person(image: PinterestImage) -> bool:
-    """A descrição da foto fala de gente (e não de um pedaço de gente)?"""
-    text = f"{image.title} {image.description}".lower()
-    words = set(_WORD_RE.findall(text))
-    if not words & _PERSON_WORDS:
-        return False
-    return not (words & _PARTIAL_WORDS)
+def _focus(image: PinterestImage) -> str:
+    """O que a foto MOSTRA: ``"person"``, ``"food"`` ou ``""`` se o texto não diz.
+
+    O alt e a descrição são lidos separados: são duas frases independentes, e
+    um "with" no fim de uma não pode empurrar a outra inteira para o fundo.
+    """
+    return _focus_of(image.alt) or _focus_of(image.description)
 
 
-def _describes_food(image: PinterestImage) -> bool:
-    """O título/alt descreve comida, bebida, frutas ou uma refeição?"""
-    text = f"{image.title} {image.description}".lower()
-    return bool(set(_WORD_RE.findall(text)) & _FOOD_WORDS)
+def _focus_of(text: str) -> str:
+    """Primeiro assunto citado em primeiro plano — e só ele.
+
+    Três regras, todas com o mesmo motivo: a cota existe para limitar o FOCO
+    da foto, não para banir tudo que aparece nela.
+
+    * **Vence quem vem antes.** "a man drinking a coffee" é foto de pessoa;
+      "morning coffee on a table" é foto de café.
+    * **Depois de "with"/"com" é cenário.** "a bedroom with a cup of coffee"
+      segue sendo foto de quarto — o café está em segundo plano, e segundo
+      plano não consome cota. Era exatamente isso que zerava o acervo de
+      cenário num tema como "rotina matinal", onde há café em quase toda foto.
+    * **Um pedaço do corpo não é um retrato.** "woman's hands holding a cup"
+      é foto de xícara; serve de b-roll, não de hook.
+    """
+    words = _WORD_RE.findall(text.lower())
+    partial = bool(set(words) & _PARTIAL_WORDS)
+    for word in words:
+        if word in _BACKGROUND_WORDS:
+            break
+        if word in _PERSON_WORDS:
+            if partial:
+                continue
+            return "person"
+        if word in _FOOD_WORDS:
+            return "food"
+    return ""
 
 
 @dataclass
@@ -381,10 +416,11 @@ def _person_affinity(
         return 0  # o modelo olhou e disse que não tem pessoa
     if subjects:
         return 0  # houve visão no lote, mas esta candidata não foi confirmada
-    if _describes_food(image):
-        return 0
-    if _describes_person(image):
+    focus = _focus(image)
+    if focus == "person":
         return 3
+    if focus == "food":
+        return 0
     if image.pool == POOL_HOOK:
         return 2
     return 0
@@ -399,8 +435,10 @@ def _scene_pool(
 ) -> list[PinterestImage]:
     """Fotos de cenário, melhores primeiro.
 
-    Pessoa e comida ficam fora desta lista; quando o acervo geral não basta, o
-    fallback do chamador escolhe outra imagem e mantém o carrossel utilizável.
+    Fica de fora quem *é* foto de pessoa ou de comida — não quem tem uma
+    xícara na mesa do fundo (ver :func:`_focus`). Quando mesmo assim o acervo
+    não basta, o fallback do chamador escolhe outra imagem e mantém o
+    carrossel utilizável.
     """
     candidates = [
         img for img in images
@@ -513,22 +551,40 @@ def _food_affinity(image: PinterestImage, subjects: dict[str, str]) -> int:
         return 4 if subject == FOOD_SUBJECT else 0
     if subjects:
         return 0
-    if _describes_person(image):
+    focus = _focus(image)
+    if focus == "person":
         return 0
-    if _describes_food(image):
+    if focus == "food":
         return 3
     return 2 if image.pool == POOL_FOOD else 0
 
 
 def _scene_affinity(image: PinterestImage, subjects: dict[str, str]) -> int:
-    """Espelho de :func:`_person_affinity` — maior = mais cara de b-roll."""
+    """Espelho de :func:`_person_affinity` — maior = mais cara de b-roll.
+
+      4  o VLM olhou a foto e disse "scene"
+      3  a foto tem legenda própria e ela não é sobre pessoa nem sobre comida
+      2  a foto veio do pool de cenário — vale a busca, não a foto
+      1  nenhum sinal (busca única, sem pool)
+      0  é foto de pessoa/comida, por visão ou pelo foco da legenda
+
+    A assimetria com pessoa/comida é de propósito. Lá a palavra presente é o
+    sinal ("woman" prova que há alguém) e a ausência não prova nada, então uma
+    legenda calada cai no pool. Aqui é o contrário: *não ser* pessoa nem
+    comida é a definição de cenário, então a legenda calada é que não decide
+    — e por isso o pool de retrato/comida só veta quem não trouxe legenda
+    nenhuma. Com legenda, vale a regra do módulo: o metadado descreve *esta*
+    foto e ganha da busca que a trouxe.
+    """
     if image.image_id in subjects:
         subject = subjects[image.image_id]
-        return 3 if subject == SCENE_SUBJECT else 0
+        return 4 if subject == SCENE_SUBJECT else 0
     if subjects:
         return 0
-    if _describes_person(image) or _describes_food(image):
+    if _focus(image):
         return 0
+    if image.alt.strip() or image.description.strip():
+        return 3
     if image.pool in (POOL_HOOK, POOL_FOOD):
         return 0
     return 2 if image.pool == POOL_SCENE else 1

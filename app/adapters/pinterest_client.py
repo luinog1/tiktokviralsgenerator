@@ -173,6 +173,13 @@ class PinterestImage:
     source_url: str
     title: str
     description: str = ""
+    # O texto que o provider escreveu sobre ESTA foto: o `alt` do pin, o
+    # `alt_description` do Unsplash, o `accessibility_caption` do Instagram.
+    # Separado do `title` porque o título cai na query da busca quando o
+    # provider não manda legenda — e a query descreve a *busca*, não a foto.
+    # O casting por metadado leria os termos do próprio pool ("café da manhã
+    # food smoothie…") como se fossem a legenda da imagem. Vazio = sem legenda.
+    alt: str = ""
     attribution_text: str = ""
     # Versão pequena (~400px) da mesma foto. O VLM julga composição muito bem
     # nessa resolução, e mandar a `image_url` cheia multiplicaria os tokens de
@@ -190,6 +197,7 @@ class PinterestImage:
             "source_url": self.source_url,
             "title": self.title,
             "description": self.description,
+            "alt": self.alt,
             "attribution_text": self.attribution_text,
             "thumb_url": self.thumb_url,
             "pool": self.pool,
@@ -365,6 +373,7 @@ class UnsplashClient:
                 source_url=item.get("links", {}).get("html") or "",
                 title=str(item.get("alt_description") or query)[:200],
                 description=str(item.get("description") or "")[:500],
+                alt=str(item.get("alt_description") or "")[:200],
                 # Atribuição obrigatória pelos termos do Unsplash
                 attribution_text=(
                     f"Foto de {user.get('name', '?')} "
@@ -797,6 +806,7 @@ class PinterestScrapeClient:
             ),
             title=(alt or query)[:200],
             description="",
+            alt=alt[:200],
             attribution_text="Pin do Pinterest",
         )
 
@@ -1589,6 +1599,7 @@ class InstagramScrapeClient:
             source_url=source,
             title=(entry.alt or scope)[:200],
             description="",
+            alt=(entry.alt or "")[:200],
             attribution_text=f"{by} no Instagram",
         )
 

@@ -116,8 +116,8 @@ def test_maps_a_pin_into_the_image_shape_the_app_uses(install_fake):
 
 
 def test_alt_text_feeds_the_casting_by_metadata(install_fake):
-    """O casting procura "woman" no título — é o sinal que vale sem VLM."""
-    from app.services.casting import _describes_person
+    """O casting procura "woman" no `alt` — é o sinal que vale sem VLM."""
+    from app.services.casting import _focus
 
     install_fake([
         _FakeMedia(
@@ -129,7 +129,7 @@ def test_alt_text_feeds_the_casting_by_metadata(install_fake):
 
     image = PinterestScrapeClient().search("tema", limit=1)[0]
 
-    assert _describes_person(image)
+    assert _focus(image) == "person"
 
 
 def test_a_pin_without_alt_falls_back_to_the_query_as_title(install_fake):
@@ -140,6 +140,9 @@ def test_a_pin_without_alt_falls_back_to_the_query_as_title(install_fake):
     image = PinterestScrapeClient().search("cafe da manha", limit=1)[0]
 
     assert image.title == "cafe da manha"
+    # …mas só para exibir. A query descreve a busca, não a foto: o casting lê
+    # o `alt`, e sem legenda ele fica vazio em vez de virar "comida".
+    assert image.alt == ""
 
 
 def test_a_pin_without_origin_still_links_back_to_pinterest(install_fake):

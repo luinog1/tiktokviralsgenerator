@@ -23,12 +23,16 @@ def _slides(*roles: str) -> list[dict]:
     return [{"headline": f"s{i}", "role": role} for i, role in enumerate(roles)]
 
 
-def _image(image_id: str, pool: str = "", title: str = "", description: str = "") -> PinterestImage:
+def _image(image_id: str, pool: str = "", alt: str = "", description: str = "") -> PinterestImage:
+    # O `title` acompanha o `alt` como nos adapters (`title = alt or query`).
+    # O casting só pode ler o `alt`; quem garante isso é
+    # `test_the_search_query_in_the_title_is_not_read_as_the_photo_caption`.
     return PinterestImage(
         image_id=image_id,
         image_url=f"https://img/{image_id}",
         source_url="https://src",
-        title=title,
+        title=alt,
+        alt=alt,
         description=description,
         pool=pool,
     )
@@ -184,8 +188,8 @@ def test_strict_vision_uses_a_neutral_background_when_no_safe_scene_exists():
 def test_smoothie_and_fruit_metadata_count_as_food():
     images = [
         _image("pessoa", POOL_HOOK),
-        _image("smoothie", POOL_SCENE, title="fresh berry smoothie bowl with fruit"),
-        _image("cena", POOL_SCENE, title="bright kitchen interior"),
+        _image("smoothie", POOL_SCENE, alt="fresh berry smoothie bowl with fruit"),
+        _image("cena", POOL_SCENE, alt="bright kitchen interior"),
     ]
 
     casting = cast_carousel(
@@ -200,10 +204,10 @@ def test_smoothie_and_fruit_metadata_count_as_food():
 
 def test_photo_described_as_a_person_does_not_enter_the_food_quota():
     images = [
-        _image("hook", POOL_HOOK, title="a woman smiling"),
-        _image("pessoa-com-bebida", POOL_FOOD, title="woman drinking smoothie"),
-        _image("comida", POOL_FOOD, title="fresh berry smoothie bowl"),
-        _image("cena", POOL_SCENE, title="bright kitchen interior"),
+        _image("hook", POOL_HOOK, alt="a woman smiling"),
+        _image("pessoa-com-bebida", POOL_FOOD, alt="woman drinking smoothie"),
+        _image("comida", POOL_FOOD, alt="fresh berry smoothie bowl"),
+        _image("cena", POOL_SCENE, alt="bright kitchen interior"),
     ]
 
     casting = cast_carousel(
@@ -272,8 +276,8 @@ def test_pool_decides_the_hook_when_vision_is_off():
 
 def test_preferred_instagram_hook_wins_a_same_quality_tie():
     images = [
-        _image("ig-profile", POOL_HOOK, title="a woman smiling"),
-        _image("pinterest", POOL_HOOK, title="a woman smiling"),
+        _image("ig-profile", POOL_HOOK, alt="a woman smiling"),
+        _image("pinterest", POOL_HOOK, alt="a woman smiling"),
     ]
     verdicts = [
         _verdict("ig-profile", "woman", 0.2),
@@ -434,8 +438,8 @@ def test_description_of_a_person_beats_the_pool():
     """O alt_description do Unsplash descreve *aquela* foto; o pool descreve só
     a busca que a trouxe."""
     images = [
-        _image("veio-do-pool", POOL_HOOK, title="morning coffee on a table"),
-        _image("descrita", POOL_SCENE, title="a woman sitting on a bed"),
+        _image("veio-do-pool", POOL_HOOK, alt="morning coffee on a table"),
+        _image("descrita", POOL_SCENE, alt="a woman sitting on a bed"),
     ]
 
     casting = cast_carousel(_slides("hook", "cta"), images, verdicts=None)
@@ -447,8 +451,8 @@ def test_description_of_a_person_beats_the_pool():
 def test_body_part_photos_do_not_count_as_a_person():
     """"woman's hands holding a cup" é foto de xícara — não serve de hook."""
     images = [
-        _image("maos", POOL_SCENE, title="woman hands holding a cup"),
-        _image("retrato", POOL_HOOK, title=""),
+        _image("maos", POOL_SCENE, alt="woman hands holding a cup"),
+        _image("retrato", POOL_HOOK, alt=""),
     ]
 
     casting = cast_carousel(_slides("hook", "cta"), images, verdicts=None)
@@ -458,8 +462,8 @@ def test_body_part_photos_do_not_count_as_a_person():
 
 def test_vision_still_beats_the_metadata():
     images = [
-        _image("descrita", POOL_SCENE, title="a woman walking"),
-        _image("real", POOL_SCENE, title="empty street"),
+        _image("descrita", POOL_SCENE, alt="a woman walking"),
+        _image("real", POOL_SCENE, alt="empty street"),
     ]
     verdicts = [_verdict("descrita", "scene", 0.9), _verdict("real", "woman", 0.1)]
 
@@ -471,9 +475,9 @@ def test_vision_still_beats_the_metadata():
 
 def test_metadata_keeps_person_photos_out_of_the_scene_slots():
     images = [
-        _image("retrato", POOL_HOOK, title="a woman smiling"),
-        _image("outra-pessoa", POOL_SCENE, title="a girl reading"),
-        _image("cena", POOL_SCENE, title="sunset over the sea"),
+        _image("retrato", POOL_HOOK, alt="a woman smiling"),
+        _image("outra-pessoa", POOL_SCENE, alt="a girl reading"),
+        _image("cena", POOL_SCENE, alt="sunset over the sea"),
     ]
 
     casting = cast_carousel(_slides("hook", "value"), images, verdicts=None)
@@ -483,10 +487,105 @@ def test_metadata_keeps_person_photos_out_of_the_scene_slots():
 
 def test_portuguese_descriptions_are_understood():
     images = [
-        _image("cena", POOL_SCENE, title="xícara de café na mesa"),
+        _image("cena", POOL_SCENE, alt="xícara de café na mesa"),
         _image("pessoa", POOL_SCENE, description="retrato de uma mulher na janela"),
     ]
 
     casting = cast_carousel(_slides("hook", "cta"), images, verdicts=None)
 
     assert casting.hook_image_id == "pessoa"
+
+
+# --------------------------------------- foco da legenda vs. segundo plano
+def test_coffee_in_the_background_does_not_empty_the_scene_pool():
+    """Num tema como "rotina matinal" há café em quase toda foto.
+
+    Vetar qualquer menção deixava três candidatas de doze, e aí o carrossel
+    repetia foto. A cota de comida existe para limitar o FOCO da imagem — uma
+    xícara na mesa do fundo não faz da foto do quarto uma foto de comida.
+    """
+    images = [
+        _image("pessoa", POOL_HOOK, alt="a woman waking up"),
+        _image(
+            "quarto",
+            POOL_SCENE,
+            alt="a bright bedroom with a cup of coffee on the nightstand",
+        ),
+        _image("mesa", POOL_SCENE, alt="an open notebook with a latte beside it"),
+        _image("janela", POOL_SCENE, alt="morning light through a window"),
+    ]
+
+    casting = cast_carousel(_slides("hook", "value", "value", "cta"), images)
+
+    assert casting.image_ids[0] == "pessoa"
+    assert set(casting.image_ids[1:]) == {"quarto", "mesa", "janela"}
+    assert not casting.warnings
+
+
+def test_a_photo_that_is_about_the_coffee_still_counts_as_food():
+    """O outro lado do mesmo corte: em primeiro plano, o café é comida."""
+    images = [
+        _image("pessoa", POOL_HOOK, alt="a woman waking up"),
+        _image("cafe", POOL_SCENE, alt="a cup of coffee on a wooden table"),
+        _image("quarto", POOL_SCENE, alt="a bright bedroom with a cup of coffee"),
+    ]
+
+    casting = cast_carousel(
+        _slides("hook", "value", "cta"), images, food_images_count=1
+    )
+
+    assert casting.categories == ["person", "food", "scene"]
+    assert casting.image_ids[1] == "cafe"
+    assert casting.image_ids[2] == "quarto"
+
+
+def test_a_person_holding_a_coffee_can_still_be_the_hook():
+    """"A man drinking a coffee" — o exemplo da própria doc do Unsplash — é
+    foto de pessoa. Vetar pela menção à bebida esvaziava o pool de retrato
+    justamente no tema em que ele mais importa."""
+    images = [
+        _image("pessoa", POOL_SCENE, alt="a man drinking a coffee"),
+        _image("mesa", POOL_HOOK, alt="an empty table"),
+    ]
+
+    casting = cast_carousel(_slides("hook", "cta"), images)
+
+    assert casting.hook_image_id == "pessoa"
+    assert casting.hook_source == "metadata"
+
+
+def test_the_photo_own_caption_beats_the_pool_it_came_from():
+    """A busca de retrato devolve paisagem às vezes. Se a legenda da foto diz
+    que não há ninguém ali, ela serve de cenário — a mesma regra que já valia
+    no sentido contrário (`test_description_of_a_person_beats_the_pool`).
+
+    Antes, o pool de origem vetava: sem candidata de cenário, o slide 2
+    repetia o retrato do slide 1.
+    """
+    images = [
+        _image("retrato", POOL_HOOK, alt="a woman smiling"),
+        _image("paisagem", POOL_HOOK, alt="sunset over the sea"),
+    ]
+
+    casting = cast_carousel(_slides("hook", "cta"), images)
+
+    assert casting.image_ids == ["retrato", "paisagem"]
+
+
+def test_the_search_query_in_the_title_is_not_read_as_the_photo_caption():
+    """Sem legenda, os adapters põem a query no `title` — e a query descreve a
+    busca, não a foto. Lido como metadado, o "cafe" do tema faria de comida
+    toda foto sem legenda, inclusive as que vieram do pool de cenário."""
+    sem_legenda = PinterestImage(
+        image_id="sem-legenda",
+        image_url="https://img/sem-legenda",
+        source_url="https://src",
+        title="cafe da manha aesthetic lifestyle travel interior workspace",
+        pool=POOL_SCENE,
+    )
+    images = [_image("pessoa", POOL_HOOK), sem_legenda]
+
+    casting = cast_carousel(_slides("hook", "cta"), images)
+
+    assert casting.image_ids == ["pessoa", "sem-legenda"]
+    assert casting.categories == ["person", "scene"]
