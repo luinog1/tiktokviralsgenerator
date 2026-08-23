@@ -2,9 +2,30 @@
 
 Aplicação Flask que transforma uma ideia em um roteiro de hooks e scripts e em um carrossel visual pronto para publicar — usando um endpoint LLM OpenAI-compatible, fotos do Pinterest ou do Instagram (busca **sem token**) ou do Unsplash, e renderização estilo **TikTok photo post** (1080×1350, 4:5). Painéis antigos do goviral.ai continuam podendo ser importados, mas não são necessários.
 
-> **Status:** MVP v0.21 — cotas de pessoas e comida + resolução estrita
+> **Status:** MVP v0.22 — sem repetição entre gerações + 5 alternativas por imagem
 > **Stack:** Python 3.11 · Flask 3 · Jinja2 · WTForms · Pillow · Docker
 > **Idioma inicial:** Português (pt-BR)
+
+---
+
+## 🎯 O que mudou na v0.22
+
+- 🐛 **A mesma hashtag devolvia o mesmo carrossel** — o "ponto de corte sorteado" da v0.7 tinha virado enfeite. O piso de resolução estrito da v0.21 deixava o pool tão curto que não havia o que sortear: medido em 2026-08-22 na query `morning routine aesthetic`, **11 dos 40** pins cobriam 1080×1350, então uma janela de 10 tinha três posições possíveis e duas gerações repetiam **9,4 de 10** fotos. Três correções somadas: o pool subiu para **120 pins** (a biblioteca já paginava sozinha — o custo real foi 3,0s → 4,8s, não a segunda requisição que o comentário antigo temia), a janela contígua virou **amostra aleatória** do pool inteiro, e as fotos que já saíram vão para o fim do sorteio. Medido ponta a ponta, duas gerações seguidas com o mesmo tema: **0 de 6** fotos repetidas.
+- ✅ **A cota limita o que é escolhido, não o que pode ser escolhido** — a galeria de cada slide era o pool da categoria dele, então um slide de cenário cuja categoria voltasse curta ficava com uma alternativa só e a troca com um clique não existia na prática. Agora toda imagem do carrossel oferece **no mínimo 5 alternativas distintas**: primeiro as da própria categoria, depois as melhores do resto do acervo. A **escolha** continua obedecendo às cotas de pessoa e comida — o que mudou é o que a prévia deixa você escolher por cima dela.
+- ✅ **Os pools de busca cobrem a galeria, não só o carrossel** — buscar 6 fotos de retrato para gastar 1 no hook deixava a prévia sem material. Cada pool agora pede a cota **mais** as alternativas (`MIN_IMAGE_OPTIONS`), com piso de 12 por categoria. Numa geração de 6 slides (2 pessoas, 1 comida), a galeria saiu de ~16 para **40** fotos.
+- ✅ **Memória do que já saiu** — `instance/recent_media.json` guarda as fotos que **entraram nos slides** (não as alternativas: marcar as ~30 candidatas de cada geração esgotaria a memória em duas rodadas). É preferência, não veto — acervo pequeno continua devolvendo carrossel, só na ordem inversa. A identidade é a URL normalizada, não o `image_id`: o mesmo pin muda de id entre buscas.
+
+### A mesma hashtag não devolve o mesmo carrossel
+
+Três camadas, e nenhuma delas sozinha resolvia:
+
+| Camada | O que faz | Por que não bastava sozinha |
+| --- | --- | --- |
+| **Pool de 120** | Triplica o acervo que sobra depois do piso de resolução (11 → 40 pins usáveis). | Sem sorteio, um pool maior devolve os mesmos primeiros N. |
+| **Amostra aleatória** | Sorteia quais pins entram, em vez de deslizar uma janela contígua. | Sorteio sem memória ainda repete por acaso: ~2,8 de 10. |
+| **`recent_media.json`** | Manda para o fim do sorteio o que já saiu nos slides anteriores. | Sem pool fundo, a memória satura em uma rodada e vira sorteio puro. |
+
+O arquivo fica no `instance/` (que está no `.gitignore`), como a pessoa fixada — os projetos vivem em memória com TTL e a memória precisa sobreviver ao restart. Apagá-lo zera o histórico e não quebra nada.
 
 ---
 
@@ -203,15 +224,15 @@ A API oficial v5 do Pinterest só libera o `/search/pins/` com **Standard Access
 IMAGE_PROVIDER=pinterest_scrape
 ```
 
-Não há chave, cota nem conta. Cada busca é **uma requisição**: a API interna devolve 50 pins de uma vez e o cliente recorta o que precisa dessa mesma resposta — pedir mais dispararia uma segunda página com um `sleep` no meio, dentro do `POST /generate`.
+Não há chave, cota nem conta. A API interna devolve 50 pins por requisição e a biblioteca pagina sozinha até fechar o número pedido, com um `sleep` de 0,2s entre páginas. O pool é de **120 pins** (três requisições, ~4,8s medidos contra ~3,0s de uma só) porque o piso de resolução é estrito e come a maior parte deles: medido em 2026-08-22 na query `morning routine aesthetic`, **11 de 40** pins cobriam 1080×1350 — e **40 de 120**.
 
-Do pool de 40 pins, o recorte aplica três correções — duas delas pelos mesmos motivos que já valiam para o Unsplash:
+Do pool de 120 pins, o recorte aplica três correções — duas delas pelos mesmos motivos que já valiam para o Unsplash:
 
 | Correção | Por quê |
 | --- | --- |
 | **Resolução primeiro** | O slide tem 1080×1350 e o render faz `cover`: uma foto menor é ampliada e chega ao feed borrada, com a legenda nítida por cima. Ver [Só foto que cobre o slide](#só-foto-que-cobre-o-slide). |
 | **Retrato primeiro** | O slide é 4:5. Uma foto deitada perde metade da cena no recorte de cover. O Unsplash resolve com `orientation=portrait`; a API interna não tem esse parâmetro, então o filtro é feito aqui, pela resolução que vem em cada pin. Sem retrato suficiente, o pool inteiro vale — foto deitada ainda é melhor que gradiente. |
-| **Ponto de corte sorteado** | A busca vem ordenada por relevância e essa ordem é estável: sem sortear onde o recorte começa, o mesmo tema devolveria as mesmas fotos toda vez. É o mesmo sintoma que parecia cache no Unsplash e era determinismo da API. |
+| **Sorteio dentro do pool** | A busca vem ordenada por relevância e essa ordem é estável: sem sortear, o mesmo tema devolveria as mesmas fotos toda vez — o sintoma que parecia cache no Unsplash e era determinismo da API. O sorteio decide *quais* pins entram; a ordem de relevância é preservada na saída. Fotos que já saíram em carrosséis recentes vão para o fim do sorteio (ver [A mesma hashtag não devolve o mesmo carrossel](#a-mesma-hashtag-não-devolve-o-mesmo-carrossel)). |
 
 O `alt` de cada pin ("a woman sitting on a couch holding a cup") é a mesma forma do `alt_description` do Unsplash, então o [casting por metadado](#casting-hook-com-pessoa-resto-com-cenário) continua funcionando sem VLM configurado.
 
@@ -540,6 +561,7 @@ curl -s http://localhost:5000/health | python -m json.tool
 │   ├── services/
 │   │   ├── generation.py      # Orquestração do carrossel
 │   │   ├── casting.py         # Cotas por slide (pessoa, comida, cenário)
+│   │   ├── recent_media.py    # Fotos já usadas — não repetir na próxima geração
 │   │   ├── session_store.py   # Persistência leve (TTL)
 │   │   └── slide_renderer.py  # Pillow — overlay de texto em imagem
 │   └── routes/
@@ -668,17 +690,12 @@ Para trocar a tipografia, substitua esses dois `.ttf` (estáticos) ou aponte `SL
 ---
 
 ## 🔐 Segurança
-
 - Tokens são lidos do ambiente e usados apenas no backend.
 - CSRF habilitado em todos os forms (Flask-WTF).
 - Logs não contêm credenciais.
 - Atribuição e link da imagem são exibidos na prévia e no Markdown exportado.
 - O `health` endpoint **não** expõe tokens, prompts ou segredos.
-- O goviral.ai é acessado manualmente pelo usuário quando ele opta por importar um painel — o ViralPost Studio nunca faz scraping ou automação de login. A geração principal usa o LLM configurado no próprio app.
-
----
-
-## ⚠️ Limitações e compliance
+- O goviral.ai é acessado manualmente pelo usuário quando ele opta por importar um painel — o ViralPost Studio nunca faz scraping ou automação de login. A geração principal usa o LLM configurado no própriimitações e compliance
 
 - **goviral.ai:** ferramenta externa sem API/token. A importação de um painel é opcional; o gerador principal não depende dele. Quando usado, o usuário acessa via login Discord e cola o texto no formulário. O ViralPost Studio não automatiza o acesso.
 - **Pinterest sem token (`IMAGE_PROVIDER=pinterest_scrape` — e a metade Pinterest dos combinados `instagram_pinterest` e `unsplash_pinterest`):** usa a biblioteca [pinterest-dl](https://github.com/sean1832/pinterest-dl), que lê a API **interna** do site. Três consequências que valem a leitura antes de ligar:

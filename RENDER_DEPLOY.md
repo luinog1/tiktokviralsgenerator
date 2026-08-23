@@ -139,6 +139,23 @@ Pinterest e Instagram agora só aceitam fotos que cubram `SLIDE_WIDTH` ×
 trouxer arquivos menores, ela cai no fallback e o motivo aparece na prévia. O
 Unsplash pede ao CDN a imagem já em 1080×1350, `fit=crop`, qualidade 85.
 
+### Repetição entre gerações e alternativas por imagem
+
+Também sem variável nova. A busca no Pinterest pede **120 pins por query** (a
+biblioteca pagina sozinha; ~4,8s contra ~3,0s dos 40 anteriores) porque o piso
+de resolução acima consome a maior parte deles — com 40 pins sobravam 11 acima
+de 1080×1350, e sobre 11 não há sorteio possível: a mesma hashtag devolvia o
+mesmo carrossel. O sorteio agora é uma amostra do pool inteiro, e cada imagem
+do carrossel oferece no mínimo 5 alternativas na galeria da prévia.
+
+O disco entra nisso: as fotos que já foram para os slides ficam em
+`instance/recent_media.json` para a geração seguinte sorteá-las por último. No
+Render, **o disco do serviço é efêmero** — sem um disco persistente montado, um
+redeploy zera essa memória. Nada quebra quando isso acontece: o pool fundo e o
+sorteio continuam valendo, só a camada de memória recomeça do zero. É o mesmo
+diretório da pessoa fixada (`pinned_person.json`), então quem já monta disco
+para ela cobre os dois.
+
 Depois do deploy, confirme em `/health`:
 
 ```json

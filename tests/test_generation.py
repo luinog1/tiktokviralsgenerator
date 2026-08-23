@@ -265,7 +265,13 @@ def test_same_pinterest_file_with_different_pin_ids_is_deduped():
     client = _SameMediaClient()
     outcome = _run(client, _service(client))
 
-    assert len(outcome.project.images) == 6
+    # As duas buscas devolvem o MESMO arquivo com ids e tamanhos diferentes, e
+    # sobra uma cópia de cada. O número exato depende do tamanho dos pools —
+    # o invariante é que a segunda busca não acrescentou nada.
+    devolvidas = sum(limit for _, limit in client.queries)
+    distintas = max(limit for _, limit in client.queries)
+    assert devolvidas > distintas
+    assert len(outcome.project.images) == distintas
 
 
 def test_a_failing_pool_does_not_sink_the_generation():

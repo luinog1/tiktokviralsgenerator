@@ -9,6 +9,7 @@ from __future__ import annotations
 from app.adapters.pinterest_client import PinterestImage
 from app.adapters.vision_provider import VisionVerdict
 from app.services.casting import (
+    MIN_IMAGE_OPTIONS,
     POOL_FOOD,
     POOL_HOOK,
     POOL_SCENE,
@@ -111,7 +112,13 @@ def test_food_quota_stays_before_the_scene_reserved_for_the_promo():
     assert casting.image_ids[-1] == "cena"
 
 
-def test_scene_options_never_offer_known_people_or_food():
+def test_scene_options_lead_with_scene_photos_then_top_up():
+    """A galeria abre pela categoria do slide e só depois completa com o resto.
+
+    Pessoa e comida confirmadas pelo VLM não podem ser *escolhidas* para um
+    slide de cenário — mas podem ser oferecidas, porque a troca é um clique do
+    usuário e uma galeria de uma foto só não é uma troca.
+    """
     images = [
         _image("pessoa", POOL_HOOK),
         _image("outra-pessoa", POOL_SCENE),
@@ -128,7 +135,9 @@ def test_scene_options_never_offer_known_people_or_food():
     casting = cast_carousel(_slides("hook", "value"), images, verdicts)
 
     assert casting.categories == ["person", "scene"]
-    assert casting.image_options[1] == ["cena"]
+    assert casting.image_ids[1] == "cena"
+    assert casting.image_options[1][0] == "cena"
+    assert set(casting.image_options[1]) == {i.image_id for i in images}
 
 
 def test_unjudged_pool_results_do_not_bypass_a_partial_vision_response():
@@ -149,7 +158,7 @@ def test_unjudged_pool_results_do_not_bypass_a_partial_vision_response():
         food_images_count=1,
     )
 
-    assert "food-nao-visto" not in casting.image_options[1]
+    assert casting.image_ids[1] != "food-nao-visto"
     assert casting.image_ids[1] in {"hook-rejeitado", "scene-confirmada"}
     assert any("0 de 1" in warning for warning in casting.warnings)
 
@@ -201,7 +210,7 @@ def test_photo_described_as_a_person_does_not_enter_the_food_quota():
     )
 
     assert casting.image_ids[1] == "comida"
-    assert "pessoa-com-bebida" not in casting.image_options[1]
+    assert casting.image_options[1][0] == "comida"
 
 
 def test_vision_can_reject_a_false_food_pool_result():
@@ -355,7 +364,64 @@ def test_apply_casting_writes_the_image_id_on_each_slide():
     assert all(s["image_id"] for s in slides)
     assert slides[0]["image_category"] == "person"
     assert slides[1]["image_category"] == "scene"
-    assert slides[1]["image_options"] == ["cena"]
+    assert slides[1]["image_options"][0] == "cena"
+
+
+# ------------------------------------------------ alternativas da galeria
+def test_every_slide_offers_at_least_five_alternatives():
+    """A cota limita o que é ESCOLHIDO, não o que pode ser escolhido.
+
+    Antes, a galeria de um slide era o pool da categoria dele — e um pool curto
+    deixava a troca sem alternativa. Ela era curta na prática justamente quando
+    mais importava: com visão ligada, quem o VLM não avaliou tem afinidade 0 em
+    todas as categorias e some dos três pools.
+    """
+    images = [_image(f"cena-{i}", POOL_SCENE) for i in range(6)]
+    images += [_image("retrato", POOL_HOOK), _image("prato", POOL_FOOD)]
+
+    casting = cast_carousel(
+        _slides("hook", "value", "cta"), images, food_images_count=1
+    )
+
+    assert casting.categories == ["person", "food", "scene"]
+    assert casting.image_ids[1] == "prato"
+    for options in casting.image_options:
+        assert len(options) >= MIN_IMAGE_OPTIONS
+        assert len(set(options)) == len(options)
+
+
+def test_the_slide_own_category_still_comes_first_in_the_gallery():
+    """O acréscimo é um complemento, não uma mistura: a primeira alternativa
+    continua sendo do mesmo tipo da foto escolhida."""
+    images = [
+        _image("retrato", POOL_HOOK),
+        _image("prato", POOL_FOOD),
+        _image("cena", POOL_SCENE),
+        _image("cena-2", POOL_SCENE),
+    ]
+
+    casting = cast_carousel(
+        _slides("hook", "value", "cta"), images, food_images_count=1
+    )
+
+    assert casting.image_options[0][0] == "retrato"
+    assert casting.image_options[1][0] == "prato"
+    assert casting.image_options[2][0].startswith("cena")
+
+
+def test_a_gallery_cannot_offer_photos_that_were_never_found():
+    """`MIN_IMAGE_OPTIONS` é um alvo, não uma promessa: com três fotos no
+    acervo inteiro, a galeria tem três."""
+    images = [
+        _image("retrato", POOL_HOOK),
+        _image("cena", POOL_SCENE),
+        _image("cena-2", POOL_SCENE),
+    ]
+
+    casting = cast_carousel(_slides("hook", "value"), images)
+
+    for options in casting.image_options:
+        assert len(options) == 3
 
 
 # ------------------------------------------- sinal do metadado (sem visão)

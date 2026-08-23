@@ -324,6 +324,31 @@ def _pinimg_thumb(src: str) -> str:
     return f"{match.group(1)}{_PINIMG_THUMB_SIZE}/{match.group(2)}.jpg"
 
 
+def media_identity(url: str) -> str:
+    """Identidade estável do mesmo arquivo servido em tamanhos diferentes.
+
+    O Pinterest devolve o mesmo pin com IDs distintos entre buscas e caminhos
+    `originals/`, `736x/` ou `474x/`. Comparar por `image_id` deixa essas cópias
+    passarem por fotos diferentes — tanto na deduplicação de um carrossel quanto
+    na memória do que já saiu nos carrosséis anteriores.
+    """
+    try:
+        parts = urlsplit(url or "")
+    except ValueError:
+        return ""
+    host = (parts.hostname or "").lower()
+    path = parts.path.rstrip("/")
+    if not host or not path:
+        return ""
+    if host == "i.pinimg.com" or host.endswith(".pinimg.com"):
+        pieces = path.split("/")
+        if len(pieces) > 2 and (pieces[1] == "originals" or pieces[1].endswith("x")):
+            path = "/" + "/".join(pieces[2:])
+        if "." in path.rsplit("/", 1)[-1]:
+            path = path.rsplit(".", 1)[0]
+    return f"{host}{path}".lower()
+
+
 def pinterest_scrape_available() -> bool:
     """A biblioteca está instalada? Ela é opcional — o app roda sem ela.
 
@@ -371,19 +396,49 @@ def _covers_slide(media: Any, minimum: tuple[int, int]) -> bool:
     return width >= min_width and height >= min_height
 
 
-def _cut_pool(medias: list[Any], limit: int, min_resolution: tuple[int, int]) -> list[Any]:
+def _cut_pool(
+    medias: list[Any],
+    limit: int,
+    min_resolution: tuple[int, int],
+    *,
+    avoid: Iterable[str] = (),
+) -> list[Any]:
     """O recorte comum das buscas sem token (Pinterest e Instagram).
 
     O piso de resolução é estrito. Retrato continua sendo preferência, mas uma
     foto pequena nunca substitui uma foto grande: se o acervo não atingir o
-    piso, a fonte devolve menos resultados ou cai no fallback. O ponto de corte
-    sorteado evita que a mesma busca devolva sempre as mesmas fotos.
+    piso, a fonte devolve menos resultados ou cai no fallback.
+
+    A escolha dentro do pool filtrado é uma **amostra aleatória**, não uma
+    janela contígua. A janela era a correção original para o determinismo da
+    busca (a API devolve a mesma ordem de relevância toda vez), e ela não
+    funcionava: medido em 2026-08-22 na query "morning routine aesthetic", só
+    **11 dos 40** pins passavam o piso de 1080×1350, então uma janela de 10
+    tinha três posições possíveis e duas gerações repetiam **9,4 de 10** fotos.
+    Amostrar do pool inteiro derruba a sobreposição para ~2,8 de 10; o resto
+    quem resolve é `avoid`. A ordem de relevância é preservada na saída — o
+    sorteio decide *quais* pins entram, não em que ordem.
+
+    `avoid` são as identidades (`media_identity`) que já saíram em carrosséis
+    recentes: elas vão para o fim da fila em vez de serem descartadas, porque
+    um acervo pequeno não pode ficar sem foto só por já ter sido usado.
     """
     sharp = [m for m in medias if _covers_slide(m, min_resolution)]
     portrait = [m for m in sharp if _is_portrait(m)]
     pool = portrait if len(portrait) >= limit else sharp
-    start = random.randint(0, max(0, len(pool) - limit))
-    return pool[start : start + limit]
+    if len(pool) <= limit:
+        return pool
+
+    seen = frozenset(avoid)
+    fresh, stale = [], []
+    for index, media in enumerate(pool):
+        identity = media_identity(str(getattr(media, "src", "") or ""))
+        (stale if identity and identity in seen else fresh).append(index)
+    if len(fresh) >= limit:
+        picked = random.sample(fresh, limit)
+    else:
+        picked = fresh + random.sample(stale, limit - len(fresh))
+    return [pool[index] for index in sorted(picked)]
 
 
 def _load_pinterest_dl() -> Any | None:
@@ -405,20 +460,33 @@ class PinterestScrapeClient:
 
     name = "pinterest_scrape"
 
-    # Uma chamada à API interna traz 50 pins; pedir mais dispara uma segunda
-    # página e um `sleep` entre elas, dentro do POST /generate. 40 mantém tudo
-    # numa requisição só e ainda sobra material para filtrar e sortear.
-    _POOL_SIZE = 40
+    # Quantos pins pedir por busca. A biblioteca pagina sozinha (50 por
+    # requisição, `delay` de 0,2s entre elas) até fechar o número — o custo
+    # medido de 40 → 120 foi 3,0s → 4,8s, dentro do POST /generate.
+    #
+    # 40 era o número de quando o piso de resolução ainda cedia. Com o piso
+    # estrito da v0.21 ele virou o gargalo dos dois sintomas: medido em
+    # 2026-08-22 ("morning routine aesthetic"), 40 pins deixavam **11** acima
+    # de 1080×1350 e 120 deixam **40**. Com 11 não há o que sortear (as fotos
+    # se repetiam entre gerações) nem o que oferecer na galeria da prévia.
+    _POOL_SIZE = 120
 
-    def __init__(self, timeout: int = 20, min_resolution: tuple[int, int] = (0, 0)):
+    def __init__(
+        self,
+        timeout: int = 20,
+        min_resolution: tuple[int, int] = (0, 0),
+        avoid_media: Iterable[str] = (),
+    ):
         self._timeout = timeout
         # Piso de resolução: o tamanho do slide, para a foto não ser ampliada no
         # render. Filtrado aqui e não no parâmetro `min_resolution` da
         # biblioteca porque lá o corte acontece ANTES da contagem: para fechar
-        # os 40 pins ela pagina de novo, com um `sleep` a cada página, dentro do
-        # POST /generate. Filtrando o pool já recebido, a busca continua sendo
-        # uma requisição só.
+        # os pins pedidos ela pagina de novo, com um `sleep` a cada página,
+        # dentro do POST /generate. Filtrando o pool já recebido, a busca
+        # continua custando o mesmo número de requisições.
         self._min_resolution = min_resolution
+        # O que já saiu em carrosséis recentes — vai para o fim do sorteio.
+        self._avoid_media = frozenset(avoid_media)
         # Por que a última busca caiu no mock. Vazio = não caiu.
         self.last_fallback_reason = ""
 
@@ -520,20 +588,20 @@ class PinterestScrapeClient:
         return [self._to_image(media, "") for media in selected]
 
     def _select(self, medias: list[Any], limit: int) -> list[Any]:
-        """Recorta o pool: alta resolução e retrato primeiro, num ponto sorteado.
+        """Recorta o pool: alta resolução e retrato primeiro, sorteando quais.
 
         Três correções do mesmo pool. **Resolução** porque o slide tem 1080×1350
         e uma foto menor é ampliada no render — sai borrada com o texto nítido
         por cima. **Retrato** porque uma foto deitada perde metade da cena no
         recorte de cover; o Unsplash resolve isso com `orientation=portrait`, que
-        a API interna não oferece. **Ponto sorteado** porque a busca vem ordenada
-        por relevância e essa ordem é estável: sem isso o mesmo tema devolveria
-        as mesmas fotos toda vez, o que parece cache do app e não é.
+        a API interna não oferece. **Sorteio** porque a busca vem ordenada por
+        relevância e essa ordem é estável: sem isso o mesmo tema devolveria as
+        mesmas fotos toda vez, o que parece cache do app e não é.
 
         A orientação pode ceder quando não há retratos suficientes; o piso de
         resolução não cede, porque ampliar uma origem pequena degrada o PNG final.
         """
-        return _cut_pool(medias, limit, self._min_resolution)
+        return _cut_pool(medias, limit, self._min_resolution, avoid=self._avoid_media)
 
     @staticmethod
     def _to_image(media: Any, query: str) -> PinterestImage:
@@ -1492,12 +1560,15 @@ class CombinedImageClient:
 # Fábrica — escolhe o melhor cliente disponível automaticamente
 # ---------------------------------------------------------------------------
 
-def _pinterest_scrape_client(settings: Settings) -> PinterestScrapeClient:
+def _pinterest_scrape_client(
+    settings: Settings, avoid_media: Iterable[str] = ()
+) -> PinterestScrapeClient:
     return PinterestScrapeClient(
         timeout=settings.request_timeout_seconds,
         # O piso de resolução é o próprio slide: exigir mais seria arbitrário
         # e exigir menos deixaria entrar foto que o render precisa ampliar.
         min_resolution=(settings.slide_width, settings.slide_height),
+        avoid_media=avoid_media,
     )
 
 
@@ -1517,6 +1588,7 @@ def build_pinterest_client(
     settings: Settings,
     override: str = "",
     instagram_images_count: int | None = None,
+    avoid_media: Iterable[str] = (),
 ) -> PinterestClient:
     """Cliente de imagens conforme `IMAGE_PROVIDER`.
 
@@ -1554,7 +1626,7 @@ def build_pinterest_client(
         # `last_fallback_reason`, que a prévia mostra. Trocar por outro provider
         # aqui esconderia a única pista de por que o carrossel saiu diferente.
         logger.info("Fonte de imagens: Pinterest sem token.")
-        return _pinterest_scrape_client(settings)
+        return _pinterest_scrape_client(settings, avoid_media)
     if choice == "instagram_scrape":
         logger.info("Fonte de imagens: Instagram sem token.")
         return _instagram_scrape_client(settings)
@@ -1564,7 +1636,10 @@ def build_pinterest_client(
         if instagram_images_count is not None:
             source_limits = {"instagram_scrape": max(int(instagram_images_count), 1)}
         return CombinedImageClient(
-            [_instagram_scrape_client(settings), _pinterest_scrape_client(settings)],
+            [
+                _instagram_scrape_client(settings),
+                _pinterest_scrape_client(settings, avoid_media),
+            ],
             name="instagram_pinterest",
             source_limits=source_limits,
         )
@@ -1582,7 +1657,7 @@ def build_pinterest_client(
                     timeout=settings.request_timeout_seconds,
                     target_size=(settings.slide_width, settings.slide_height),
                 ),
-                _pinterest_scrape_client(settings),
+                _pinterest_scrape_client(settings, avoid_media),
             ],
             name="unsplash_pinterest",
         )

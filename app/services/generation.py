@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
 
 from app.adapters import (
     PinterestClient,
@@ -21,12 +20,13 @@ from app.adapters import (
     build_ranking_provider,
     build_text_composer,
 )
-from app.adapters.pinterest_client import is_mock_image
+from app.adapters.pinterest_client import is_mock_image, media_identity
 from app.adapters.goviral_parser import goviral_blocks
 from app.adapters.script_parser import compose_from_blocks, labeled_blocks
 from app.adapters.vision_provider import VisionRankingProvider, build_vision_provider
 from app.config import Settings
 from app.services.casting import (
+    MIN_IMAGE_OPTIONS,
     POOL_FOOD,
     POOL_HOOK,
     POOL_SCENE,
@@ -35,6 +35,7 @@ from app.services.casting import (
 )
 from app.services.goviral_assets import assign_promo_slide
 from app.services.pinned_person import load_pinned
+from app.services.recent_media import load_recent, remember
 from app.services.session_store import SessionStore, StoredProject, get_store
 
 logger = logging.getLogger(__name__)
@@ -43,25 +44,11 @@ logger = logging.getLogger(__name__)
 def _media_identity(image: PinterestImage) -> str:
     """Identidade estável do mesmo arquivo servido em tamanhos diferentes.
 
-    O Pinterest pode devolver o mesmo pin com IDs distintos entre buscas e
-    caminhos `originals/`, `736x/` ou `474x/`. Deduplicar só por `image_id`
-    deixa essas cópias aparecerem como fotos diferentes no carrossel.
+    A regra mora no adapter porque a busca usa a mesma para não repetir, entre
+    gerações, as fotos que já saíram (ver `recent_media.py`) — duas cópias dela
+    divergiriam em silêncio.
     """
-    try:
-        parts = urlsplit(image.image_url or "")
-    except ValueError:
-        return ""
-    host = (parts.hostname or "").lower()
-    path = parts.path.rstrip("/")
-    if not host or not path:
-        return ""
-    if host == "i.pinimg.com" or host.endswith(".pinimg.com"):
-        pieces = path.split("/")
-        if len(pieces) > 2 and (pieces[1] == "originals" or pieces[1].endswith("x")):
-            path = "/" + "/".join(pieces[2:])
-        if "." in path.rsplit("/", 1)[-1]:
-            path = path.rsplit(".", 1)[0]
-    return f"{host}{path}".lower()
+    return media_identity(image.image_url)
 
 
 @dataclass
@@ -79,11 +66,14 @@ class GenerationOutcome:
 class GenerationService:
     """Ponto único de orquestração do carrossel."""
 
-    # Quantas fotos de pessoa buscar para o hook. Só uma entra no carrossel,
-    # mas a busca precisa de folga: nem toda foto da query de retrato traz
-    # alguém em cena, e é a galeria da prévia que absorve as sobras.
-    HOOK_POOL_SIZE = 6
-    FOOD_POOL_SIZE = 8
+    # Quantas fotos buscar por categoria. Cada pool precisa cobrir a cota
+    # pedida **mais** as alternativas da galeria (`MIN_IMAGE_OPTIONS`): buscar
+    # só o que entra no carrossel deixava a prévia sem troca real, que era o
+    # sintoma de "as imagens estão escassas". Nem toda foto da query de retrato
+    # traz alguém em cena, então o piso é maior que o mínimo da galeria.
+    HOOK_POOL_SIZE = 12
+    FOOD_POOL_SIZE = 12
+    SCENE_POOL_SIZE = 12
     FOOD_QUERY_HINTS = "food meal smoothie fruit breakfast healthy dish beverage"
 
     def __init__(
@@ -97,10 +87,13 @@ class GenerationService:
         self._composer: TextComposer = build_text_composer(settings)
         # `image_source` é a escolha da UI (o seletor de fonte): vale para esta
         # geração e vence o IMAGE_PROVIDER do ambiente. Vazio = ambiente manda.
+        # `avoid_media` são as fotos dos carrosséis recentes: o sorteio da busca
+        # as deixa por último para a mesma hashtag não devolver o mesmo carrossel.
         self._pinterest: PinterestClient = build_pinterest_client(
             settings,
             override=image_source,
             instagram_images_count=instagram_images_count,
+            avoid_media=load_recent(),
         )
         self._ranking: RankingProvider = build_ranking_provider(settings)
         self._vision: VisionRankingProvider | None = build_vision_provider(settings)
@@ -307,6 +300,11 @@ class GenerationService:
         # prints não entrarem no pool de cenário dos outros slides.
         assign_promo_slide(carousel_dict["slides"], ordered_images, warnings)
 
+        # 4c. Guardar o que ENTROU nos slides, para a próxima geração com a
+        # mesma hashtag sortear outras fotos. Só os slides: marcar também as
+        # alternativas da galeria esgotaria a memória em duas rodadas.
+        self._remember_used(carousel_dict["slides"], ordered_images)
+
         # 5. Persistir
         project = self._store.create(
             briefing=briefing,
@@ -320,6 +318,36 @@ class GenerationService:
         return GenerationOutcome(project=project, warnings=warnings)
 
     # ---- helpers ----
+    @staticmethod
+    def _remember_used(
+        slides: list[dict[str, Any]], ordered_images: list[PinterestImage]
+    ) -> None:
+        """Marca como "já usadas" as fotos que foram parar nos slides.
+
+        A resolução da foto de cada slide é a mesma da prévia e do renderer:
+        `image_id` quando o casting escolheu, e a rotação `i % len` quando não.
+        Gradiente mock e os prints promocionais ficam de fora — um não é foto de
+        acervo e o outro é sorteado de uma pasta local, não da busca.
+        """
+        if not ordered_images:
+            return
+        by_id = {img.image_id: img for img in ordered_images}
+        identities: list[str] = []
+        for index, slide in enumerate(slides):
+            image_id = str(slide.get("image_id") or "")
+            if image_id:
+                image = by_id.get(image_id)
+            elif "image_category" in slide:
+                continue  # slot neutro — o VLM não confirmou categoria segura
+            else:
+                image = ordered_images[index % len(ordered_images)]
+            if image is None or is_mock_image(image):
+                continue
+            identity = _media_identity(image)
+            if identity:
+                identities.append(identity)
+        remember(identities)
+
     def _search_images(
         self,
         query: str,
@@ -360,7 +388,7 @@ class GenerationService:
         if not hook_images:
             hook_images = self._search_pool(
                 f"{query} {self._settings.hook_query_hints}".strip(),
-                max(self.HOOK_POOL_SIZE, person_images_count * 2),
+                max(self.HOOK_POOL_SIZE, person_images_count + MIN_IMAGE_OPTIONS),
                 POOL_HOOK,
                 warnings,
             )
@@ -368,7 +396,7 @@ class GenerationService:
         if food_images_count:
             food_images = self._search_pool(
                 f"{query} {self.FOOD_QUERY_HINTS}".strip(),
-                max(self.FOOD_POOL_SIZE, food_images_count * 2),
+                max(self.FOOD_POOL_SIZE, food_images_count + MIN_IMAGE_OPTIONS),
                 POOL_FOOD,
                 warnings,
             )
@@ -377,7 +405,7 @@ class GenerationService:
         if general_count:
             scene_images = self._search_pool(
                 f"{query} {self._settings.scene_query_hints}".strip(),
-                max(general_count * 2, 6),
+                max(self.SCENE_POOL_SIZE, general_count + MIN_IMAGE_OPTIONS),
                 POOL_SCENE,
                 warnings,
             )

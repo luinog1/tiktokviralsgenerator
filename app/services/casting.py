@@ -40,6 +40,14 @@ POOL_HOOK = "hook"
 POOL_FOOD = "food"
 POOL_SCENE = "scene"
 
+# Quantas fotos a galeria de cada slide precisa oferecer. A cota de pessoa e
+# comida decide o que é **escolhido**, não o que pode ser escolhido: um slide de
+# cenário cuja categoria só tem duas candidatas deixava o usuário sem troca real.
+# Abaixo desse número, a galeria completa com as melhores fotos restantes de
+# qualquer categoria — elas entram DEPOIS das da própria categoria, então a
+# primeira alternativa continua sendo do mesmo tipo da foto escolhida.
+MIN_IMAGE_OPTIONS = 5
+
 # Palavras que denunciam pessoa no título/descrição da foto. O Unsplash escreve
 # alt_description como "a woman sitting on a bed" — quando o campo vem
 # preenchido, é um sinal melhor que o pool, porque descreve *aquela* foto e não
@@ -236,6 +244,14 @@ def cast_carousel(
             result.image_options[index].append(image.image_id)
         used.add(image.image_id)
 
+    # A cota diz o que é ESCOLHIDO, não o que pode ser escolhido. Restringir a
+    # galeria à categoria do slide deixava a troca sem alternativa sempre que a
+    # categoria voltasse curta — e com visão ligada isso é a regra, porque quem
+    # o VLM não avaliou tem afinidade 0 em todas as categorias e some dos três
+    # pools. O que a visão não confirmou não serve para *decidir* o slide, mas
+    # serve muito bem para o usuário olhar e escolher.
+    _top_up_options(result.image_options, images, scores)
+
     if matched_people < person_images_count:
         result.warnings.append(
             f"Foram encontradas {matched_people} de {person_images_count} foto(s) "
@@ -423,6 +439,38 @@ def _pick_unused(
     return next((img for img in candidates if img.image_id not in used), None)
 
 
+def _top_up_options(
+    options: list[list[str]],
+    images: list[PinterestImage],
+    scores: dict[str, float],
+) -> None:
+    """Completa cada galeria até `MIN_IMAGE_OPTIONS`, in place.
+
+    O acréscimo vem no fim da lista e ordenado por score, então a galeria abre
+    com as fotos da categoria do slide e só depois oferece o resto do acervo.
+    Com menos fotos que o mínimo no acervo inteiro, sobra o que houver — o
+    número é um alvo, não uma promessa que a busca possa não conseguir cumprir.
+    """
+    ranked = [
+        img.image_id
+        for img in sorted(
+            images, key=lambda img: scores.get(img.image_id, 0.0), reverse=True
+        )
+        if img.image_id
+    ]
+    for slot in options:
+        if len(slot) >= MIN_IMAGE_OPTIONS:
+            continue
+        present = set(slot)
+        for image_id in ranked:
+            if len(slot) >= MIN_IMAGE_OPTIONS:
+                break
+            if image_id in present:
+                continue
+            slot.append(image_id)
+            present.add(image_id)
+
+
 def _image_ids(images: list[PinterestImage]) -> list[str]:
     """IDs únicos, preservando a ordem de preferência do pool."""
     return list(dict.fromkeys(img.image_id for img in images if img.image_id))
@@ -485,6 +533,7 @@ __all__ = [
     "CastingResult",
     "cast_carousel",
     "apply_casting",
+    "MIN_IMAGE_OPTIONS",
     "PERSON_SUBJECTS",
     "FOOD_SUBJECT",
     "SCENE_SUBJECT",

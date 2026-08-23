@@ -16,6 +16,7 @@ from app.adapters.pinterest_client import (
     _pinimg_thumb,
     build_pinterest_client,
     is_mock_image,
+    media_identity,
 )
 from app.config import IMAGE_PROVIDERS, Settings
 
@@ -329,29 +330,67 @@ def test_the_library_still_gets_no_floor_of_its_own(install_fake):
 
 
 def test_the_same_query_does_not_always_return_the_same_photos(install_fake):
-    """A busca vem ordenada por relevância e essa ordem é estável — sem sortear
-    o ponto de corte, o mesmo tema devolveria as mesmas fotos toda vez."""
+    """A busca vem ordenada por relevância e essa ordem é estável — sem sortear,
+    o mesmo tema devolveria as mesmas fotos toda vez.
+
+    O `> 1` sozinho não prova nada, e foi por isso que o defeito sobreviveu a
+    esta suíte: a janela contígua antiga tinha N−L+1 saídas possíveis e passava
+    no `> 1` repetindo quase tudo. Com o pool filtrado valendo 11 pins e uma
+    janela de 10, duas gerações repetiam 9,4 de 10 fotos. O que separa amostra
+    de janela é a **descontinuidade**: os ids são sequenciais, então uma janela
+    de 4 tem sempre `max - min == 3`.
+    """
     install_fake(_media_batch(40))
     client = PinterestScrapeClient()
 
-    first_ids = {
-        tuple(img.image_id for img in client.search("mesmo tema", limit=4))
-        for _ in range(25)
-    }
+    draws = [
+        [int(img.image_id) for img in client.search("mesmo tema", limit=4)]
+        for _ in range(30)
+    ]
 
-    assert len(first_ids) > 1
+    assert len({tuple(d) for d in draws}) > 1
+    assert any(max(d) - min(d) > 3 for d in draws)
+    # Sortear do pool inteiro também é o que dá material para a galeria da
+    # prévia: 30 sorteios de 4 têm que varrer bem mais que os 4 primeiros pins.
+    assert len({image_id for draw in draws for image_id in draw}) > 20
 
 
-def test_one_search_is_one_request(install_fake):
-    """Pedir mais de 50 dispararia uma segunda página e um sleep, dentro do
-    POST /generate."""
+def test_photos_from_recent_carousels_go_to_the_end_of_the_draw(install_fake):
+    """`avoid` é preferência, não veto: o que já saiu só perde a vez."""
+    medias = _media_batch(40)
+    install_fake(medias)
+    ja_usadas = [media_identity(m.src) for m in medias[:36]]
+
+    client = PinterestScrapeClient(avoid_media=ja_usadas)
+    draw = {img.image_id for img in client.search("mesmo tema", limit=4)}
+
+    assert draw == {str(m.id) for m in medias[36:]}
+
+
+def test_an_exhausted_memory_still_returns_a_carousel(install_fake):
+    """Acervo inteiro já usado não pode devolver carrossel vazio."""
+    medias = _media_batch(40)
+    install_fake(medias)
+
+    client = PinterestScrapeClient(avoid_media=[media_identity(m.src) for m in medias])
+
+    assert len(client.search("mesmo tema", limit=4)) == 4
+
+
+def test_one_search_is_one_call_into_the_library(install_fake):
+    """A paginação é da biblioteca (50 por requisição, 0,2s entre elas) — o
+    adapter não pode paginar por fora, senão cada pool viraria N chamadas.
+
+    O pool pedido é fundo de propósito: com o piso estrito de 1080×1350, medido
+    em 2026-08-22, 40 pins deixavam 11 acima do piso e 120 deixam 40.
+    """
     calls: list[dict] = []
     install_fake(_media_batch(40), calls=calls)
 
     PinterestScrapeClient().search("tema", limit=6)
 
     assert len(calls) == 1
-    assert calls[0]["num"] <= 50
+    assert calls[0]["num"] == PinterestScrapeClient._POOL_SIZE  # noqa: SLF001
 
 
 def test_the_timeout_comes_from_the_settings(install_fake, monkeypatch):
