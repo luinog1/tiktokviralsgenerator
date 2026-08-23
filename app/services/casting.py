@@ -40,13 +40,18 @@ POOL_HOOK = "hook"
 POOL_FOOD = "food"
 POOL_SCENE = "scene"
 
-# Quantas fotos a galeria de cada slide precisa oferecer. A cota de pessoa e
-# comida decide o que é **escolhido**, não o que pode ser escolhido: um slide de
-# cenário cuja categoria só tem duas candidatas deixava o usuário sem troca real.
-# Abaixo desse número, a galeria completa com as melhores fotos restantes de
-# qualquer categoria — elas entram DEPOIS das da própria categoria, então a
-# primeira alternativa continua sendo do mesmo tipo da foto escolhida.
-MIN_IMAGE_OPTIONS = 5
+# Quantas fotos **além da escolhida** a galeria de cada slide precisa oferecer.
+# A cota de pessoa e comida decide o que é escolhido, não o que pode ser
+# escolhido: um slide de cenário cuja categoria só tem duas candidatas deixava o
+# usuário sem troca real. Abaixo desse número, a galeria completa com as
+# melhores fotos restantes de qualquer categoria — elas entram DEPOIS das da
+# própria categoria, então a primeira alternativa continua sendo do mesmo tipo
+# da foto escolhida.
+#
+# É "alternativas", não "tamanho da galeria": a foto que já está no slide não
+# conta como opção de troca, então a galeria tem MIN_IMAGE_ALTERNATIVES + 1.
+MIN_IMAGE_ALTERNATIVES = 5
+MIN_IMAGE_OPTIONS = MIN_IMAGE_ALTERNATIVES + 1
 
 # Palavras que denunciam pessoa no título/descrição da foto. O Unsplash escreve
 # alt_description como "a woman sitting on a bed" — quando o campo vem
@@ -533,6 +538,7 @@ __all__ = [
     "CastingResult",
     "cast_carousel",
     "apply_casting",
+    "MIN_IMAGE_ALTERNATIVES",
     "MIN_IMAGE_OPTIONS",
     "PERSON_SUBJECTS",
     "FOOD_SUBJECT",

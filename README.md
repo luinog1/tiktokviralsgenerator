@@ -11,8 +11,13 @@ Aplicação Flask que transforma uma ideia em um roteiro de hooks e scripts e em
 ## 🎯 O que mudou na v0.22
 
 - 🐛 **A mesma hashtag devolvia o mesmo carrossel** — o "ponto de corte sorteado" da v0.7 tinha virado enfeite. O piso de resolução estrito da v0.21 deixava o pool tão curto que não havia o que sortear: medido em 2026-08-22 na query `morning routine aesthetic`, **11 dos 40** pins cobriam 1080×1350, então uma janela de 10 tinha três posições possíveis e duas gerações repetiam **9,4 de 10** fotos. Três correções somadas: o pool subiu para **120 pins** (a biblioteca já paginava sozinha — o custo real foi 3,0s → 4,8s, não a segunda requisição que o comentário antigo temia), a janela contígua virou **amostra aleatória** do pool inteiro, e as fotos que já saíram vão para o fim do sorteio. Medido ponta a ponta, duas gerações seguidas com o mesmo tema: **0 de 6** fotos repetidas.
-- ✅ **A cota limita o que é escolhido, não o que pode ser escolhido** — a galeria de cada slide era o pool da categoria dele, então um slide de cenário cuja categoria voltasse curta ficava com uma alternativa só e a troca com um clique não existia na prática. Agora toda imagem do carrossel oferece **no mínimo 5 alternativas distintas**: primeiro as da própria categoria, depois as melhores do resto do acervo. A **escolha** continua obedecendo às cotas de pessoa e comida — o que mudou é o que a prévia deixa você escolher por cima dela.
-- ✅ **Os pools de busca cobrem a galeria, não só o carrossel** — buscar 6 fotos de retrato para gastar 1 no hook deixava a prévia sem material. Cada pool agora pede a cota **mais** as alternativas (`MIN_IMAGE_OPTIONS`), com piso de 12 por categoria. Numa geração de 6 slides (2 pessoas, 1 comida), a galeria saiu de ~16 para **40** fotos.
+- ✅ **A cota limita o que é escolhido, não o que pode ser escolhido** — a galeria de cada slide era o pool da categoria dele, então um slide de cenário cuja categoria voltasse curta ficava com uma alternativa só e a troca com um clique não existia na prática. Agora toda imagem do carrossel oferece **no mínimo 5 alternativas além da que ela já recebeu** (galeria de 6, `MIN_IMAGE_ALTERNATIVES`): primeiro as da própria categoria, depois as melhores do resto do acervo. Vale também para o slide de fecho, cuja galeria de prints do GoViral subiu de 5 para 6 pelo mesmo motivo. A **escolha** continua obedecendo às cotas de pessoa, comida e à cota paga do Instagram — o que mudou é o que a prévia deixa você escolher por cima dela.
+- ✅ **Os pools de busca cobrem a galeria, não só o carrossel** — buscar 6 fotos de retrato para gastar 1 no hook deixava a prévia sem material. Cada pool agora pede a cota **mais** as alternativas, com piso de 14 por categoria. Numa geração de 6 slides (2 pessoas, 1 comida), a galeria saiu de ~16 para **48** fotos.
+- ✅ **O piso de resolução mede ampliação, não largura bruta** — exigir 1080×1350 literais reprovava o formato mais comum do acervo por causa de 56px: `1024×1536` é o tamanho nº 1 do Pinterest e cobre o slide com **1,055×** de ampliação, que não se vê. O piso agora é o fator de `cover` (`_MAX_UPSCALE = 1,10`), e o pool usável saltou de **40 para 71** dos mesmos 120 pins. Acima da tolerância a foto continua recusada — o ponto do piso nunca foi a medida, foi não deixar origem pequena virar PNG borrado.
+- 🐛 **A busca não achava nada e o mock fingia que sim** — no log de produção, `query='lifestyle cozy #aesthetic #praia #vibe bellebres girly aesthetic lifestyle travel interior workspace'` devolvia **0 imagens**. Três defeitos somados: o `#` e o `@perfil` iam crus para um banco de imagens que não conhece nenhum dos dois; termos repetidos (`lifestyle` e `aesthetic` chegavam duas vezes, porque o tema e as dicas de casting se sobrepõem) gastavam vagas; e nada tentava uma busca mais curta. Pior, **0 resultado cai no mock — e o mock é determinístico por query** (`hash(query)` escolhe a paleta), então a mesma hashtag passava a devolver os mesmos gradientes para sempre: o "cache forçado" que se via na tela. Agora a query é normalizada e reduzida em três degraus até achar algo, e quando nem assim acha, a prévia diz o motivo em vez de entregar gradiente mudo.
+- 🐛 **A reentrada de página do Unsplash repetia a mesma página** — `((page - 1) % total_pages) + 1` devolve `page` sempre que `total_pages >= page`, então a segunda chamada era idêntica à primeira e gastava cota à toa. Agora a reentrada vai para a página 1, que é a que sempre tem resultado.
+- ✅ **A memória de fotos vale para o Unsplash também** — ela só chegava ao `pinterest_scrape`, e o Unsplash é quem está ligado em produção. Ele agora pede o dobro de fotos do que o carrossel usa e deixa por último o que já saiu.
+
 - ✅ **Memória do que já saiu** — `instance/recent_media.json` guarda as fotos que **entraram nos slides** (não as alternativas: marcar as ~30 candidatas de cada geração esgotaria a memória em duas rodadas). É preferência, não veto — acervo pequeno continua devolvendo carrossel, só na ordem inversa. A identidade é a URL normalizada, não o `image_id`: o mesmo pin muda de id entre buscas.
 
 ### A mesma hashtag não devolve o mesmo carrossel
@@ -21,11 +26,15 @@ Três camadas, e nenhuma delas sozinha resolvia:
 
 | Camada | O que faz | Por que não bastava sozinha |
 | --- | --- | --- |
-| **Pool de 120** | Triplica o acervo que sobra depois do piso de resolução (11 → 40 pins usáveis). | Sem sorteio, um pool maior devolve os mesmos primeiros N. |
+| **Pool de 120** | Triplica o acervo bruto por query. | Sem sorteio, um pool maior devolve os mesmos primeiros N. |
+| **Piso por ampliação** | Aproveita 71 dos 120 pins em vez de 40. | Um pool grande e um piso que reprova 2/3 dele dá no mesmo pool curto. |
 | **Amostra aleatória** | Sorteia quais pins entram, em vez de deslizar uma janela contígua. | Sorteio sem memória ainda repete por acaso: ~2,8 de 10. |
+| **Query que acha algo** | Normaliza e encurta até a busca devolver fotos. | Query que não acha nada cai no mock, e o mock é determinístico por query — a repetição fica **perfeita**. |
 | **`recent_media.json`** | Manda para o fim do sorteio o que já saiu nos slides anteriores. | Sem pool fundo, a memória satura em uma rodada e vira sorteio puro. |
 
 O arquivo fica no `instance/` (que está no `.gitignore`), como a pessoa fixada — os projetos vivem em memória com TTL e a memória precisa sobreviver ao restart. Apagá-lo zera o histórico e não quebra nada.
+
+Medido ponta a ponta com a query do log de produção (hashtags, `@perfil` e 12 termos), três gerações seguidas de 6 slides: **18 fotos distintas em 18 slots**, zero gradiente mock, e no mínimo 5 alternativas por imagem.
 
 ---
 
@@ -194,16 +203,17 @@ O render faz `cover` da foto num canvas de 1080×1350. Uma foto menor que isso �
 
 O ranking por visão não resolve isso, e é importante entender por quê: o VLM recebe uma thumb de ~474px (é o que mantém o custo de tokens baixo), então a resolução da **origem** não está na imagem que ele julga. Ele pode reprovar foto escura, poluída ou com logo; resolução, não. Por isso o piso é aplicado na **busca**:
 
+**O piso mede a ampliação, não a medida bruta de cada lado** (v0.22). Exigir 1080 de largura literais reprovava `1024×1536` — o tamanho mais comum do acervo do Pinterest — por 56px, sendo que o `cover` o ampliaria em **1,055×**, o que ninguém vê. O que importa é `max(1080/largura, 1350/altura)`: até **1,10×** a foto passa, acima disso não. Medido em 2026-08-23 sobre os mesmos 120 pins de `morning routine aesthetic`, a tolerância leva o pool usável de **40 para 71**; os tamanhos recuperados são justamente `1024×1536` (14 pins) e `1000×1500` (12). Entre 1,05× e 1,10× não existe nada no acervo — o degrau é esse, e ir além dele passaria a aceitar arquivo que chega macio de verdade.
+
 | Ordem de preferência | Quando entra |
 | --- | --- |
-| Retrato **e** cobre 1080×1350 | Sempre que o tema tiver acervo para isso. |
-| Cobre 1080×1350, em qualquer orientação | Foto grande deitada perde metade da cena no recorte; foto pequena estraga a foto inteira. Entre as duas, a grande. |
-| Retrato, em qualquer resolução | Tema sem acervo em alta. |
-| O pool inteiro | Último recurso — foto pequena ainda é melhor que gradiente, e ela aparece na galeria da prévia para você trocar. |
+| Retrato **e** cobre o slide com até 1,10× de ampliação | Sempre que o tema tiver acervo para isso. |
+| Cobre o slide, em qualquer orientação | Foto grande deitada perde metade da cena no recorte; foto pequena estraga a foto inteira. Entre as duas, a grande. |
+| Nada | Acima de 1,10× a fonte devolve menos fotos ou cai no fallback, com o motivo escrito na prévia. O piso não cede. |
 
-Pin sem resolução no payload **não** passa o piso: o pool tem 40 pins e sobra material para exigir prova em vez de dar o benefício da dúvida.
+Pin sem resolução no payload **não** passa o piso: o pool tem 120 pins e sobra material para exigir prova em vez de dar o benefício da dúvida.
 
-O piso é o próprio tamanho do slide (`SLIDE_WIDTH`×`SLIDE_HEIGHT`) — não há variável nova para configurar. O filtro é feito no pool já recebido, e não no parâmetro `min_resolution` da `pinterest-dl`: lá o corte acontece antes da contagem, então a biblioteca **pagina de novo** para fechar os 40 pins, com um `sleep` por página dentro do `POST /generate`. A busca continua sendo uma requisição só. No Unsplash o problema não existe: a `urls.regular` sai com 1080px de largura e a busca já pede `orientation=portrait`.
+O piso é o próprio tamanho do slide (`SLIDE_WIDTH`×`SLIDE_HEIGHT`) — não há variável nova para configurar. O filtro é feito no pool já recebido, e não no parâmetro `min_resolution` da `pinterest-dl`: lá o corte acontece antes da contagem, então a biblioteca pagina mais vezes para fechar a conta, e o corte dela é o literal, sem a tolerância de ampliação. No Unsplash o problema não existe: a `urls.regular` sai com 1080px de largura e a busca já pede `orientation=portrait`.
 
 ---
 
@@ -224,7 +234,7 @@ A API oficial v5 do Pinterest só libera o `/search/pins/` com **Standard Access
 IMAGE_PROVIDER=pinterest_scrape
 ```
 
-Não há chave, cota nem conta. A API interna devolve 50 pins por requisição e a biblioteca pagina sozinha até fechar o número pedido, com um `sleep` de 0,2s entre páginas. O pool é de **120 pins** (três requisições, ~4,8s medidos contra ~3,0s de uma só) porque o piso de resolução é estrito e come a maior parte deles: medido em 2026-08-22 na query `morning routine aesthetic`, **11 de 40** pins cobriam 1080×1350 — e **40 de 120**.
+Não há chave, cota nem conta. A API interna devolve 50 pins por requisição e a biblioteca pagina sozinha até fechar o número pedido, com um `sleep` de 0,2s entre páginas. O pool é de **120 pins** (três requisições, ~4,8s medidos contra ~3,0s de uma só) porque o piso de resolução é estrito e come a maior parte deles: medido em 2026-08-22 na query `morning routine aesthetic`, **11 de 40** pins passavam o piso — contra **71 de 120** com o pool fundo e o piso por ampliação da v0.22.
 
 Do pool de 120 pins, o recorte aplica três correções — duas delas pelos mesmos motivos que já valiam para o Unsplash:
 

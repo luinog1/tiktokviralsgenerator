@@ -71,9 +71,9 @@ class GenerationService:
     # só o que entra no carrossel deixava a prévia sem troca real, que era o
     # sintoma de "as imagens estão escassas". Nem toda foto da query de retrato
     # traz alguém em cena, então o piso é maior que o mínimo da galeria.
-    HOOK_POOL_SIZE = 12
-    FOOD_POOL_SIZE = 12
-    SCENE_POOL_SIZE = 12
+    HOOK_POOL_SIZE = 14
+    FOOD_POOL_SIZE = 14
+    SCENE_POOL_SIZE = 14
     FOOD_QUERY_HINTS = "food meal smoothie fruit breakfast healthy dish beverage"
 
     def __init__(

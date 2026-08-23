@@ -143,10 +143,22 @@ Unsplash pede ao CDN a imagem já em 1080×1350, `fit=crop`, qualidade 85.
 
 Também sem variável nova. A busca no Pinterest pede **120 pins por query** (a
 biblioteca pagina sozinha; ~4,8s contra ~3,0s dos 40 anteriores) porque o piso
-de resolução acima consome a maior parte deles — com 40 pins sobravam 11 acima
-de 1080×1350, e sobre 11 não há sorteio possível: a mesma hashtag devolvia o
-mesmo carrossel. O sorteio agora é uma amostra do pool inteiro, e cada imagem
-do carrossel oferece no mínimo 5 alternativas na galeria da prévia.
+de resolução acima consome a maior parte deles. O piso agora mede a **ampliação
+que o `cover` faria**, não a largura bruta: até 1,10× a foto passa, o que
+recupera `1024×1536` e `1000×1500` — os dois tamanhos mais comuns do Pinterest,
+que eram reprovados por 56px e não têm ampliação visível. Somados, os dois
+levam o pool usável de 11 (com 40 pins e piso literal) para **71**. O sorteio é
+uma amostra do pool inteiro, e cada imagem do carrossel oferece no mínimo **5
+alternativas além da que já recebeu**.
+
+**Se o carrossel sai com gradientes coloridos, é isto:** uma query longa demais
+devolve zero resultados, e zero cai no mock — que é determinístico por query, ou
+seja, a mesma hashtag passa a devolver os mesmos gradientes para sempre. Nos
+logs procure por `retornou 0 imagens`. O app agora normaliza a query (tira `#` e
+`@perfil`, remove termos repetidos) e a encurta em três degraus antes de
+desistir; quando desiste, o motivo aparece na prévia. Ainda assim, **tema e
+palavras-chave curtos rendem muito mais fotos** — `@perfil` só ajuda no
+Instagram, e hashtag não é um termo que banco de imagens entenda.
 
 O disco entra nisso: as fotos que já foram para os slides ficam em
 `instance/recent_media.json` para a geração seguinte sorteá-las por último. No

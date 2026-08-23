@@ -77,6 +77,92 @@ def _http_reason(api: str, response: requests.Response) -> str:
     return f"{api} respondeu HTTP {code}."
 
 
+# `@perfil` é alvo do Instagram (a Apify sabe o que fazer com ele) e o `#` de
+# uma hashtag vira token desconhecido em qualquer banco de imagens. Os dois
+# chegam aqui porque o mesmo texto do formulário alimenta as três fontes.
+_HANDLE_RE = re.compile(r"(?<!\w)@[\w.]+")
+_HASHTAG_RE = re.compile(r"#(\w+)")
+
+
+def _plain_terms(query: str) -> list[str]:
+    """Os termos da query como uma busca por palavra-chave os entende.
+
+    Tira `@perfil`, desembrulha `#hashtag` para a palavra e remove repetição —
+    o mesmo termo costuma chegar duas vezes porque o tema e as dicas de casting
+    se sobrepõem ("lifestyle cozy … aesthetic lifestyle travel" tinha
+    *lifestyle* e *aesthetic* duplicados no log de produção). Termo repetido não
+    melhora a relevância e ainda gasta uma das poucas vagas que uma busca por
+    palavra-chave aguenta antes de não devolver nada.
+    """
+    cleaned = _HASHTAG_RE.sub(r"\1", _HANDLE_RE.sub(" ", str(query or "")))
+    seen: set[str] = set()
+    terms: list[str] = []
+    for word in cleaned.split():
+        key = "".join(
+            char
+            for char in unicodedata.normalize("NFKD", word.casefold())
+            if not unicodedata.combining(char)
+        ).strip("#@.,;:!?\"'()[]")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        terms.append(word)
+    return terms
+
+
+# Quantos termos das dicas de casting preservar quando a query é encurtada. As
+# dicas ficam sempre no FIM da query (`"{tema} {hook_query_hints}"`), e são elas
+# que fazem a foto de pessoa aparecer — cortar só a cauda salvaria o tema e
+# perderia o casting. Quatro é o tamanho de `_hook_hints`: "woman portrait
+# lifestyle aesthetic".
+_HINT_TAIL = 4
+
+
+def _query_attempts(query: str) -> list[str]:
+    """A mesma busca, da mais específica para a mais genérica.
+
+    Uma busca por palavra-chave devolve **zero** quando a query tem termos
+    demais, e zero aqui significa cair no mock — cujos gradientes são
+    deterministas por query, o que do lado de quem gera parece cache forçado.
+    Medido em produção: `lifestyle cozy #aesthetic #praia #vibe bellebres girly
+    aesthetic lifestyle travel interior workspace` não achava nada, enquanto
+    `bellebres` sozinho acha pins no site.
+
+    A redução do meio é o passo intermediário: mantém o tema (que o usuário
+    reconhece no resultado) e as dicas do fim (que fazem o casting funcionar).
+    O último passo é só o tema — se nem ele achar nada, não havia o que achar.
+    """
+    terms = _plain_terms(query)
+    if not terms:
+        return []
+    attempts = [terms]
+    if len(terms) > 6:
+        tail = min(_HINT_TAIL, 6 // 2)
+        attempts.append(terms[: 6 - tail] + terms[len(terms) - tail :])
+    if len(terms) > 3:
+        attempts.append(terms[:3])
+    return [" ".join(attempt) for attempt in attempts]
+
+
+def _prefer_unseen(
+    images: list["PinterestImage"], avoid: Iterable[str], limit: int
+) -> list["PinterestImage"]:
+    """As `limit` primeiras, com o que já saiu em carrosséis recentes no fim.
+
+    É o equivalente do `avoid` de `_cut_pool` para as fontes que devolvem
+    `PinterestImage` já montada. Preferência, não veto: acervo pequeno continua
+    devolvendo carrossel, só na ordem inversa.
+    """
+    seen = frozenset(avoid)
+    if not seen:
+        return images[:limit]
+    fresh, stale = [], []
+    for image in images:
+        identity = media_identity(image.image_url)
+        (stale if identity and identity in seen else fresh).append(image)
+    return (fresh + stale)[:limit]
+
+
 
 @dataclass
 class PinterestImage:
@@ -189,10 +275,13 @@ class UnsplashClient:
         access_key: str,
         timeout: int = 20,
         target_size: tuple[int, int] = (1080, 1350),
+        avoid_media: Iterable[str] = (),
     ):
         self._access_key = access_key
         self._timeout = timeout
         self._target_size = target_size
+        # O que já saiu em carrosséis recentes — fica por último na escolha.
+        self._avoid_media = frozenset(avoid_media)
         # Por que a última busca caiu no mock. Vazio = não caiu.
         self.last_fallback_reason = ""
 
@@ -228,17 +317,11 @@ class UnsplashClient:
                 "O Unsplash está sem UNSPLASH_ACCESS_KEY configurada."
             )
             return MockPinterestClient().search(query, limit)
-        per_page = min(limit, 30)
-        page = random.randint(1, self._PAGE_WINDOW)
+        # Pedir mais do que entra no carrossel é o que dá material para a
+        # galeria da prévia e para deixar por último o que já foi usado.
+        per_page = max(1, min(limit * 2, 30))
         try:
-            payload = self._request(query, per_page, page)
-            results = payload.get("results") or []
-            total_pages = int(payload.get("total_pages") or 0)
-            # A página sorteada pode cair além do fim do catálogo desta query.
-            if not results and total_pages:
-                page = ((page - 1) % total_pages) + 1
-                payload = self._request(query, per_page, page)
-                results = payload.get("results") or []
+            results, page = self._results_for(query, per_page)
         except requests.Timeout:
             logger.warning("Unsplash timeout — usando fallback mock.")
             self.last_fallback_reason = (
@@ -249,6 +332,22 @@ class UnsplashClient:
             logger.warning("Unsplash erro: %s — usando fallback mock.", type(exc).__name__)
             self.last_fallback_reason = self.last_fallback_reason or (
                 f"Falha de rede ao chamar o Unsplash ({type(exc).__name__})."
+            )
+            return MockPinterestClient().search(query, limit)
+
+        if not results:
+            # Sem isto o caminho seguinte é o mock — e o mock é DETERMINÍSTICO
+            # por query (`hash(query)` escolhe a paleta), então uma query que
+            # não acha nada devolve os mesmos gradientes para sempre. É o que
+            # parece cache forçado do lado de quem gera duas vezes.
+            self.last_fallback_reason = (
+                "O Unsplash não tem fotos para esta busca. Termos demais ou "
+                "muito específicos (hashtags, nome de perfil) devolvem zero — "
+                "tente um tema mais curto."
+            )
+            logger.warning(
+                "Unsplash retornou 0 imagens para query=%r mesmo após encurtar.",
+                query[:120],
             )
             return MockPinterestClient().search(query, limit)
 
@@ -272,11 +371,44 @@ class UnsplashClient:
                     f"(@{user.get('username', 'unsplash')}) no Unsplash"
                 ),
             ))
+        chosen = _prefer_unseen(images, self._avoid_media, limit)
         logger.info(
-            "Unsplash retornou %d imagens para query=%r (página %d)",
-            len(images), query[:80], page,
+            "Unsplash retornou %d imagens para query=%r (página %d, pool de %d)",
+            len(chosen), query[:80], page, len(images),
         )
-        return images[:limit]
+        return chosen
+
+    def _results_for(self, query: str, per_page: int) -> tuple[list[Any], int]:
+        """Resultados da busca, encurtando a query enquanto ela vier vazia.
+
+        O Unsplash devolve **zero** quando a query tem termos demais — medido em
+        produção com `lifestyle cozy #aesthetic #praia #vibe bellebres girly
+        aesthetic lifestyle travel interior workspace`. Os degraus vêm de
+        `_query_attempts`, que reduz pelo meio para preservar as duas pontas.
+
+        A página é sorteada de novo a cada degrau: uma query diferente tem um
+        catálogo diferente, e reaproveitar o número da tentativa anterior só
+        aumentaria a chance de cair fora do fim dele.
+        """
+        for attempt, texto in enumerate(_query_attempts(query)):
+            page = random.randint(1, self._PAGE_WINDOW)
+            payload = self._request(texto, per_page, page)
+            results = payload.get("results") or []
+            if not results and int(payload.get("total_pages") or 0):
+                # A página sorteada caiu além do fim do catálogo desta query.
+                # Voltar para a 1 é o que sempre tem resultado; a aritmética
+                # antiga (`(page-1) % total_pages + 1`) repetia a MESMA página
+                # sempre que `total_pages >= page`, gastando a chamada à toa.
+                page = 1
+                results = self._request(texto, per_page, page).get("results") or []
+            if results:
+                if attempt:
+                    logger.info(
+                        "Unsplash: query encurtada para %r depois de 0 resultados.",
+                        texto,
+                    )
+                return results, page
+        return [], 0
 
 
 def _sized_unsplash_url(url: str, target_size: tuple[int, int]) -> str:
@@ -362,6 +494,15 @@ def pinterest_scrape_available() -> bool:
         return False
 
 
+# Quanto o render pode ampliar uma foto antes de o resultado deixar de ser
+# aceitável. 1,10× é o degrau que importa no acervo do Pinterest: `1024×1536` e
+# `1000×1500`, os dois tamanhos mais comuns, precisam de 1,055× e 1,08× para
+# cobrir 1080×1350 — ampliação que não se vê. Entre 1,05 e 1,10 não há nada, e
+# acima de 1,10 o ganho de pool vem de arquivos que já chegam macios (medido em
+# 2026-08-23: 40 pins usáveis com 1,00×, 69 com 1,10×, 71 com 1,15×).
+_MAX_UPSCALE = 1.10
+
+
 def _is_portrait(media: Any) -> bool:
     """A foto é em pé? Resolução ausente ou zerada conta como "não sei"."""
     width, height = _resolution(media)
@@ -378,7 +519,7 @@ def _resolution(media: Any) -> tuple[int, int]:
 
 
 def _covers_slide(media: Any, minimum: tuple[int, int]) -> bool:
-    """A foto tem pixel suficiente para preencher o slide sem ser ampliada?
+    """A foto tem pixel suficiente para preencher o slide sem borrar?
 
     O render faz `cover` da foto no canvas de 1080×1350: um pin de 474×711 é
     esticado para caber e chega ao feed borrado, com a legenda nítida por cima —
@@ -386,14 +527,31 @@ def _covers_slide(media: Any, minimum: tuple[int, int]) -> bool:
     ele julga uma thumb de 474px: a resolução da origem não está na imagem que
     ele vê. Por isso o piso é aplicado aqui, na busca, e não no ranking.
 
-    Medida ausente conta como reprovada: o pool tem 40 pins e sobra material
+    O piso é o **fator de ampliação**, não a medida bruta de cada lado. Exigir
+    1080×1350 literais reprovava o formato mais comum do Pinterest por causa de
+    56px de largura: medido em 2026-08-23, `1024×1536` é o tamanho nº 1 do
+    acervo e precisa de 1,055× para cobrir o slide — ampliação invisível, e o
+    corte antigo jogava fora 14 pins de 120 só nesse tamanho, mais 12 em
+    `1000×1500`. Com a tolerância de `_MAX_UPSCALE`, o pool usável sobe de
+    **40 para 69** dos mesmos 120 pins. Acima dela a foto ainda é recusada: o
+    ponto do piso continua sendo não deixar origem pequena virar PNG borrado.
+
+    Medida ausente conta como reprovada: o pool tem 120 pins e sobra material
     para exigir prova em vez de dar o benefício da dúvida.
     """
     min_width, min_height = minimum
     if min_width <= 0 and min_height <= 0:
         return True
     width, height = _resolution(media)
-    return width >= min_width and height >= min_height
+    if width <= 0 or height <= 0:
+        return False
+    return _cover_upscale(width, height, minimum) <= _MAX_UPSCALE
+
+
+def _cover_upscale(width: int, height: int, minimum: tuple[int, int]) -> float:
+    """Quanto o render precisaria ampliar esta foto para cobrir o slide."""
+    min_width, min_height = minimum
+    return max(min_width / width, min_height / height)
 
 
 def _cut_pool(
@@ -502,11 +660,7 @@ class PinterestScrapeClient:
             return MockPinterestClient().search(query, limit)
 
         try:
-            medias = pinterest_dl.with_api(timeout=self._timeout).search(
-                query,
-                num=self._POOL_SIZE,
-                min_resolution=(0, 0),
-            )
+            medias = self._pins_for(pinterest_dl, query)
         except Exception as exc:
             # A API interna não tem contrato publicado: erro de rede, mudança
             # de payload e bloqueio chegam aqui como exceções diferentes. Todas
@@ -522,9 +676,11 @@ class PinterestScrapeClient:
 
         medias = [m for m in medias if str(getattr(m, "src", "") or "")]
         if not medias:
-            logger.info("Pinterest (scraping) sem resultados para query=%r.", query[:80])
+            logger.info("Pinterest (scraping) sem resultados para query=%r.", query[:120])
             self.last_fallback_reason = (
-                "A busca sem token no Pinterest não retornou pins."
+                "A busca sem token no Pinterest não retornou pins nem com a "
+                "query encurtada. Termos demais no tema e nas palavras-chave "
+                "derrubam a relevância a zero."
             )
             return MockPinterestClient().search(query, limit)
 
@@ -544,6 +700,26 @@ class PinterestScrapeClient:
             self._min_resolution[0], self._min_resolution[1],
         )
         return [self._to_image(media, query) for media in selected]
+
+    def _pins_for(self, pinterest_dl: Any, query: str) -> list[Any]:
+        """Os pins da busca, encurtando a query enquanto ela vier vazia.
+
+        Uma busca por palavra-chave devolve zero quando a query é longa demais,
+        e aí o carrossel cai no mock — cujos gradientes são deterministas por
+        query, o que parece cache forçado. Uma busca por `bellebres` acha pins
+        no site e não achava nada aqui só por causa da companhia. Os degraus
+        vêm de `_query_attempts`.
+        """
+        scraper = pinterest_dl.with_api(timeout=self._timeout)
+        for attempt, texto in enumerate(_query_attempts(query)):
+            medias = scraper.search(texto, num=self._POOL_SIZE, min_resolution=(0, 0))
+            if medias:
+                if attempt:
+                    logger.info(
+                        "Pinterest: query encurtada para %r depois de 0 pins.", texto
+                    )
+                return list(medias)
+        return []
 
     def related(self, pin_url: str, limit: int = 8) -> list[PinterestImage]:
         """Pins relacionados a um pin — o "mais como este" do Pinterest.
@@ -1656,6 +1832,7 @@ def build_pinterest_client(
                     unsplash_key,
                     timeout=settings.request_timeout_seconds,
                     target_size=(settings.slide_width, settings.slide_height),
+                    avoid_media=avoid_media,
                 ),
                 _pinterest_scrape_client(settings, avoid_media),
             ],
@@ -1667,6 +1844,7 @@ def build_pinterest_client(
                 unsplash_key,
                 timeout=settings.request_timeout_seconds,
                 target_size=(settings.slide_width, settings.slide_height),
+                avoid_media=avoid_media,
             )
         logger.warning("IMAGE_PROVIDER=unsplash sem UNSPLASH_ACCESS_KEY.")
 
@@ -1676,6 +1854,7 @@ def build_pinterest_client(
             access_key=unsplash_key,
             timeout=settings.request_timeout_seconds,
             target_size=(settings.slide_width, settings.slide_height),
+            avoid_media=avoid_media,
         )
 
     logger.info("Nenhuma chave de imagens configurada — usando cliente mock.")

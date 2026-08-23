@@ -703,3 +703,97 @@ def test_the_token_budget_grows_with_the_number_of_slides(monkeypatch):
     small, large = budgets
     assert large > small
     assert large >= 12 * 90
+
+
+def test_unsplash_shortens_the_query_when_it_finds_nothing(monkeypatch):
+    """Medido em produção: `lifestyle cozy #aesthetic #praia #vibe bellebres
+    girly aesthetic lifestyle travel interior workspace` devolvia 0 imagens. E
+    0 imagens cai no mock, que é DETERMINÍSTICO por query — a mesma hashtag
+    passava a devolver os mesmos gradientes para sempre."""
+    from app.adapters.pinterest_client import UnsplashClient, is_mock_image
+
+    queries: list[str] = []
+
+    def _only_short_queries_work(*args, **kwargs):
+        query = kwargs["params"]["query"]
+        queries.append(query)
+        if len(query.split()) > 6:
+            return _FakeResponse(200, {"total": 0, "total_pages": 0, "results": []})
+        return _FakeResponse(200, _unsplash_payload("achou"))
+
+    monkeypatch.setattr(
+        "app.adapters.pinterest_client.requests.get", _only_short_queries_work
+    )
+
+    images = UnsplashClient(access_key="chave-boa").search(
+        "lifestyle cozy #aesthetic #praia #vibe bellebres girly "
+        "aesthetic lifestyle travel interior workspace",
+        limit=6,
+    )
+
+    assert len(images) == 1
+    assert not is_mock_image(images[0])
+    assert "#" not in queries[0] and "praia" in queries[0]
+    assert len(queries[-1].split()) <= 6
+
+
+def test_unsplash_says_why_when_even_the_short_query_finds_nothing(monkeypatch):
+    """O motivo tem que chegar à prévia: gradiente sem explicação é o que faz
+    parecer que o app cacheou o resultado."""
+    from app.adapters.pinterest_client import UnsplashClient, is_mock_image
+
+    monkeypatch.setattr(
+        "app.adapters.pinterest_client.requests.get",
+        lambda *a, **k: _FakeResponse(200, {"total": 0, "total_pages": 0, "results": []}),
+    )
+
+    client = UnsplashClient(access_key="chave-boa")
+    images = client.search("termo que nao existe em lugar nenhum", limit=4)
+
+    assert all(is_mock_image(img) for img in images)
+    assert "não tem fotos" in client.last_fallback_reason
+
+
+def test_unsplash_leaves_recently_used_photos_for_last(monkeypatch):
+    """A fonte ativa em produção é o Unsplash — sem isto a memória de fotos só
+    valeria para quem usa pinterest_scrape."""
+    from app.adapters.pinterest_client import UnsplashClient, media_identity
+
+    payload = {"total": 3, "total_pages": 1, "results": [
+        {
+            "id": f"foto-{i}",
+            "urls": {"regular": f"https://images.unsplash.com/photo-{i}.jpg"},
+            "links": {"html": f"https://unsplash.com/photos/foto-{i}"},
+            "alt_description": "cafe",
+            "user": {"name": "A", "username": "a"},
+        }
+        for i in range(3)
+    ]}
+    monkeypatch.setattr(
+        "app.adapters.pinterest_client.requests.get",
+        lambda *a, **k: _FakeResponse(200, payload),
+    )
+
+    ja_usadas = [media_identity("https://images.unsplash.com/photo-0.jpg")]
+    images = UnsplashClient(access_key="chave-boa", avoid_media=ja_usadas).search(
+        "cafe", limit=2
+    )
+
+    assert [img.image_id for img in images] == ["foto-1", "foto-2"]
+
+
+def test_unsplash_asks_for_more_photos_than_the_carousel_uses(monkeypatch):
+    """A galeria da prévia precisa de alternativas, e a memória precisa de
+    folga para ter o que preferir."""
+    from app.adapters.pinterest_client import UnsplashClient
+
+    per_pages: list[int] = []
+
+    def _capture(*args, **kwargs):
+        per_pages.append(kwargs["params"]["per_page"])
+        return _FakeResponse(200, _unsplash_payload())
+
+    monkeypatch.setattr("app.adapters.pinterest_client.requests.get", _capture)
+    UnsplashClient(access_key="chave-boa").search("cafe", limit=6)
+
+    assert per_pages[0] == 12

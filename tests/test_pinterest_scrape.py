@@ -14,6 +14,8 @@ from app.adapters.pinterest_client import (
     PinterestScrapeClient,
     UnsplashClient,
     _pinimg_thumb,
+    _covers_slide,
+    _query_attempts,
     build_pinterest_client,
     is_mock_image,
     media_identity,
@@ -591,3 +593,114 @@ def test_an_impossible_choice_falls_back_down_the_ladder(monkeypatch):
     settings = Settings.from_env({"IMAGE_PROVIDER": "unsplash"})
 
     assert isinstance(build_pinterest_client(settings), MockPinterestClient)
+
+
+# ---------- piso de resolução por fator de ampliação ----------
+
+
+class _Res:
+    """Só o `.resolution` que o piso lê."""
+
+    def __init__(self, w, h):
+        self.resolution = (w, h)
+
+
+def test_the_floor_measures_upscaling_not_raw_width():
+    """`1024×1536` é o tamanho nº 1 do acervo do Pinterest e cobre o slide com
+    1,055× de ampliação — invisível. O piso literal reprovava por 56px."""
+    assert _covers_slide(_Res(1024, 1536), (1080, 1350))
+    assert _covers_slide(_Res(1000, 1500), (1080, 1350))
+    assert _covers_slide(_Res(1080, 1350), (1080, 1350))
+
+
+def test_the_floor_still_rejects_what_would_arrive_blurry():
+    """A tolerância é para ampliação que não se vê, não para relaxar o piso:
+    736×981 precisaria de 1,38× e chega borrado ao feed."""
+    assert not _covers_slide(_Res(736, 981), (1080, 1350))
+    assert not _covers_slide(_Res(474, 711), (1080, 1350))
+    assert not _covers_slide(_Res(0, 0), (1080, 1350))
+
+
+def test_a_wide_photo_is_rejected_by_the_height_it_lacks():
+    """O slide é 4:5: uma foto deitada larguíssima não cobre a altura."""
+    assert not _covers_slide(_Res(4000, 500), (1080, 1350))
+
+
+def test_no_floor_configured_accepts_anything():
+    assert _covers_slide(_Res(10, 10), (0, 0))
+
+
+# ---------- a query que não achava nada ----------
+
+
+def test_hashtags_and_profile_handles_leave_the_keyword_search():
+    """`#praia` vira token desconhecido e `@perfil` é alvo do Instagram — os
+    dois chegam aqui porque o mesmo formulário alimenta as três fontes."""
+    attempts = _query_attempts("praia #verao @bellebres sol")
+
+    assert attempts[0] == "praia verao sol"
+
+
+def test_a_repeated_term_does_not_take_two_slots():
+    """O tema e as dicas de casting se sobrepõem: `lifestyle` e `aesthetic`
+    chegavam duas vezes no log de produção."""
+    attempts = _query_attempts("lifestyle cozy aesthetic aesthetic lifestyle travel")
+
+    assert attempts[0] == "lifestyle cozy aesthetic travel"
+
+
+def test_the_shortened_query_keeps_the_theme_and_the_casting_hints():
+    """Encurtar pela cauda salvaria o tema e perderia `woman portrait`, que é o
+    que faz a foto de pessoa aparecer no hook."""
+    query = (
+        "lifestyle cozy praia vibe bellebres girly moda verao "
+        "woman portrait lifestyle aesthetic"
+    )
+
+    attempts = _query_attempts(query)
+
+    assert len(attempts) == 3
+    assert attempts[0].startswith("lifestyle cozy")
+    assert "woman portrait" in attempts[1]
+    assert attempts[1].startswith("lifestyle cozy")
+    assert attempts[2] == "lifestyle cozy praia"
+
+
+def test_a_short_query_is_not_shortened():
+    assert _query_attempts("rotina matinal") == ["rotina matinal"]
+
+
+def test_an_empty_query_has_nothing_to_try():
+    assert _query_attempts("  @so  #  ") == []
+
+
+def test_the_search_retries_shorter_when_the_first_try_finds_nothing(install_fake):
+    """Zero pins cai no mock, e o mock é determinístico por query: a mesma
+    hashtag devolveria os mesmos gradientes para sempre."""
+    calls: list[dict] = []
+    medias = _media_batch(20)
+
+    class _EmptyUntilShort:
+        @staticmethod
+        def with_api(timeout=10, **kwargs):
+            class _S:
+                def search(self, query, num, min_resolution, **kw):
+                    calls.append(query)
+                    # Só a query mais curta acha alguma coisa.
+                    return list(medias) if len(query.split()) <= 3 else []
+            return _S()
+
+    monkey = _EmptyUntilShort
+    import app.adapters.pinterest_client as mod
+    original = mod._load_pinterest_dl
+    mod._load_pinterest_dl = lambda: monkey
+    try:
+        found = PinterestScrapeClient().search(
+            "lifestyle cozy praia vibe bellebres girly moda verao aesthetic", limit=4
+        )
+    finally:
+        mod._load_pinterest_dl = original
+
+    assert len(calls) == 3
+    assert len(found) == 4
+    assert not any(is_mock_image(img) for img in found)

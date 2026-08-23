@@ -9,6 +9,7 @@ from __future__ import annotations
 from app.adapters.pinterest_client import PinterestImage
 from app.adapters.vision_provider import VisionVerdict
 from app.services.casting import (
+    MIN_IMAGE_ALTERNATIVES,
     MIN_IMAGE_OPTIONS,
     POOL_FOOD,
     POOL_HOOK,
@@ -368,15 +369,18 @@ def test_apply_casting_writes_the_image_id_on_each_slide():
 
 
 # ------------------------------------------------ alternativas da galeria
-def test_every_slide_offers_at_least_five_alternatives():
+def test_every_slide_offers_five_alternatives_beyond_the_one_it_got():
     """A cota limita o que é ESCOLHIDO, não o que pode ser escolhido.
 
     Antes, a galeria de um slide era o pool da categoria dele — e um pool curto
     deixava a troca sem alternativa. Ela era curta na prática justamente quando
     mais importava: com visão ligada, quem o VLM não avaliou tem afinidade 0 em
     todas as categorias e some dos três pools.
+
+    "Cinco alternativas" é cinco **além** da foto que já está no slide: a foto
+    escolhida não é uma opção de troca, então a galeria tem seis.
     """
-    images = [_image(f"cena-{i}", POOL_SCENE) for i in range(6)]
+    images = [_image(f"cena-{i}", POOL_SCENE) for i in range(8)]
     images += [_image("retrato", POOL_HOOK), _image("prato", POOL_FOOD)]
 
     casting = cast_carousel(
@@ -385,9 +389,10 @@ def test_every_slide_offers_at_least_five_alternatives():
 
     assert casting.categories == ["person", "food", "scene"]
     assert casting.image_ids[1] == "prato"
-    for options in casting.image_options:
-        assert len(options) >= MIN_IMAGE_OPTIONS
+    for escolhida, options in zip(casting.image_ids, casting.image_options):
         assert len(set(options)) == len(options)
+        alternativas = [o for o in options if o != escolhida]
+        assert len(alternativas) >= MIN_IMAGE_ALTERNATIVES
 
 
 def test_the_slide_own_category_still_comes_first_in_the_gallery():

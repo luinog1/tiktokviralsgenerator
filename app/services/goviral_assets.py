@@ -18,6 +18,7 @@ import os
 import random
 
 from app.adapters.pinterest_client import PinterestImage
+from app.services.casting import MIN_IMAGE_ALTERNATIVES
 
 # Raiz do repo: app/services/ → app/ → raiz.
 GOVIRAL_ASSETS_DIR = os.path.join(
@@ -28,9 +29,11 @@ GOVIRAL_ASSETS_DIR = os.path.join(
 GOVIRAL_IMAGE_ID_PREFIX = "goviral-"
 GOVIRAL_URL_PREFIX = "/goviral-assets/"
 
-# Quantas alternativas entram na galeria da prévia. A primeira vira o slide;
-# as outras existem para a troca ser um clique, como nas fotos de busca.
-GALLERY_SIZE = 5
+# Quantas fotos entram na galeria da prévia. A primeira vira o slide; as outras
+# existem para a troca ser um clique, como nas fotos de busca — e o número de
+# ALTERNATIVAS é o mesmo das outras imagens do carrossel, senão o slide de fecho
+# seria o único com menos opções que os demais.
+GALLERY_SIZE = MIN_IMAGE_ALTERNATIVES + 1
 
 _IMAGE_EXTENSIONS = {".webp", ".png", ".jpg", ".jpeg"}
 
