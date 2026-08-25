@@ -360,11 +360,22 @@ def test_the_wall_never_blames_the_exit_ip(fake_get):
 
 def test_the_wall_is_not_retried(fake_get):
     """Outro exit não passa por um gate de endpoint, e sem proxy o IP é sempre
-    o mesmo — repetir seria só latência dentro do POST /generate."""
+    o mesmo — repetir a MESMA chamada seria só latência dentro do POST
+    /generate.
+
+    Duas chamadas, não uma: um termo de uma palavra tem dois alvos (o perfil e
+    a hashtag de mesmo nome, ver `_ig_targets`) e alvo diferente não é repetir
+    — é o que salva o caso do `bellebres`, que existe como perfil e não como
+    hashtag. Nenhum dos dois é tentado duas vezes.
+    """
     calls = fake_get([_FakeResponse({}, status_code=302)] * 3)
     client = InstagramScrapeClient()
     images = client.search("rotina", limit=2)
-    assert len(calls) == 1
+    assert len(calls) == 2
+    assert [call["params"] for call in calls] == [
+        {"username": "rotina"},
+        {"tag_name": "rotina"},
+    ]
     assert all(is_mock_image(img) for img in images)
     assert "APIFY_TOKEN" in client.last_fallback_reason
 
@@ -373,7 +384,8 @@ def test_the_rate_limit_falls_back_with_its_own_reason(fake_get):
     calls = fake_get(_FakeResponse({}, status_code=429))
     client = InstagramScrapeClient()
     images = client.search("rotina", limit=2)
-    assert len(calls) == 1
+    # Um alvo por chamada (perfil e hashtag), nenhum repetido.
+    assert len(calls) == 2
     assert all(is_mock_image(img) for img in images)
     assert "429" in client.last_fallback_reason
 
@@ -394,10 +406,19 @@ def test_apify_runs_the_actor_and_maps_the_dataset(fake_post):
     # A hashtag vai por URL direta: `search`+`searchType` fazia o actor buscar
     # a hashtag no GOOGLE e devolver a entidade do resultado (sem post nenhum
     # no dataset) — e casando a hashtag errada ("aesthetic" → #gaesthetic).
+    # As hashtags vão por URL direta: `search`+`searchType` fazia o actor
+    # buscar a hashtag no GOOGLE e devolver a entidade do resultado (sem post
+    # nenhum no dataset) — e casando a hashtag errada ("aesthetic" →
+    # #gaesthetic). Um tema de duas palavras rende a hashtag colada e as duas
+    # soltas, todas no MESMO run: `maxItems` limita a cobrança do run inteiro,
+    # então o segundo alvo só é raspado se o primeiro não fechar a cota.
     assert calls[0]["json"]["directUrls"] == [
-        "https://www.instagram.com/explore/tags/rotinamatinal/"
+        "https://www.instagram.com/explore/tags/rotinamatinal/",
+        "https://www.instagram.com/explore/tags/rotina/",
+        "https://www.instagram.com/explore/tags/matinal/",
     ]
     assert "search" not in calls[0]["json"]
+    assert calls[0]["json"]["addParentData"] is True
     assert calls[0]["json"]["resultsType"] == "posts"
     assert [img.image_id for img in images] == ["ig-314150", "ig-314151"]
     assert images[0].image_url == "https://scontent.cdninstagram.com/apify0.jpg"
@@ -434,7 +455,7 @@ def test_apify_caps_the_billed_items_and_the_run(fake_post):
     client = InstagramScrapeClient(apify_token="a", timeout=20)
     client.search("rotina", limit=4)
     wanted = calls[0]["json"]["resultsLimit"]
-    assert wanted == 12  # max(limit*3, 12)
+    assert wanted == 12  # max(limit*3, 12) — a busca sem cota exata
     assert calls[0]["params"]["maxItems"] == wanted
     assert calls[0]["params"]["limit"] == wanted
     assert calls[0]["params"]["clean"] == "1"
@@ -444,16 +465,27 @@ def test_apify_caps_the_billed_items_and_the_run(fake_post):
     assert calls[0]["params"]["timeout"] < client._timeout
 
 
-def test_apify_exact_search_uses_the_user_quota_everywhere(fake_post):
-    calls = fake_post(_FakeResponse([_apify_item(0), _apify_item(1)]))
-    images = InstagramScrapeClient(apify_token="a").search_exact(
-        "@fulana", limit=2
-    )
+def test_apify_exact_search_keeps_the_user_quota_plus_rotation_slack(fake_post):
+    """A cota do usuário decide quantas fotos ENTRAM; a folga decide que haja o
+    que sortear.
 
+    O pedido exato voltou a ter folga de propósito. O actor devolve os posts
+    mais recentes do alvo, sempre na mesma ordem: pedir exatamente as fotos que
+    vão para os slides é pedir o carrossel anterior de volta, que é a metade
+    Instagram do "sempre o mesmo material". A folga é bem menor que o pool
+    antigo de 3× (piso de 12), que era o que a cota exata tinha vindo cortar.
+    """
+    calls = fake_post(_FakeResponse([_apify_item(0), _apify_item(1)]))
+    client = InstagramScrapeClient(apify_token="a")
+    images = client.search_exact("@fulana", limit=2)
+
+    esperado = 2 + client._ROTATION_SLACK  # noqa: SLF001
+    assert esperado < 12, "a folga não pode voltar ao pool antigo"
+    assert calls[0]["json"]["resultsLimit"] == esperado
+    assert calls[0]["params"]["maxItems"] == esperado
+    assert calls[0]["params"]["limit"] == esperado
+    # O dataset devolveu duas: a cota é o teto do que entra, não um piso.
     assert len(images) == 2
-    assert calls[0]["json"]["resultsLimit"] == 2
-    assert calls[0]["params"]["maxItems"] == 2
-    assert calls[0]["params"]["limit"] == 2
 
 
 def test_apify_reuses_the_same_profile_dataset_between_casting_pools(fake_post):
@@ -964,3 +996,173 @@ def test_scrapedo_token_reaches_the_client_from_the_settings():
     assert build_pinterest_client(
         Settings.from_env({"IMAGE_PROVIDER": "instagram_scrape"})
     )._scrapedo_token == ""
+
+
+# ---------- alvos: o termo pode ser perfil, hashtag, ou os dois ----------
+
+
+def test_a_one_word_term_is_tried_as_a_profile_and_as_a_hashtag():
+    """O caso `bellebres`: o termo é um USUÁRIO do Instagram.
+
+    Buscar essa palavra no site devolve o perfil de mesmo nome e os posts dele;
+    `#bellebres` não existe. O app pedia só a hashtag, recebia nada e caía no
+    gradiente — embora o termo tivesse resultado na plataforma. Perfil primeiro
+    porque é a leitura que casa com uma palavra sem espaço.
+    """
+    from app.adapters.pinterest_client import _ig_targets
+
+    alvos = _ig_targets("bellebres")
+
+    assert [(a.kind, a.value) for a in alvos] == [
+        ("profile", "bellebres"),
+        ("tag", "bellebres"),
+    ]
+
+
+def test_a_theme_with_spaces_is_not_a_handle():
+    """Tema de várias palavras vira a hashtag colada e as palavras soltas —
+    perfil não entra, porque handle não tem espaço."""
+    from app.adapters.pinterest_client import _ig_targets
+
+    alvos = _ig_targets("rotina matinal")
+
+    assert all(a.kind == "tag" for a in alvos)
+    assert [a.value for a in alvos] == ["rotinamatinal", "rotina", "matinal"]
+
+
+def test_an_explicit_choice_is_the_only_target():
+    """Quem escreveu `@perfil` ou `#hashtag` disse qual alvo quer: adivinhar
+    outro só gastaria item pago da Apify."""
+    from app.adapters.pinterest_client import _ig_targets
+
+    assert [(a.kind, a.value) for a in _ig_targets("fotos de @fulana")] == [
+        ("profile", "fulana")
+    ]
+    assert [(a.kind, a.value) for a in _ig_targets("rotina #morningroutine")] == [
+        ("tag", "morningroutine")
+    ]
+
+
+def test_the_casting_hints_do_not_become_targets():
+    from app.adapters.pinterest_client import _ig_targets
+
+    alvos = _ig_targets(
+        "rotina woman portrait", hint_words=["woman", "portrait"]
+    )
+
+    assert [(a.kind, a.value) for a in alvos] == [
+        ("profile", "rotina"),
+        ("tag", "rotina"),
+    ]
+
+
+def test_the_number_of_targets_is_capped():
+    """Cada alvo é uma URL a mais no run da Apify, e item de actor é pago."""
+    from app.adapters.pinterest_client import _IG_MAX_TARGETS, _ig_targets
+
+    alvos = _ig_targets("cinco palavras diferentes no tema aqui")
+
+    assert len(alvos) <= _IG_MAX_TARGETS
+
+
+def test_a_term_that_is_only_a_profile_still_fills_the_carousel(fake_get):
+    """A ponta a ponta do `bellebres` sem token: a hashtag não existe, o perfil
+    existe, e o carrossel sai com fotos reais em vez de gradiente."""
+    perfil = {
+        "data": {
+            "user": {
+                "edge_owner_to_timeline_media": {
+                    "edges": [
+                        {
+                            "node": {
+                                "id": f"90{i}",
+                                "shortcode": f"Cx{i}",
+                                "display_url": f"https://scontent.cdninstagram.com/b{i}.jpg",
+                                "dimensions": {"width": 1080, "height": 1350},
+                                "accessibility_caption": "May be an image of 1 person",
+                                "owner": {"username": "bellebres"},
+                            }
+                        }
+                        for i in range(6)
+                    ]
+                }
+            }
+        }
+    }
+    fake_get(_FakeResponse(perfil))
+    client = InstagramScrapeClient(min_resolution=(1080, 1350))
+
+    images = client.search("bellebres", limit=3)
+
+    assert len(images) == 3
+    assert not any(is_mock_image(img) for img in images)
+    assert all("bellebres" in img.attribution_text for img in images)
+    assert client.last_fallback_reason == ""
+
+
+def test_a_dead_first_target_does_not_end_the_search(fake_get):
+    """404 no perfil é "esse alvo não existe", não "a busca falhou": a hashtag
+    de mesmo nome ainda pode responder."""
+    fake_get([
+        _FakeResponse({}, status_code=404),
+        _FakeResponse(_tag_payload([_v1_media(i) for i in range(4)])),
+    ])
+    client = InstagramScrapeClient(min_resolution=(1080, 1350))
+
+    images = client.search("skincare", limit=2)
+
+    assert len(images) == 2
+    assert not any(is_mock_image(img) for img in images)
+
+
+def test_the_reason_says_both_readings_were_tried(fake_get):
+    fake_get(_FakeResponse({}, status_code=404))
+    client = InstagramScrapeClient()
+
+    client.search("termoinexistente", limit=2)
+
+    assert "perfil" in client.last_fallback_reason
+    assert "hashtag" in client.last_fallback_reason
+    assert "404" in client.last_fallback_reason
+
+
+# ---------- rotação: a mesma hashtag não devolve o mesmo carrossel ----------
+
+
+def test_photos_from_recent_carousels_go_to_the_end_of_the_draw(fake_post):
+    """O Instagram não tinha a memória do que já saiu, e era metade do "sempre
+    as mesmas fotos": o dataset da Apify vem sempre na mesma ordem, então sem
+    memória nem sorteio a mesma hashtag rendia o mesmo carrossel."""
+    from app.adapters.pinterest_client import media_identity
+
+    itens = [_apify_item(i) for i in range(10)]
+    fake_post(_FakeResponse(itens))
+    ja_usadas = [
+        media_identity(f"https://scontent.cdninstagram.com/apify{i}.jpg")
+        for i in range(8)
+    ]
+
+    client = InstagramScrapeClient(apify_token="a", avoid_media=ja_usadas)
+    images = client.search("rotina matinal", limit=2)
+
+    assert {img.image_url for img in images} == {
+        "https://scontent.cdninstagram.com/apify8.jpg",
+        "https://scontent.cdninstagram.com/apify9.jpg",
+    }
+
+
+def test_an_exhausted_memory_still_returns_a_carousel(fake_post):
+    """Acervo inteiro já usado não pode devolver carrossel vazio — a memória é
+    preferência, não veto."""
+    from app.adapters.pinterest_client import media_identity
+
+    itens = [_apify_item(i) for i in range(6)]
+    fake_post(_FakeResponse(itens))
+    todas = [
+        media_identity(f"https://scontent.cdninstagram.com/apify{i}.jpg")
+        for i in range(6)
+    ]
+
+    client = InstagramScrapeClient(apify_token="a", avoid_media=todas)
+
+    assert len(client.search("rotina matinal", limit=3)) == 3

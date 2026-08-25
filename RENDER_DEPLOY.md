@@ -117,9 +117,11 @@ palavras-chave.
 
 Para um perfil específico, escreva `@usuario` no tema ou nas palavras-chave. O
 handle é enviado à Apify, mas removido da query do Pinterest. A Apify recebe a
-cota escolhida em `resultsLimit`, `maxItems` e `limit`; portanto, escolher uma
-foto não dispara mais o pool mínimo antigo de 12 itens pagos. O mesmo dataset é
-reutilizado entre hook e cenário, evitando dois runs iguais para o mesmo perfil.
+cota escolhida **mais 8 itens de folga** em `resultsLimit`, `maxItems` e
+`limit` — a folga é o que dá material para o sorteio não devolver o mesmo
+carrossel, já que o dataset do actor vem sempre na mesma ordem. Ainda é menos
+que o pool mínimo antigo de 12 itens pagos. O mesmo dataset é reutilizado entre
+hook e cenário, evitando dois runs iguais para o mesmo perfil.
 
 ### Cotas de pessoas, comida e alta resolução
 
@@ -141,15 +143,53 @@ Unsplash pede ao CDN a imagem já em 1080×1350, `fit=crop`, qualidade 85.
 
 ### Repetição entre gerações e alternativas por imagem
 
-Também sem variável nova. A busca no Pinterest pede **120 pins por query** (a
-biblioteca pagina sozinha; ~4,8s contra ~3,0s dos 40 anteriores) porque o piso
-de resolução acima consome a maior parte deles. O piso agora mede a **ampliação
-que o `cover` faria**, não a largura bruta: até 1,10× a foto passa, o que
-recupera `1024×1536` e `1000×1500` — os dois tamanhos mais comuns do Pinterest,
-que eram reprovados por 56px e não têm ampliação visível. Somados, os dois
-levam o pool usável de 11 (com 40 pins e piso literal) para **71**. O sorteio é
-uma amostra do pool inteiro, e cada imagem do carrossel oferece no mínimo **5
-alternativas além da que já recebeu**.
+Também sem variável nova.
+
+**A busca é determinística, e essa é a causa.** Medido em 2026-08-24, a mesma
+query devolve os mesmos 50 pins na mesma ordem em duas chamadas seguidas; o
+Unsplash faz igual. Sortear um recorte de um pool idêntico não resolve — o
+ranking depois reordena os dois recortes pelo mesmo critério e devolve o topo.
+Agora o app guarda **onde cada busca parou** em `instance/search_cursors.json`
+(o `bookmarks` do Pinterest, o `page` do Unsplash) e a geração seguinte pede a
+página **seguinte**. As páginas puladas não são baixadas de novo, então isso
+não custa tempo a mais: medido no Pinterest real, três gerações seguidas com a
+query idêntica deram **57 fotos distintas em 57 slots, overlap zero**, e uma
+geração completa levou 8,1s.
+
+O piso de resolução continua medindo a **ampliação que o `cover` faria**, não a
+largura bruta: até 1,10× a foto passa, o que recupera `1024×1536` e
+`1000×1500` — os dois tamanhos mais comuns do Pinterest, que eram reprovados
+por 56px e não têm ampliação visível. O laço de paginação para quando junta
+pins suficientes **acima desse piso**, não num número de pins brutos.
+
+Cada imagem do carrossel oferece no mínimo **5 alternativas além da que já
+recebeu**, e elas são **exclusivas**: as alternativas são repartidas em rodadas
+entre os slides, então dois slides de cenário não abrem mais a mesma lista. A
+busca é dimensionada para isso — `slides × 6` fotos distintas, divididas entre
+as buscas que a geração vai fazer.
+
+No Instagram não há cursor de página (a Apify devolve os posts mais recentes do
+alvo), então a rotação vem de duas outras coisas: a memória de
+`recent_media.json`, que agora chega ao Instagram — ela **não chegava**, e era
+metade do problema —, e uma folga de 8 itens sobre a cota escolhida, para haver
+o que sortear. Escolher 2 fotos passa a pedir 10 itens do actor em vez de 2;
+ainda é bem menos que o pool antigo de 12.
+
+### Um termo que é um perfil do Instagram
+
+Buscar `bellebres` no Instagram devolve o **perfil** de mesmo nome e os posts
+dele — `#bellebres` não existe. O app transformava a query só em hashtag,
+recebia zero e caía no gradiente. Agora a query vira **alvos**: um termo de uma
+palavra é tentado como perfil **e** como hashtag; um tema com espaços vira a
+hashtag colada (`rotinamatinal`) e as palavras soltas; `@perfil` ou `#hashtag`
+explícitos ficam sozinhos.
+
+Com `APIFY_TOKEN`, todos os alvos vão no **mesmo run** — `directUrls` aceita
+vários e `maxItems` limita a cobrança do run inteiro, não de cada URL, então
+dois alvos custam o mesmo que um. Sem token, a tentativa é sequencial e o
+perfil vem primeiro, porque o endpoint de hashtag anônimo está atrás do muro de
+login de qualquer forma. Alvo inexistente (404) não encerra mais a busca, e o
+motivo na prévia diz quais alvos foram tentados.
 
 **Se o carrossel sai com gradientes coloridos, é isto:** uma query longa demais
 devolve zero resultados, e zero cai no mock — que é determinístico por query, ou
@@ -161,12 +201,13 @@ palavras-chave curtos rendem muito mais fotos** — `@perfil` só ajuda no
 Instagram, e hashtag não é um termo que banco de imagens entenda.
 
 O disco entra nisso: as fotos que já foram para os slides ficam em
-`instance/recent_media.json` para a geração seguinte sorteá-las por último. No
-Render, **o disco do serviço é efêmero** — sem um disco persistente montado, um
-redeploy zera essa memória. Nada quebra quando isso acontece: o pool fundo e o
-sorteio continuam valendo, só a camada de memória recomeça do zero. É o mesmo
-diretório da pessoa fixada (`pinned_person.json`), então quem já monta disco
-para ela cobre os dois.
+`instance/recent_media.json` e a posição de cada busca em
+`instance/search_cursors.json`. No Render, **o disco do serviço é efêmero** —
+sem um disco persistente montado, um redeploy zera os dois. O que acontece
+então é uma repetição, **uma vez**: a primeira geração depois do deploy volta
+ao topo do acervo e pode repetir a última de antes dele; da segunda em diante o
+cursor já está andando de novo. É o mesmo diretório da pessoa fixada
+(`pinned_person.json`), então quem já monta disco para ela cobre os três.
 
 Depois do deploy, confirme em `/health`:
 

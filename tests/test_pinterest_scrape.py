@@ -1,8 +1,15 @@
 """Testes do Pinterest sem token — o cliente que fala com o `pinterest-dl`.
 
-Nenhum teste toca a rede: a biblioteca é injetada por um fake que devolve os
+Nenhum teste toca a rede: a biblioteca é injetada por fakes que devolvem os
 mesmos objetos que o `pinterest-dl` devolve (`id`, `src`, `alt`, `origin`,
 `resolution`), que é o contrato do qual este adapter depende.
+
+São **dois** caminhos e por isso dois fakes. O normal é a paginação por
+bookmark (`_load_pinterest_pager` → `Api`/`ResponseParser`), que retoma de onde
+a geração anterior parou; a reserva é o `search()` da biblioteca
+(`_load_pinterest_dl` → `PinterestDL.with_api`), que sempre começa do topo e
+entra quando a paginação não está disponível. `install_fake` desliga a
+paginação para testar a reserva; `install_pager` testa o caminho normal.
 """
 
 from __future__ import annotations
@@ -69,10 +76,81 @@ def _fake_library(medias, calls=None, error=None, timeouts=None):
 
 @pytest.fixture
 def install_fake(monkeypatch):
+    """A reserva: o `search()` da biblioteca, com a paginação por cursor fora.
+
+    A paginação é desligada de propósito. Sem isso, `_load_pinterest_pager`
+    devolveria as classes REAIS da biblioteca instalada e a busca sairia para a
+    rede — o oposto do que esta suíte promete.
+    """
+
     def _install(medias, **kwargs):
         monkeypatch.setattr(
             "app.adapters.pinterest_client._load_pinterest_dl",
             lambda: _fake_library(medias, **kwargs),
+        )
+        monkeypatch.setattr(
+            "app.adapters.pinterest_client._load_pinterest_pager", lambda: None
+        )
+    return _install
+
+
+class _FakePinResponse:
+    """O que `Api.get_search` devolve — só o que o pager lê."""
+
+    def __init__(self, medias, bookmarks):
+        self.resource_response = {"data": {"results": list(medias)}}
+        self._bookmarks = list(bookmarks)
+
+    def get_bookmarks(self):
+        return list(self._bookmarks)
+
+
+def _fake_pager(pages, calls=None, error=None):
+    """Substituto de `(Api, ResponseParser)` — páginas indexadas por bookmark.
+
+    `pages` é `{bookmark_de_entrada: (medias, bookmarks_de_saida)}`, com `""`
+    representando "sem cursor", isto é, o topo do acervo.
+    """
+    calls = calls if calls is not None else []
+
+    class _FakeApi:
+        def __init__(self, url, cookies=None, timeout=5, dump=None):
+            self.url = url
+            self.timeout = timeout
+
+        def get_search(self, num, bookmarks):
+            key = bookmarks[-1] if bookmarks else ""
+            calls.append({"url": self.url, "num": num, "bookmarks": list(bookmarks)})
+            if error:
+                raise error
+            medias, out = pages.get(key, ([], ["-end-"]))
+            return _FakePinResponse(medias, out)
+
+        get_related_images = get_search
+
+    class _FakeParser:
+        @staticmethod
+        def from_responses(data, min_resolution, **kwargs):
+            if not data:
+                from pinterest_dl.exceptions import EmptyResponseError
+
+                raise EmptyResponseError("vazio")
+            return list(data)
+
+    return _FakeApi, _FakeParser
+
+
+@pytest.fixture
+def install_pager(monkeypatch):
+    """O caminho normal: paginação por bookmark, com o `search()` fora."""
+
+    def _install(pages, calls=None, error=None):
+        monkeypatch.setattr(
+            "app.adapters.pinterest_client._load_pinterest_pager",
+            lambda: _fake_pager(pages, calls, error),
+        )
+        monkeypatch.setattr(
+            "app.adapters.pinterest_client._load_pinterest_dl", lambda: None
         )
     return _install
 
@@ -398,11 +476,14 @@ def test_one_search_is_one_call_into_the_library(install_fake):
     assert calls[0]["num"] == PinterestScrapeClient._POOL_SIZE  # noqa: SLF001
 
 
-def test_the_timeout_comes_from_the_settings(install_fake, monkeypatch):
+def test_the_timeout_comes_from_the_settings(monkeypatch):
     timeouts: list[float] = []
     monkeypatch.setattr(
         "app.adapters.pinterest_client._load_pinterest_dl",
         lambda: _fake_library(_media_batch(4), timeouts=timeouts),
+    )
+    monkeypatch.setattr(
+        "app.adapters.pinterest_client._load_pinterest_pager", lambda: None
     )
 
     PinterestScrapeClient(timeout=42).search("tema", limit=2)
@@ -458,6 +539,9 @@ def test_related_without_the_library_returns_empty(monkeypatch):
     monkeypatch.setattr(
         "app.adapters.pinterest_client._load_pinterest_dl", lambda: None
     )
+    monkeypatch.setattr(
+        "app.adapters.pinterest_client._load_pinterest_pager", lambda: None
+    )
 
     assert PinterestScrapeClient().related(_PIN_URL, limit=4) == []
 
@@ -503,6 +587,9 @@ def test_a_pin_without_src_is_not_a_photo(install_fake):
 
 
 def test_missing_library_explains_how_to_install_it(monkeypatch):
+    monkeypatch.setattr(
+        "app.adapters.pinterest_client._load_pinterest_pager", lambda: None
+    )
     monkeypatch.setattr(
         "app.adapters.pinterest_client._load_pinterest_dl", lambda: None
     )
@@ -677,7 +764,7 @@ def test_an_empty_query_has_nothing_to_try():
     assert _query_attempts("  @so  #  ") == []
 
 
-def test_the_search_retries_shorter_when_the_first_try_finds_nothing(install_fake):
+def test_the_search_retries_shorter_when_the_first_try_finds_nothing(monkeypatch):
     """Zero pins cai no mock, e o mock é determinístico por query: a mesma
     hashtag devolveria os mesmos gradientes para sempre."""
     calls: list[dict] = []
@@ -693,17 +780,177 @@ def test_the_search_retries_shorter_when_the_first_try_finds_nothing(install_fak
                     return list(medias) if len(query.split()) <= 3 else []
             return _S()
 
-    monkey = _EmptyUntilShort
-    import app.adapters.pinterest_client as mod
-    original = mod._load_pinterest_dl
-    mod._load_pinterest_dl = lambda: monkey
-    try:
-        found = PinterestScrapeClient().search(
-            "lifestyle cozy praia vibe bellebres girly moda verao aesthetic", limit=4
-        )
-    finally:
-        mod._load_pinterest_dl = original
+    monkeypatch.setattr(
+        "app.adapters.pinterest_client._load_pinterest_dl", lambda: _EmptyUntilShort
+    )
+    monkeypatch.setattr(
+        "app.adapters.pinterest_client._load_pinterest_pager", lambda: None
+    )
+    found = PinterestScrapeClient().search(
+        "lifestyle cozy praia vibe bellebres girly moda verao aesthetic", limit=4
+    )
 
     assert len(calls) == 3
     assert len(found) == 4
     assert not any(is_mock_image(img) for img in found)
+
+
+# ---------- paginação por cursor: a busca não repete a geração anterior ----------
+
+
+def _pin(n, resolution=(1024, 1536)):
+    return _FakeMedia(
+        id=n,
+        src=f"https://i.pinimg.com/originals/ab/cd/ef/p{n}.jpg",
+        alt=f"a woman drinking coffee number {n}",
+        origin=f"https://www.pinterest.com/pin/{n}/",
+        resolution=resolution,
+    )
+
+
+def _stream(*page_sizes):
+    """Um acervo paginado: `{bookmark_entrada: (pins, bookmark_saida)}`.
+
+    A última página termina em `-end-`, como a API faz quando o acervo acaba.
+    """
+    pages: dict[str, tuple[list, list]] = {}
+    start = 0
+    for index, size in enumerate(page_sizes):
+        key = "" if index == 0 else f"bm{index}"
+        out = [f"bm{index + 1}"] if index + 1 < len(page_sizes) else ["-end-"]
+        pages[key] = ([_pin(start + i) for i in range(size)], out)
+        start += size
+    return pages
+
+
+def test_the_second_generation_reads_the_page_after_the_first(install_pager):
+    """O defeito principal: a busca é determinística.
+
+    Medido em 2026-08-24, `pinterest-dl` devolve os MESMOS 50 pins na MESMA
+    ordem em duas chamadas seguidas — e sortear um recorte disso não resolve,
+    porque dois sorteios num pool pequeno se sobrepõem por aritmética e o
+    ranking reordena os dois pelo mesmo critério. Guardar o bookmark faz a
+    segunda geração ler a página SEGUINTE, sem overlap possível.
+    """
+    install_pager(_stream(30, 30, 30))
+    client = PinterestScrapeClient(min_resolution=(1080, 1350))
+
+    primeira = {img.image_id for img in client.search("rotina matinal", limit=6)}
+    segunda = {img.image_id for img in client.search("rotina matinal", limit=6)}
+
+    assert primeira and segunda
+    assert not (primeira & segunda), "a segunda geração repetiu fotos da primeira"
+
+
+def test_the_cursor_is_per_query_not_global(install_pager):
+    """Duas queries diferentes paginam streams diferentes: o cursor de uma não
+    pode empurrar a outra para o meio do acervo dela."""
+    calls: list[dict] = []
+    install_pager(_stream(30, 30), calls=calls)
+    client = PinterestScrapeClient(min_resolution=(1080, 1350))
+
+    client.search("rotina matinal", limit=6)
+    calls.clear()
+    client.search("treino em casa", limit=6)
+
+    assert calls, "a segunda query não buscou"
+    assert calls[0]["bookmarks"] == [], "a outra query começou do meio do acervo"
+
+
+def test_the_end_of_the_catalog_rewinds_the_cursor(install_pager):
+    """Acervo esgotado tem que continuar devolvendo carrossel: o `-end-` volta
+    o cursor ao topo em vez de deixar a busca vazia para sempre."""
+    install_pager(_stream(30))
+    client = PinterestScrapeClient(min_resolution=(1080, 1350))
+
+    primeira = client.search("tema curto", limit=6)
+    segunda = client.search("tema curto", limit=6)
+
+    assert len(primeira) == 6
+    assert len(segunda) == 6
+
+
+def test_paging_stops_as_soon_as_there_are_enough_usable_pins(install_pager):
+    """Cada página é uma requisição dentro do POST /generate. O laço para no
+    alvo de pins ACIMA DO PISO, não num número de pins brutos — foi o piso que
+    virou o gargalo quando ele deixou de ceder."""
+    calls: list[dict] = []
+    install_pager(_stream(50, 50, 50, 50, 50, 50), calls=calls)
+
+    PinterestScrapeClient(min_resolution=(1080, 1350)).search("tema", limit=6)
+
+    assert len(calls) == 1, "50 pins acima do piso já cobrem o alvo de 24"
+
+
+def test_a_page_of_small_photos_does_not_end_the_search(install_pager):
+    """Página inteira abaixo do piso não é "acervo no fim": é motivo para
+    paginar mais, porque o piso é o que reprova metade do que vem."""
+    pages = {
+        "": ([_pin(i, resolution=(474, 711)) for i in range(50)], ["bm1"]),
+        "bm1": ([_pin(100 + i) for i in range(50)], ["-end-"]),
+    }
+    install_pager(pages)
+
+    found = PinterestScrapeClient(min_resolution=(1080, 1350)).search("tema", limit=6)
+
+    assert len(found) == 6
+    assert all(int(img.image_id) >= 100 for img in found)
+
+
+def test_a_broken_cursor_restarts_from_the_top(install_pager, monkeypatch):
+    """Bookmark envelhecido (o acervo da query mudou) não pode zerar a busca —
+    recomeçar do topo é melhor que devolver gradiente."""
+    from app.services import search_cursor
+
+    search_cursor.save_cursor("pinterest_search", "tema", bookmarks=["bm-que-morreu"])
+    install_pager(_stream(30, 30))
+
+    found = PinterestScrapeClient(min_resolution=(1080, 1350)).search("tema", limit=6)
+
+    assert len(found) == 6
+
+
+def test_the_pager_failing_falls_back_to_the_library_search(monkeypatch):
+    """A paginação lê classes internas da biblioteca. Se elas mudarem de forma,
+    a busca cai no `search()` de sempre — carrossel repetido ainda é melhor que
+    carrossel de gradiente."""
+    monkeypatch.setattr(
+        "app.adapters.pinterest_client._load_pinterest_pager",
+        lambda: _fake_pager({}, error=RuntimeError("a lib mudou")),
+    )
+    monkeypatch.setattr(
+        "app.adapters.pinterest_client._load_pinterest_dl",
+        lambda: _fake_library(_media_batch(40)),
+    )
+
+    found = PinterestScrapeClient().search("tema", limit=4)
+
+    assert len(found) == 4
+    assert not any(is_mock_image(img) for img in found)
+
+
+def test_related_pins_also_advance_a_cursor(install_pager):
+    """Os relacionados de um pin também vêm sempre na mesma ordem — sem cursor,
+    a pessoa fixada rendia o mesmo hook em toda geração."""
+    install_pager(_stream(30, 30, 30))
+    client = PinterestScrapeClient(min_resolution=(1080, 1350))
+
+    primeira = {img.image_id for img in client.related(_PIN_URL, limit=6)}
+    segunda = {img.image_id for img in client.related(_PIN_URL, limit=6)}
+
+    assert primeira and segunda
+    assert not (primeira & segunda)
+
+
+def test_the_search_cursor_and_the_related_cursor_are_separate(install_pager):
+    """Busca e "mais como este" são streams diferentes: compartilhar posição
+    faria uma pular o começo da outra."""
+    calls: list[dict] = []
+    install_pager(_stream(30, 30), calls=calls)
+    client = PinterestScrapeClient(min_resolution=(1080, 1350))
+
+    client.search(_PIN_URL, limit=6)
+    calls.clear()
+    client.related(_PIN_URL, limit=6)
+
+    assert calls[0]["bookmarks"] == []

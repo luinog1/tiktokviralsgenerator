@@ -32,19 +32,36 @@ import logging
 import os
 import random
 import re
+import time
 import unicodedata
 import importlib.util
 from dataclasses import dataclass
 from itertools import zip_longest
 from types import SimpleNamespace
-from typing import Any, Iterable, Protocol, runtime_checkable
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from typing import Any, Callable, Iterable, Protocol, runtime_checkable
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import requests
 
 from app.config import IMAGE_PROVIDERS, Settings
 
 logger = logging.getLogger(__name__)
+
+
+def _cursor_io() -> Any:
+    """O módulo do cursor de busca, importado na chamada e não no topo.
+
+    `app/services/__init__.py` importa `generation`, que importa `app.adapters`
+    — então um import de serviço no topo daqui fecha um ciclo: quem importa
+    `app.adapters` primeiro entra em `app.services` no meio deste módulo e
+    volta a `from app.adapters import PinterestImage` antes de o arquivo
+    terminar, com ImportError. O import atrasado quebra o ciclo sem mover o
+    cursor para fora da camada de serviços, onde ele pertence — é irmão do
+    `recent_media`, que guarda a outra metade da memória entre gerações.
+    """
+    from app.services import search_cursor
+
+    return search_cursor
 
 # Prefixo dos ids gerados pelo MockPinterestClient. Serve para reconhecer
 # resultados mock *depois* da busca — um cliente real que caiu no fallback
@@ -273,10 +290,13 @@ class UnsplashClient:
     name = "unsplash"
     _BASE = "https://api.unsplash.com"
     # /search/photos é determinístico: mesma query + order_by=relevant devolve
-    # sempre a mesma página 1, o que parecia cache do lado do app. Sortear a
-    # página dentro desta janela renova as fotos sem perder relevância — ela
-    # cai rápido depois das primeiras páginas.
-    _PAGE_WINDOW = 5
+    # sempre a mesma página 1, o que parecia cache do lado do app. A página
+    # **avança** a cada busca (cursor em `search_cursor`) em vez de ser
+    # sorteada: sorteio de 1..8 repete a mesma página uma vez em oito, e a
+    # sequência gasta o catálogo inteiro antes de voltar ao começo.
+    _PAGE_WINDOW = 8
+    # A fonte, na chave do cursor.
+    _CURSOR_SOURCE = "unsplash_search"
 
     def __init__(
         self,
@@ -395,22 +415,28 @@ class UnsplashClient:
         aesthetic lifestyle travel interior workspace`. Os degraus vêm de
         `_query_attempts`, que reduz pelo meio para preservar as duas pontas.
 
-        A página é sorteada de novo a cada degrau: uma query diferente tem um
-        catálogo diferente, e reaproveitar o número da tentativa anterior só
-        aumentaria a chance de cair fora do fim dele.
+        A página **avança** a cada busca, guardada por query em
+        `search_cursor`: a ordenação por relevância do Unsplash é estável, e
+        sortear dentro de uma janela devolvia a mesma página uma vez em cada
+        `_PAGE_WINDOW` — bastava para o usuário ver a mesma foto duas gerações
+        seguidas. Andando em sequência, a janela inteira é gasta antes de
+        qualquer repetição. Fim do catálogo (ou fim da janela) volta à 1.
         """
+        cursor = _cursor_io()
         for attempt, texto in enumerate(_query_attempts(query)):
-            page = random.randint(1, self._PAGE_WINDOW)
+            saved = int(cursor.load_cursor(self._CURSOR_SOURCE, texto).get("page") or 0)
+            page = saved + 1 if 0 < saved < self._PAGE_WINDOW else 1
             payload = self._request(texto, per_page, page)
             results = payload.get("results") or []
-            if not results and int(payload.get("total_pages") or 0):
-                # A página sorteada caiu além do fim do catálogo desta query.
+            if not results and page > 1 and int(payload.get("total_pages") or 0):
+                # A página do cursor caiu além do fim do catálogo desta query.
                 # Voltar para a 1 é o que sempre tem resultado; a aritmética
                 # antiga (`(page-1) % total_pages + 1`) repetia a MESMA página
                 # sempre que `total_pages >= page`, gastando a chamada à toa.
                 page = 1
                 results = self._request(texto, per_page, page).get("results") or []
             if results:
+                cursor.save_cursor(self._CURSOR_SOURCE, texto, page=page)
                 if attempt:
                     logger.info(
                         "Unsplash: query encurtada para %r depois de 0 resultados.",
@@ -616,6 +642,195 @@ def _load_pinterest_dl() -> Any | None:
     return PinterestDL
 
 
+def _load_pinterest_pager() -> tuple[Any, Any] | None:
+    """As duas classes que paginam a busca por bookmark. None = sem a lib.
+
+    `PinterestDL.with_api().search()` só sabe começar do topo: `iter_search`
+    cria um `BookmarkManager` novo em cada chamada, e é por isso que a mesma
+    query devolvia as mesmas fotos para sempre. Medido em 2026-08-24 com
+    "morning routine aesthetic": duas chamadas seguidas, **overlap 50/50 e
+    ordem idêntica**. Sortear um recorte disso não resolve — dois sorteios de
+    14 num pool de 40 se sobrepõem por aritmética, e o ranking reordena os dois
+    recortes pelo mesmo critério, então o topo volta ao carrossel toda vez.
+
+    `Api.get_search(num, bookmarks)` aceita o cursor de onde parar; é o mesmo
+    par que a biblioteca usa por dentro e as duas classes são públicas. Medido
+    no mesmo dia: página 1 e página 2 têm **overlap zero**, e o bookmark
+    funciona numa instância nova de `Api` — ou seja, sobrevive ao fim da
+    requisição HTTP e serve de cursor entre gerações.
+
+    Seam separado do `_load_pinterest_dl` de propósito: numa versão da
+    biblioteca sem essas classes, a busca cai no `search()` de sempre em vez de
+    não buscar nada.
+    """
+    try:
+        from pinterest_dl.api.api import Api
+        from pinterest_dl.parsers.response import ResponseParser
+    except ImportError:
+        return None
+    return Api, ResponseParser
+
+
+# Quantos pins pedir por requisição. 50 é o teto da API (o `_validate_num` da
+# biblioteca recusa mais). A primeira página vem cheia; da segunda em diante o
+# Pinterest manda ~25.
+_PAGE_BATCH = 50
+# Teto de requisições por busca. Cada página custa ~1,5s, e o laço para assim
+# que junta pins utilizáveis suficientes — o teto só existe para uma query de
+# acervo raso não gastar a requisição inteira paginando à toa.
+_MAX_PAGES = 6
+# Pausa entre páginas: o mesmo `delay` que a biblioteca usa no `_pump`.
+_PAGE_DELAY = 0.2
+# O bookmark que a API devolve quando o acervo acabou.
+_END_BOOKMARK = "-end-"
+# Quantos bookmarks mandar de volta. `iter_search` usa `BookmarkManager(1)`,
+# isto é, só o último — este número espelha isso de propósito.
+_BOOKMARKS_KEPT = 1
+
+# A fonte, na chave do cursor. Busca e "mais como este" paginam streams
+# diferentes e não podem compartilhar posição.
+_CURSOR_SEARCH = "pinterest_search"
+_CURSOR_RELATED = "pinterest_related"
+
+
+def _pinterest_search_url(query: str) -> str:
+    """A URL de busca que `Api` sabe interpretar (o mesmo do `iter_search`)."""
+    return f"https://www.pinterest.com/search/pins/?q={quote(query)}&rs=typed"
+
+
+class _PinterestPager:
+    """Páginas da busca do Pinterest, retomando de onde a última geração parou.
+
+    Guarda o bookmark da última página lida em `search_cursor` e o manda de
+    volta na próxima geração: as páginas puladas **não** são baixadas de novo,
+    então material novo custa o mesmo que material repetido custava. Chegando
+    ao fim do acervo (`-end-`), o cursor volta ao começo — acervo esgotado tem
+    que continuar devolvendo carrossel, e a essa altura o topo já não sai há
+    muitas gerações.
+    """
+
+    def __init__(self, api_cls: Any, parser_cls: Any, timeout: int):
+        self._api_cls = api_cls
+        self._parser_cls = parser_cls
+        self._timeout = timeout
+        # Quantas páginas a última chamada gastou — só para o log da busca.
+        self.last_pages = 0
+
+    def pins(
+        self,
+        url: str,
+        *,
+        source: str,
+        cursor_query: str,
+        fetch: str,
+        wanted_usable: int,
+        usable: Callable[[Any], bool],
+    ) -> list[Any]:
+        cursor = _cursor_io()
+        start = list(cursor.load_cursor(source, cursor_query).get("bookmarks") or [])
+        try:
+            medias, bookmarks, ended = self._walk(url, fetch, start, wanted_usable, usable)
+        except Exception as exc:
+            if not start:
+                raise
+            # Bookmark envelhecido: o acervo desta query mudou desde a última
+            # geração e o cursor aponta para um trecho que já não existe.
+            logger.info(
+                "Pinterest: o cursor guardado falhou (%s) — recomeçando do topo.",
+                type(exc).__name__,
+            )
+            medias, bookmarks, ended = [], [], False
+        if not medias and start:
+            logger.info(
+                "Pinterest: o cursor guardado não devolveu pins — recomeçando "
+                "do topo do acervo."
+            )
+            medias, bookmarks, ended = self._walk(url, fetch, [], wanted_usable, usable)
+        cursor.save_cursor(
+            source, cursor_query, bookmarks=[] if ended else bookmarks
+        )
+        return medias
+
+    def _walk(
+        self,
+        url: str,
+        fetch: str,
+        bookmarks: list[str],
+        wanted_usable: int,
+        usable: Callable[[Any], bool],
+    ) -> tuple[list[Any], list[str], bool]:
+        api = self._api_cls(url, None, self._timeout, None)
+        get_page = getattr(api, fetch, None)
+        if not callable(get_page):
+            raise AttributeError(f"Api sem {fetch}")
+        medias: list[Any] = []
+        seen: set[str] = set()
+        ended = False
+        self.last_pages = 0
+        for page in range(_MAX_PAGES):
+            if page:
+                time.sleep(_PAGE_DELAY)
+            try:
+                response = get_page(_PAGE_BATCH, list(bookmarks))
+            except Exception:
+                if page == 0:
+                    raise
+                # Meia busca é melhor que busca nenhuma: o que já veio serve, e
+                # o cursor fica onde a última página boa parou.
+                ended = False
+                break
+            self.last_pages = page + 1
+            batch = self._batch(response)
+            for media in batch:
+                src = str(getattr(media, "src", "") or "")
+                if not src or src in seen:
+                    continue
+                seen.add(src)
+                medias.append(media)
+            fresh = self._bookmarks(response)
+            if _END_BOOKMARK in fresh or not batch:
+                ended = True
+                break
+            bookmarks = fresh
+            if sum(1 for media in medias if usable(media)) >= wanted_usable:
+                break
+        return medias, bookmarks, ended
+
+    def _batch(self, response: Any) -> list[Any]:
+        """Os pins da página. Vazio quando a página não trouxe resultado.
+
+        Duas formas de payload, porque são dois endpoints: a busca põe os pins
+        em `data.results` e o "mais como este" devolve `data` como lista. E
+        `from_responses` **levanta** `EmptyResponseError` numa lista vazia em
+        vez de devolver `[]` — para o laço, acervo no fim não é erro, é a
+        condição de parada.
+        """
+        try:
+            data = response.resource_response.get("data")
+        except AttributeError:
+            return []
+        if isinstance(data, dict):
+            data = data.get("results")
+        if not isinstance(data, list) or not data:
+            return []
+        try:
+            return list(self._parser_cls.from_responses(data, (0, 0)))
+        except Exception as exc:
+            logger.info(
+                "Pinterest: página não pôde ser lida (%s).", type(exc).__name__
+            )
+            return []
+
+    @staticmethod
+    def _bookmarks(response: Any) -> list[str]:
+        """O cursor da próxima página. `-end-` quando o acervo acabou."""
+        try:
+            fresh = [str(item) for item in (response.get_bookmarks() or [])]
+        except Exception:
+            return [_END_BOOKMARK]
+        return fresh[-_BOOKMARKS_KEPT:] or [_END_BOOKMARK]
+
+
 class PinterestScrapeClient:
     """Pinterest sem token — `pinterest-dl` lendo a API interna do site.
 
@@ -627,16 +842,24 @@ class PinterestScrapeClient:
 
     name = "pinterest_scrape"
 
-    # Quantos pins pedir por busca. A biblioteca pagina sozinha (50 por
-    # requisição, `delay` de 0,2s entre elas) até fechar o número — o custo
-    # medido de 40 → 120 foi 3,0s → 4,8s, dentro do POST /generate.
+    # Quantos pins pedir quando a paginação por cursor não está disponível e a
+    # busca cai no `search()` da biblioteca — que sempre começa do topo. A
+    # biblioteca pagina sozinha (50 por requisição, `delay` de 0,2s) até fechar
+    # o número; o custo medido de 40 → 120 foi 3,0s → 4,8s.
     #
-    # 40 era o número de quando o piso de resolução ainda cedia. Com o piso
-    # estrito da v0.21 ele virou o gargalo dos dois sintomas: medido em
-    # 2026-08-22 ("morning routine aesthetic"), 40 pins deixavam **11** acima
-    # de 1080×1350 e 120 deixam **40**. Com 11 não há o que sortear (as fotos
-    # se repetiam entre gerações) nem o que oferecer na galeria da prévia.
+    # No caminho normal quem manda é `_pool_target`: o laço do `_PinterestPager`
+    # para assim que junta pins UTILIZÁVEIS suficientes, em vez de contar pins
+    # brutos dos quais o piso de resolução descarta metade.
     _POOL_SIZE = 120
+
+    # Quantos pins acima do piso de resolução buscar por foto pedida. Com o
+    # cursor garantindo que as fotos já são novas, o excedente serve só para o
+    # sorteio de `_cut_pool` ter escolha — 2× basta. (Antes do cursor, o
+    # excedente era a ÚNICA defesa contra repetição e precisava ser bem maior.)
+    _USABLE_PER_IMAGE = 2
+    # Piso do alvo: uma busca de 1 foto ainda precisa de material para a
+    # galeria daquele slide e para não repetir a geração anterior.
+    _MIN_USABLE = 24
 
     def __init__(
         self,
@@ -659,8 +882,7 @@ class PinterestScrapeClient:
 
     def search(self, query: str, limit: int = 8) -> list[PinterestImage]:
         self.last_fallback_reason = ""
-        pinterest_dl = _load_pinterest_dl()
-        if pinterest_dl is None:
+        if _load_pinterest_pager() is None and _load_pinterest_dl() is None:
             self.last_fallback_reason = (
                 "IMAGE_PROVIDER=pinterest_scrape, mas o pacote `pinterest-dl` "
                 "não está instalado (pip install pinterest-dl)."
@@ -669,7 +891,7 @@ class PinterestScrapeClient:
             return MockPinterestClient().search(query, limit)
 
         try:
-            medias = self._pins_for(pinterest_dl, query)
+            medias = self._pins_for(query, limit)
         except Exception as exc:
             # A API interna não tem contrato publicado: erro de rede, mudança
             # de payload e bloqueio chegam aqui como exceções diferentes. Todas
@@ -710,7 +932,7 @@ class PinterestScrapeClient:
         )
         return [self._to_image(media, query) for media in selected]
 
-    def _pins_for(self, pinterest_dl: Any, query: str) -> list[Any]:
+    def _pins_for(self, query: str, limit: int = 8) -> list[Any]:
         """Os pins da busca, encurtando a query enquanto ela vier vazia.
 
         Uma busca por palavra-chave devolve zero quando a query é longa demais,
@@ -719,16 +941,66 @@ class PinterestScrapeClient:
         no site e não achava nada aqui só por causa da companhia. Os degraus
         vêm de `_query_attempts`.
         """
-        scraper = pinterest_dl.with_api(timeout=self._timeout)
         for attempt, texto in enumerate(_query_attempts(query)):
-            medias = scraper.search(texto, num=self._POOL_SIZE, min_resolution=(0, 0))
+            medias = self._paged_or_top(texto, limit)
             if medias:
                 if attempt:
                     logger.info(
                         "Pinterest: query encurtada para %r depois de 0 pins.", texto
                     )
-                return list(medias)
+                return medias
         return []
+
+    def _paged_or_top(self, query: str, limit: int) -> list[Any]:
+        """Os pins desta query — pelo cursor, com o `search()` como reserva.
+
+        O caminho normal retoma de onde a geração anterior parou, que é o que
+        garante fotos diferentes. A reserva é o `search()` da biblioteca, que
+        sempre volta ao topo: ele entra quando a paginação por cursor não está
+        disponível ou não devolveu nada, porque carrossel repetido ainda é
+        melhor que carrossel de gradiente.
+        """
+        pager = self._pager()
+        if pager is not None:
+            try:
+                medias = pager.pins(
+                    _pinterest_search_url(query),
+                    source=_CURSOR_SEARCH,
+                    cursor_query=query,
+                    fetch="get_search",
+                    wanted_usable=self._usable_target(limit),
+                    usable=lambda media: _covers_slide(media, self._min_resolution),
+                )
+            except Exception as exc:
+                logger.info(
+                    "Pinterest: paginação por cursor falhou (%s) — usando a "
+                    "busca do topo.",
+                    type(exc).__name__,
+                )
+            else:
+                if medias:
+                    logger.info(
+                        "Pinterest: %d pins em %d página(s) a partir do cursor "
+                        "de %r.",
+                        len(medias), pager.last_pages, query[:60],
+                    )
+                    return medias
+        pinterest_dl = _load_pinterest_dl()
+        if pinterest_dl is None:
+            return []
+        scraper = pinterest_dl.with_api(timeout=self._timeout)
+        return list(scraper.search(query, num=self._POOL_SIZE, min_resolution=(0, 0)))
+
+    def _pager(self) -> _PinterestPager | None:
+        parts = _load_pinterest_pager()
+        if parts is None:
+            return None
+        api_cls, parser_cls = parts
+        return _PinterestPager(api_cls, parser_cls, self._timeout)
+
+    def _usable_target(self, limit: int) -> int:
+        """Quantos pins acima do piso a busca precisa juntar antes de parar."""
+        return max(int(limit or 0) * self._USABLE_PER_IMAGE, self._MIN_USABLE)
 
     def related(self, pin_url: str, limit: int = 8) -> list[PinterestImage]:
         """Pins relacionados a um pin — o "mais como este" do Pinterest.
@@ -738,29 +1010,14 @@ class PinterestScrapeClient:
         Pinterest — nenhum reconhecimento facial). O recorte é o mesmo da
         busca por query: piso de resolução, retrato primeiro, ponto sorteado.
 
+        O cursor vale aqui pelo mesmo motivo da busca: os relacionados de um
+        pin também vêm sempre na mesma ordem, então sem cursor a pessoa fixada
+        rendia o mesmo hook em toda geração.
+
         Falha devolve `[]` em vez do mock: quem chama tem um fallback melhor
         que gradiente — a busca de retrato de sempre.
         """
-        pinterest_dl = _load_pinterest_dl()
-        if pinterest_dl is None:
-            logger.warning(
-                "Pessoa fixada ignorada: o pacote `pinterest-dl` não está "
-                "instalado (pip install pinterest-dl)."
-            )
-            return []
-        try:
-            medias = pinterest_dl.with_api(timeout=self._timeout).related(
-                pin_url,
-                num=self._POOL_SIZE,
-                min_resolution=(0, 0),
-            )
-        except Exception as exc:
-            logger.warning(
-                "Pins relacionados falharam para %s: %s",
-                pin_url, type(exc).__name__,
-            )
-            return []
-
+        medias = self._related_medias(pin_url, limit)
         medias = [m for m in medias if str(getattr(m, "src", "") or "")]
         if not medias:
             logger.info("Nenhum pin relacionado para %s.", pin_url)
@@ -771,6 +1028,50 @@ class PinterestScrapeClient:
             len(selected), pin_url, len(medias),
         )
         return [self._to_image(media, "") for media in selected]
+
+    def _related_medias(self, pin_url: str, limit: int) -> list[Any]:
+        pager = self._pager()
+        if pager is not None:
+            try:
+                medias = pager.pins(
+                    pin_url,
+                    source=_CURSOR_RELATED,
+                    cursor_query=pin_url,
+                    fetch="get_related_images",
+                    wanted_usable=self._usable_target(limit),
+                    usable=lambda media: _covers_slide(media, self._min_resolution),
+                )
+            except Exception as exc:
+                logger.info(
+                    "Pessoa fixada: paginação por cursor falhou (%s) — usando "
+                    "os relacionados do topo.",
+                    type(exc).__name__,
+                )
+            else:
+                if medias:
+                    return medias
+
+        pinterest_dl = _load_pinterest_dl()
+        if pinterest_dl is None:
+            logger.warning(
+                "Pessoa fixada ignorada: o pacote `pinterest-dl` não está "
+                "instalado (pip install pinterest-dl)."
+            )
+            return []
+        try:
+            return list(
+                pinterest_dl.with_api(timeout=self._timeout).related(
+                    pin_url,
+                    num=self._POOL_SIZE,
+                    min_resolution=(0, 0),
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "Pins relacionados falharam para %s: %s",
+                pin_url, type(exc).__name__,
+            )
+            return []
 
     def _select(self, medias: list[Any], limit: int) -> list[Any]:
         """Recorta o pool: alta resolução e retrato primeiro, sorteando quais.
@@ -856,6 +1157,75 @@ def _ig_username(query: str) -> str:
         if token.startswith("@") and len(token) > 1:
             return re.sub(r"[^a-z0-9._]", "", token[1:].lower())
     return ""
+
+
+# Quantos alvos do Instagram tentar numa busca. Cada alvo é uma URL a mais no
+# run da Apify, e item de actor é pago — três cobre "o termo é um perfil", "o
+# termo é uma hashtag" e "uma das palavras do tema é uma hashtag", que são os
+# três jeitos de um termo ter resultado no site.
+_IG_MAX_TARGETS = 3
+
+
+@dataclass(frozen=True)
+class _IgTarget:
+    """Um alvo de busca no Instagram: um perfil ou uma hashtag."""
+
+    kind: str  # "profile" | "tag"
+    value: str
+
+    @property
+    def scope(self) -> str:
+        return f"@{self.value}" if self.kind == "profile" else f"#{self.value}"
+
+    def url(self, base: str) -> str:
+        if self.kind == "profile":
+            return f"{base}/{self.value}/"
+        return f"{base}/explore/tags/{self.value}/"
+
+
+def _ig_targets(query: str, hint_words: Iterable[str] = ()) -> list[_IgTarget]:
+    """Os alvos do Instagram para esta query, do mais provável ao menos.
+
+    O Instagram não busca texto livre sem login, então a query tem que virar
+    um alvo concreto. Antes virava **só** uma hashtag, e era isso que quebrava
+    o caso do `bellebres`: buscar esse termo no site devolve o PERFIL de mesmo
+    nome (e os posts dele), enquanto `#bellebres` não existe — o app pedia a
+    hashtag, recebia nada e caía no gradiente, embora o termo tenha resultado
+    na plataforma.
+
+    Agora um termo de uma palavra vira dois alvos, na ordem em que o próprio
+    site os mostra: **perfil primeiro, hashtag depois**. Um tema de várias
+    palavras vira a hashtag colada (`rotinamatinal`) e as palavras soltas como
+    hashtags — perfil não entra aí, porque tema com espaço não é handle.
+
+    Escolha explícita vence e fica sozinha: quem escreveu `@perfil` ou
+    `#hashtag` disse qual alvo quer, e adivinhar outro só gastaria item pago.
+    """
+    username = _ig_username(query)
+    if username:
+        return [_IgTarget("profile", username)]
+
+    tokens = str(query or "").split()
+    explicit = next((t for t in tokens if t.startswith("#") and len(t) > 1), "")
+    if explicit:
+        tag = _ig_slug(explicit)
+        return [_IgTarget("tag", tag)] if tag else []
+
+    hints = {word.strip().lower() for word in hint_words if str(word or "").strip()}
+    words = [t for t in tokens if t.lower() not in hints]
+    joined = _ig_slug("".join(words))
+
+    targets: list[_IgTarget] = []
+    if len(words) == 1 and joined:
+        # Uma palavra só tem a forma de um handle — é o caso do `bellebres`.
+        targets.append(_IgTarget("profile", joined))
+    if joined:
+        targets.append(_IgTarget("tag", joined))
+    for word in words:
+        slug = _ig_slug(word)
+        if slug and slug != joined:
+            targets.append(_IgTarget("tag", slug))
+    return list(dict.fromkeys(targets))[:_IG_MAX_TARGETS]
 
 
 def _ig_dedupe(entries: list[Any]) -> list[Any]:
@@ -1190,14 +1560,31 @@ class InstagramScrapeClient:
     `@perfil` até a cota do IP estourar. Os downloads do CDN seguem sempre
     diretos, porque as URLs assinadas não são presas ao IP.
 
-    A query vira **uma hashtag**: o Instagram não busca texto livre sem login.
-    As palavras das queries de casting (HOOK/SCENE_QUERY_HINTS) são removidas
-    antes — "#rotinamatinalwomanportrait" não existe — e um `@perfil` ou
-    `#hashtag` digitados no tema/palavras-chave vencem a derivação.
+    A query vira **alvos concretos**: o Instagram não busca texto livre sem
+    login, então `_ig_targets` transforma o texto num perfil e/ou numa hashtag
+    e a busca tenta os dois. As palavras das queries de casting
+    (HOOK/SCENE_QUERY_HINTS) são removidas antes — "#rotinamatinalwomanportrait"
+    não existe — e um `@perfil` ou `#hashtag` digitados no tema/palavras-chave
+    vencem a derivação.
+
+    Todos os alvos vão por **URL direta**. `search`+`searchType` do actor parou
+    de entregar posts (medido em 2026-08-16): a fase de busca dele virou uma
+    consulta ao Google, que casa a hashtag errada ("aesthetic" achou
+    #gaesthetic) e devolve como único item do dataset a ENTIDADE do resultado
+    (searchTerm/postsCount), sem raspar post nenhum — "Crawled 0/1 pages" no
+    log do run. A URL de `/explore/tags/` e a do perfil pulam essa fase e o
+    actor devolve os posts no formato que `_ig_entry_from_apify` espera.
     """
 
     name = "instagram_scrape"
     _BASE = "https://www.instagram.com"
+
+    # Itens pagos a mais por busca, só para haver o que sortear. O actor
+    # devolve os posts mais recentes do alvo, sempre na MESMA ordem: pedir
+    # exatamente as fotos que entram no carrossel é pedir o carrossel anterior
+    # de volta. Oito é o que dá rotação real para as escolhas de 1 a 3 fotos
+    # (as comuns no modo combinado) sem voltar ao pool antigo de 3×.
+    _ROTATION_SLACK = 8
 
     def __init__(
         self,
@@ -1207,6 +1594,7 @@ class InstagramScrapeClient:
         scrapedo_token: str = "",
         apify_token: str = "",
         apify_actor: str = "apify~instagram-scraper",
+        avoid_media: Iterable[str] = (),
     ):
         self._scrapedo_token = scrapedo_token
         self._apify_token = apify_token
@@ -1225,6 +1613,11 @@ class InstagramScrapeClient:
         # no render e chega ao feed borrada.
         self._min_resolution = min_resolution
         self._hint_words = {w.strip().lower() for w in hint_words if w.strip()}
+        # O que já saiu em carrosséis recentes — vai para o fim do sorteio. O
+        # Instagram não tinha isto e era metade do "sempre as mesmas fotos": a
+        # Apify devolve os posts mais recentes do alvo, sempre na mesma ordem,
+        # e sem sorteio nem memória a mesma hashtag rendia o mesmo carrossel.
+        self._avoid_media = frozenset(avoid_media)
         # O casting faz buscas por pessoa, comida e cenário, mas @perfil e
         # hashtag resolvem para a mesma URL da Apify. Reusar o dataset evita
         # pagar e esperar runs idênticos dentro da mesma geração.
@@ -1256,34 +1649,34 @@ class InstagramScrapeClient:
         limit = max(int(limit or 0), 0)
         if limit == 0:
             return []
-        username = _ig_username(query)
-        tag = "" if username else self._tag_from(query)
-        if not username and not tag:
+        targets = _ig_targets(query, self._hint_words)
+        if not targets:
             self.last_fallback_reason = (
                 "A busca no Instagram precisa de uma #hashtag, um @perfil ou "
                 "um tema com letras — a query ficou vazia depois da limpeza."
             )
             logger.warning(self.last_fallback_reason)
             return MockPinterestClient().search(query, limit)
-        scope = f"@{username}" if username else f"#{tag}"
+        tried = self._tried(targets)
+
+        def _mock(reason: str) -> list[PinterestImage]:
+            """O gradiente, com o motivo dizendo QUAIS alvos foram tentados.
+
+            O motivo do transporte (404, 429, muro) é mais específico que "não
+            achou", mas sozinho não diz que o termo foi lido das duas formas —
+            um 404 no perfil parece a busca inteira ter falhado quando a
+            hashtag também foi tentada.
+            """
+            self.last_fallback_reason = f"{reason} (alvos tentados: {tried})"
+            return MockPinterestClient().search(query, limit)
 
         try:
-            if self._apify_token:
-                entries = self._apify_entries(
-                    username, tag, limit, exact_limit=exact_apify_limit
-                )
-            elif username:
-                entries = self._profile_entries(username)
-            else:
-                entries = _ig_tag_entries(
-                    self._get_json("/api/v1/tags/web_info/", {"tag_name": tag})
-                )
+            entries, matched = self._entries_for(
+                targets, limit, exact_limit=exact_apify_limit
+            )
         except requests.Timeout:
             logger.warning("%s timeout — usando fallback mock.", self._transport)
-            self.last_fallback_reason = (
-                f"{self._transport} não respondeu em {self._timeout}s."
-            )
-            return MockPinterestClient().search(query, limit)
+            return _mock(f"{self._transport} não respondeu em {self._timeout}s.")
         except ValueError:
             # HTML (ou redirect) no lugar do JSON: o muro de login do Instagram.
             # O redirect já chega com o motivo preenchido pelo `_get_json`, e a
@@ -1292,39 +1685,93 @@ class InstagramScrapeClient:
                 logger.warning(
                     "Instagram devolveu HTML (muro de login) — fallback mock."
                 )
-                self.last_fallback_reason = self._wall_reason()
-            return MockPinterestClient().search(query, limit)
+            return _mock(self.last_fallback_reason or self._wall_reason())
         except requests.RequestException as exc:
             logger.warning(
                 "%s erro: %s — usando fallback mock.",
                 self._transport, type(exc).__name__,
             )
-            self.last_fallback_reason = self.last_fallback_reason or (
-                f"Falha de rede ao chamar {self._transport} ({type(exc).__name__})."
+            return _mock(
+                self.last_fallback_reason
+                or f"Falha de rede ao chamar {self._transport} ({type(exc).__name__})."
             )
-            return MockPinterestClient().search(query, limit)
 
         if not entries:
-            logger.info("Instagram sem resultados para %s.", scope)
-            self.last_fallback_reason = self.last_fallback_reason or (
-                f"A busca no Instagram não retornou fotos para {scope}."
+            logger.info("Instagram sem resultados para %s.", tried)
+            return _mock(
+                self.last_fallback_reason
+                or "A busca no Instagram não retornou fotos."
             )
-            return MockPinterestClient().search(query, limit)
 
-        selected = _cut_pool(entries, limit, self._min_resolution)
+        selected = _cut_pool(
+            entries, limit, self._min_resolution, avoid=self._avoid_media
+        )
         if not selected:
-            self.last_fallback_reason = (
+            logger.warning("Instagram: nenhuma foto acima do piso do slide.")
+            return _mock(
                 "O Instagram não retornou fotos com resolução suficiente para "
                 f"o slide ({self._min_resolution[0]}x{self._min_resolution[1]})."
             )
-            logger.warning(self.last_fallback_reason)
-            return MockPinterestClient().search(query, limit)
         logger.info(
             "Instagram retornou %d imagens para %s (pool de %d, %d acima do piso)",
-            len(selected), scope, len(entries),
+            len(selected), matched, len(entries),
             sum(1 for e in entries if _covers_slide(e, self._min_resolution)),
         )
-        return [self._to_image(entry, scope) for entry in selected]
+        return [self._to_image(entry, matched) for entry in selected]
+
+    def _entries_for(
+        self,
+        targets: list[_IgTarget],
+        limit: int,
+        *,
+        exact_limit: bool,
+    ) -> tuple[list[Any], str]:
+        """As fotos do primeiro alvo que responder, e qual alvo foi.
+
+        A Apify recebe os alvos **juntos**, num run só: `directUrls` aceita
+        vários e o `maxItems` já limita a cobrança, então tentar perfil e
+        hashtag na mesma chamada não custa mais que tentar um deles. Sem token,
+        a tentativa é sequencial, porque cada alvo é uma chamada HTTP — e a
+        hashtag anônima bate no muro de login de qualquer jeito (ver
+        `_wall_reason`), então o perfil vindo primeiro é o que salva o termo.
+        """
+        if self._apify_token:
+            entries = self._apify_entries(targets, limit, exact_limit=exact_limit)
+            return entries, " ".join(t.scope for t in targets)
+
+        last_error: Exception | None = None
+        for target in targets:
+            try:
+                if target.kind == "profile":
+                    entries = self._profile_entries(target.value)
+                else:
+                    entries = _ig_tag_entries(
+                        self._get_json(
+                            "/api/v1/tags/web_info/", {"tag_name": target.value}
+                        )
+                    )
+            except (ValueError, requests.RequestException) as exc:
+                # Alvo que não existe (404) ou que bate no muro não encerra a
+                # busca: o próximo alvo da lista ainda pode responder.
+                last_error = exc
+                logger.info(
+                    "Instagram: %s não respondeu (%s) — tentando o próximo alvo.",
+                    target.scope, type(exc).__name__,
+                )
+                continue
+            if entries:
+                return entries, target.scope
+        if last_error is not None:
+            raise last_error
+        return [], " ".join(t.scope for t in targets)
+
+    @staticmethod
+    def _tried(targets: list[_IgTarget]) -> str:
+        scopes = " ".join(target.scope for target in targets)
+        kinds = {target.kind for target in targets}
+        if len(kinds) > 1:
+            return f"{scopes} — nem como perfil, nem como hashtag"
+        return scopes
 
     # ---- helpers ----
 
@@ -1340,12 +1787,16 @@ class InstagramScrapeClient:
         return "O Instagram"
 
     def _tag_from(self, query: str) -> str:
-        tokens = str(query or "").split()
-        explicit = next((t for t in tokens if t.startswith("#") and len(t) > 1), "")
-        if explicit:
-            return _ig_slug(explicit)
-        words = [t for t in tokens if t.lower() not in self._hint_words]
-        return _ig_slug("".join(words))
+        """A hashtag derivada da query — o alvo de hashtag de `_ig_targets`.
+
+        Continua aqui porque é a regra de derivação em si (tirar as dicas de
+        casting, colar as palavras, normalizar), e `_ig_targets` só decide em
+        que ordem tentar os alvos.
+        """
+        for target in _ig_targets(query, self._hint_words):
+            if target.kind == "tag":
+                return target.value
+        return ""
 
     def _wall_reason(self) -> str:
         """O muro de login — e o remédio, que **não** é trocar de proxy.
@@ -1448,8 +1899,7 @@ class InstagramScrapeClient:
 
     def _apify_entries(
         self,
-        username: str,
-        tag: str,
+        targets: list[_IgTarget],
         limit: int,
         *,
         exact_limit: bool = False,
@@ -1460,42 +1910,40 @@ class InstagramScrapeClient:
         sem isso seriam três chamadas (start, polling do run, leitura do
         dataset) dentro do `POST /generate`.
 
-        O pool pedido é 3× o limite (piso de 12) porque o piso de resolução e a
-        preferência por retrato descartam parte do resultado — mas nada perto
-        dos 40 pins que o Pinterest traz de graça: **cada item do actor é
-        pago**, então pool grande aqui é conta maior para jogar a maior parte
-        fora.
+        Os alvos vão **todos** no `directUrls` do mesmo run, na ordem de
+        `_ig_targets` (perfil antes de hashtag para um termo de uma palavra).
+        `maxItems` limita a cobrança do run inteiro, não de cada URL, então
+        tentar dois alvos custa o mesmo que tentar um — o segundo só é raspado
+        se o primeiro não tiver preenchido a cota.
+
+        O pool pedido tem **folga** sobre o que entra no carrossel, e essa
+        folga é o que impede o Instagram de repetir: o actor devolve os posts
+        mais recentes do alvo, sempre na mesma ordem, então pedir exatamente o
+        que se usa é pedir o mesmo carrossel de novo. `_ROTATION_SLACK` é o
+        preço disso em itens pagos — bem menor que os 3× do pool antigo.
         """
-        scope = f"@{username}" if username else f"#{tag}"
-        cache_key = f"{username}|{tag}"
+        scope = " ".join(target.scope for target in targets)
+        cache_key = "|".join(f"{t.kind}:{t.value}" for t in targets)
         if cache_key in self._apify_cache:
             logger.info("Reusando dataset da Apify para %s.", scope)
             return self._apify_cache[cache_key]
 
-        wanted = max(limit, 1) if exact_limit else max(limit * 3, 12)
-        if username:
-            # Para perfil, a URL direta é mais previsível que `searchType=user`,
-            # que ainda passaria pela busca do Instagram para achar o mesmo
-            # perfil que já sabemos qual é.
-            payload = {
-                "directUrls": [f"{self._BASE}/{username}/"],
-                "resultsType": "posts",
-                "resultsLimit": wanted,
-            }
-        else:
-            # A hashtag também vai por URL direta. `search`+`searchType` parou
-            # de entregar posts (medido em 2026-08-16): a fase de busca do
-            # actor virou uma consulta ao Google, que casa a hashtag errada
-            # ("aesthetic" achou #gaesthetic) e devolve como único item do
-            # dataset a ENTIDADE do resultado (searchTerm/postsCount), sem
-            # raspar post nenhum — "Crawled 0/1 pages" no log do run. A URL
-            # de /explore/tags/ pula essa busca e o actor devolve os posts no
-            # formato que `_ig_entry_from_apify` espera.
-            payload = {
-                "directUrls": [f"{self._BASE}/explore/tags/{tag}/"],
-                "resultsType": "posts",
-                "resultsLimit": wanted,
-            }
+        wanted = (
+            max(limit, 1) + self._ROTATION_SLACK
+            if exact_limit
+            else max(limit * 3, 12)
+        )
+        payload = {
+            "directUrls": [target.url(self._BASE) for target in targets],
+            "resultsType": "posts",
+            # Por URL. O teto da cobrança é o `maxItems` abaixo, que vale para
+            # o run inteiro: assim um alvo sozinho ainda fecha a cota quando os
+            # outros não existem.
+            "resultsLimit": wanted,
+            # Diz de qual alvo cada post veio — sem isto, um dataset com dois
+            # alvos não tem como dizer se o termo casou como perfil ou hashtag.
+            "addParentData": True,
+        }
         response = requests.post(
             _APIFY_ENDPOINT.format(actor=self._apify_actor),
             params={
@@ -1584,13 +2032,20 @@ class InstagramScrapeClient:
         return _ig_dedupe(entries)
 
     def _to_image(self, entry: Any, scope: str) -> PinterestImage:
+        # `scope` pode listar mais de um alvo ("@bellebres #bellebres") quando
+        # a Apify raspou os dois no mesmo run; o link de fallback precisa de um.
+        first = str(scope or "").split()[0] if str(scope or "").split() else ""
         if entry.code:
             source = f"{self._BASE}/p/{entry.code}/"
-        elif scope.startswith("@"):
-            source = f"{self._BASE}/{scope[1:]}/"
+        elif entry.username:
+            source = f"{self._BASE}/{entry.username}/"
+        elif first.startswith("@"):
+            source = f"{self._BASE}/{first[1:]}/"
+        elif first:
+            source = f"{self._BASE}/explore/tags/{first.lstrip('#')}/"
         else:
-            source = f"{self._BASE}/explore/tags/{scope.lstrip('#')}/"
-        by = f"@{entry.username}" if entry.username else scope
+            source = self._BASE
+        by = f"@{entry.username}" if entry.username else (first or "Instagram")
         return PinterestImage(
             # O prefixo evita colisão de id com pins na busca combinada.
             image_id=f"ig-{entry.media_id}",
@@ -1759,7 +2214,9 @@ def _pinterest_scrape_client(
     )
 
 
-def _instagram_scrape_client(settings: Settings) -> InstagramScrapeClient:
+def _instagram_scrape_client(
+    settings: Settings, avoid_media: Iterable[str] = ()
+) -> InstagramScrapeClient:
     return InstagramScrapeClient(
         timeout=settings.request_timeout_seconds,
         min_resolution=(settings.slide_width, settings.slide_height),
@@ -1768,6 +2225,9 @@ def _instagram_scrape_client(settings: Settings) -> InstagramScrapeClient:
         scrapedo_token=settings.scrapedo_token,
         apify_token=settings.apify_token,
         apify_actor=settings.apify_actor,
+        # O Instagram também precisa da memória do que já saiu: sem ela, o
+        # dataset da Apify (sempre na mesma ordem) repetia o carrossel.
+        avoid_media=avoid_media,
     )
 
 
@@ -1816,7 +2276,7 @@ def build_pinterest_client(
         return _pinterest_scrape_client(settings, avoid_media)
     if choice == "instagram_scrape":
         logger.info("Fonte de imagens: Instagram sem token.")
-        return _instagram_scrape_client(settings)
+        return _instagram_scrape_client(settings, avoid_media)
     if choice == "instagram_pinterest":
         logger.info("Fonte de imagens: Instagram + Pinterest (sem token).")
         source_limits = None
@@ -1824,7 +2284,7 @@ def build_pinterest_client(
             source_limits = {"instagram_scrape": max(int(instagram_images_count), 1)}
         return CombinedImageClient(
             [
-                _instagram_scrape_client(settings),
+                _instagram_scrape_client(settings, avoid_media),
                 _pinterest_scrape_client(settings, avoid_media),
             ],
             name="instagram_pinterest",

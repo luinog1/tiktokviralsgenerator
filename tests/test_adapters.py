@@ -349,10 +349,15 @@ def _unsplash_payload(photo_id: str = "abc123") -> dict:
     }
 
 
-def test_unsplash_rotates_pages_across_searches(monkeypatch):
+def test_unsplash_advances_the_page_on_every_search(monkeypatch):
     """A mesma query devolvia sempre a página 1 — parecia cache, mas era a
-    ordenação por relevância do Unsplash, que é estável. Sortear a página é o
-    que renova as fotos sem o usuário mudar os termos."""
+    ordenação por relevância do Unsplash, que é estável.
+
+    A página **avança** em vez de ser sorteada: um sorteio em 1..N repete a
+    página anterior uma vez em cada N, e uma vez em cada N é o suficiente para
+    o usuário ver a mesma foto em duas gerações seguidas. Andando em sequência,
+    a janela inteira é gasta antes de qualquer repetição.
+    """
     from app.adapters.pinterest_client import UnsplashClient
 
     pages: list[int] = []
@@ -363,17 +368,47 @@ def test_unsplash_rotates_pages_across_searches(monkeypatch):
 
     monkeypatch.setattr("app.adapters.pinterest_client.requests.get", _capture)
     client = UnsplashClient(access_key="chave-boa")
-    for _ in range(40):
+    janela = UnsplashClient._PAGE_WINDOW
+    for _ in range(janela):
         client.search("cafe da manha", limit=6)
 
-    assert len(set(pages)) > 1, "a página não variou entre buscas iguais"
-    assert all(1 <= p <= UnsplashClient._PAGE_WINDOW for p in pages)
+    assert pages == list(range(1, janela + 1)), "a página não andou em sequência"
+
+    # Fim da janela: volta à 1 (a relevância cai rápido depois dela).
+    client.search("cafe da manha", limit=6)
+    assert pages[-1] == 1
 
 
-def test_unsplash_retries_page_one_when_the_drawn_page_is_past_the_end(monkeypatch):
-    """Query com pouco acervo: a página sorteada volta vazia e a busca precisa
+def test_unsplash_keeps_a_separate_page_per_query(monkeypatch):
+    """O cursor é por query: o de "cafe" não pode empurrar "treino" para o meio
+    do catálogo dele."""
+    from app.adapters.pinterest_client import UnsplashClient
+
+    pages: list[tuple[str, int]] = []
+
+    def _capture(*args, **kwargs):
+        params = kwargs["params"]
+        pages.append((params["query"], params["page"]))
+        return _FakeResponse(200, _unsplash_payload())
+
+    monkeypatch.setattr("app.adapters.pinterest_client.requests.get", _capture)
+    client = UnsplashClient(access_key="chave-boa")
+    client.search("cafe da manha", limit=6)
+    client.search("cafe da manha", limit=6)
+    client.search("treino em casa", limit=6)
+
+    assert pages == [
+        ("cafe da manha", 1),
+        ("cafe da manha", 2),
+        ("treino em casa", 1),
+    ]
+
+
+def test_unsplash_retries_page_one_when_the_cursor_is_past_the_end(monkeypatch):
+    """Query com pouco acervo: a página do cursor volta vazia e a busca precisa
     reentrar dentro do total_pages em vez de cair no gradiente mock."""
     from app.adapters.pinterest_client import UnsplashClient, is_mock_image
+    from app.services import search_cursor
 
     calls: list[int] = []
 
@@ -385,7 +420,7 @@ def test_unsplash_retries_page_one_when_the_drawn_page_is_past_the_end(monkeypat
         return _FakeResponse(200, _unsplash_payload("only-one"))
 
     monkeypatch.setattr("app.adapters.pinterest_client.requests.get", _thin_catalog)
-    monkeypatch.setattr("app.adapters.pinterest_client.random.randint", lambda a, b: 4)
+    search_cursor.save_cursor("unsplash_search", "termo raro", page=3)
 
     images = UnsplashClient(access_key="chave-boa").search("termo raro", limit=6)
 

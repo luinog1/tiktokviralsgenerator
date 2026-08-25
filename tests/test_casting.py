@@ -589,3 +589,94 @@ def test_the_search_query_in_the_title_is_not_read_as_the_photo_caption():
 
     assert casting.image_ids == ["pessoa", "sem-legenda"]
     assert casting.categories == ["person", "scene"]
+
+
+# ---------- as alternativas de cada imagem são diferentes das dos outros ----------
+
+
+def test_two_slides_of_the_same_category_do_not_share_a_gallery():
+    """O defeito: a galeria de um slide ERA o pool inteiro da categoria dele.
+
+    Num carrossel com quatro slides de cenário, os quatro abriam a mesma lista,
+    na mesma ordem — trocar a foto do slide 3 oferecia exatamente as opções do
+    slide 4. A leitura correta disso, do lado de quem gera, é que não há
+    alternativa nenhuma.
+    """
+    images = [_image("retrato", POOL_HOOK)]
+    images += [_image(f"cena-{i}", POOL_SCENE) for i in range(30)]
+
+    casting = cast_carousel(_slides("hook", "value", "value", "value", "cta"), images)
+
+    galerias = [set(options) for options in casting.image_options]
+    for i, uma in enumerate(galerias):
+        for outra in galerias[i + 1 :]:
+            assert not (uma & outra), "duas galerias ofereceram a mesma foto"
+
+
+def test_every_image_gets_five_alternatives_of_its_own():
+    """O pedido é cinco alternativas POR IMAGEM, distintas das demais — com
+    acervo suficiente, é o que tem que acontecer."""
+    images = [_image("retrato", POOL_HOOK)]
+    images += [_image(f"prato-{i}", POOL_FOOD) for i in range(12)]
+    images += [_image(f"cena-{i}", POOL_SCENE) for i in range(30)]
+
+    casting = cast_carousel(
+        _slides("hook", "value", "value", "value", "value", "cta"),
+        images,
+        food_images_count=1,
+    )
+
+    todas: set[str] = set()
+    for escolhida, options in zip(casting.image_ids, casting.image_options):
+        alternativas = [o for o in options if o != escolhida]
+        assert len(alternativas) >= MIN_IMAGE_ALTERNATIVES
+        assert not (set(options) & todas), "uma foto foi oferecida em dois slides"
+        todas |= set(options)
+
+
+def test_a_chosen_photo_is_not_offered_as_an_alternative_elsewhere():
+    """Alternativa que já está em outro slide não é troca, é duplicata.
+
+    Vale enquanto houver material: com o acervo esgotado, a última passagem de
+    `_deal_options` oferece o que houver (ver
+    `test_a_short_pool_shares_instead_of_leaving_a_gallery_empty`).
+    """
+    images = [_image("retrato", POOL_HOOK)]
+    images += [_image(f"cena-{i}", POOL_SCENE) for i in range(30)]
+
+    casting = cast_carousel(_slides("hook", "value", "cta"), images)
+
+    escolhidas = {image_id for image_id in casting.image_ids if image_id}
+    for escolhida, options in zip(casting.image_ids, casting.image_options):
+        alheias = escolhidas - {escolhida}
+        assert not (set(options) & alheias)
+
+
+def test_the_first_alternative_still_comes_from_the_slide_category():
+    """A repartição não pode virar mistura: a primeira alternativa continua
+    sendo do mesmo tipo da foto escolhida."""
+    images = [_image(f"retrato-{i}", POOL_HOOK) for i in range(8)]
+    images += [_image(f"prato-{i}", POOL_FOOD) for i in range(8)]
+    images += [_image(f"cena-{i}", POOL_SCENE) for i in range(8)]
+
+    casting = cast_carousel(
+        _slides("hook", "value", "cta"), images, food_images_count=1
+    )
+
+    assert casting.image_options[0][1].startswith("retrato")
+    assert casting.image_options[1][1].startswith("prato")
+    assert casting.image_options[2][1].startswith("cena")
+
+
+def test_a_short_pool_shares_instead_of_leaving_a_gallery_empty():
+    """Exclusividade é o alvo, não a promessa: seis slides × seis fotos são 36
+    distintas, e o acervo pode não ter tanto. Galeria vazia é pior que galeria
+    compartilhada."""
+    images = [_image("retrato", POOL_HOOK)]
+    images += [_image(f"cena-{i}", POOL_SCENE) for i in range(3)]
+
+    casting = cast_carousel(_slides("hook", "value", "value", "cta"), images)
+
+    for options in casting.image_options:
+        assert options, "galeria vazia"
+        assert len(set(options)) == len(options), "foto repetida na mesma galeria"

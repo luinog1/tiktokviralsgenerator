@@ -53,6 +53,10 @@ POOL_SCENE = "scene"
 #
 # É "alternativas", não "tamanho da galeria": a foto que já está no slide não
 # conta como opção de troca, então a galeria tem MIN_IMAGE_ALTERNATIVES + 1.
+#
+# E são cinco alternativas **por imagem**, distintas das dos outros slides:
+# `_deal_options` reparte o acervo em vez de dar o mesmo pool a todo mundo.
+# Quem dimensiona a busca para isso é `GenerationService._pool_size`.
 MIN_IMAGE_ALTERNATIVES = 5
 MIN_IMAGE_OPTIONS = MIN_IMAGE_ALTERNATIVES + 1
 
@@ -229,11 +233,15 @@ def cast_carousel(
     result.image_ids = [""] * len(slides)
     result.categories = [""] * len(slides)
     result.image_options = [[] for _ in slides]
+    # O pool de cada slide, guardado para a repartição das alternativas no fim.
+    # Antes a galeria era o pool inteiro da categoria, gravado aqui mesmo — e
+    # por isso todos os slides de cenário abriam a MESMA lista (ver
+    # `_deal_options`). Agora cada galeria começa só com a foto escolhida.
+    slot_pools: list[list[PinterestImage]] = [[] for _ in slides]
     result.image_ids[hook_index] = hook_image_id
     result.categories[hook_index] = "person"
-    result.image_options[hook_index] = _image_ids(person_options)
-    if hook_image.image_id not in result.image_options[hook_index]:
-        result.image_options[hook_index].append(hook_image.image_id)
+    slot_pools[hook_index] = person_options
+    result.image_options[hook_index] = [hook_image.image_id] if hook_image.image_id else []
     used = {hook_image_id} if hook_image_id else set()
     repeat_indexes = {"person": 0, "food": 0, "scene": 0}
     repeated_roles: set[str] = set()
@@ -251,7 +259,7 @@ def cast_carousel(
     ):
         candidates = pools[role]
         result.categories[index] = role
-        result.image_options[index] = _image_ids(candidates)
+        slot_pools[index] = candidates
         image = _pick_unused(candidates, used)
         if image is None and candidates:
             # A cota continua correta quando faltam fotos distintas: repetir
@@ -290,7 +298,7 @@ def cast_carousel(
     # o VLM não avaliou tem afinidade 0 em todas as categorias e some dos três
     # pools. O que a visão não confirmou não serve para *decidir* o slide, mas
     # serve muito bem para o usuário olhar e escolher.
-    _top_up_options(result.image_options, images, scores)
+    _deal_options(result.image_options, slot_pools, images, scores)
 
     if matched_people < person_images_count:
         result.warnings.append(
@@ -482,17 +490,33 @@ def _pick_unused(
     return next((img for img in candidates if img.image_id not in used), None)
 
 
-def _top_up_options(
+def _deal_options(
     options: list[list[str]],
+    slot_pools: list[list[PinterestImage]],
     images: list[PinterestImage],
     scores: dict[str, float],
 ) -> None:
-    """Completa cada galeria até `MIN_IMAGE_OPTIONS`, in place.
+    """Reparte as alternativas: cada slide recebe fotos que os outros não têm.
 
-    O acréscimo vem no fim da lista e ordenado por score, então a galeria abre
-    com as fotos da categoria do slide e só depois oferece o resto do acervo.
-    Com menos fotos que o mínimo no acervo inteiro, sobra o que houver — o
-    número é um alvo, não uma promessa que a busca possa não conseguir cumprir.
+    O defeito que isto corrige: a galeria de um slide **era** o pool inteiro da
+    categoria dele. Num carrossel de seis slides com quatro de cenário, os
+    quatro abriam a mesma lista, na mesma ordem — trocar a foto do slide 3
+    oferecia exatamente as opções do slide 4, e a leitura correta disso, do
+    lado de quem gera, é que não há alternativa nenhuma.
+
+    A repartição é em rodadas: cada rodada dá UMA foto a cada slide, tirada
+    primeiro do pool da categoria dele (para a primeira alternativa continuar
+    sendo do mesmo tipo da foto escolhida) e depois do acervo inteiro ordenado
+    por score. Foto entregue sai da mesa, e a foto já escolhida em outro slide
+    nunca entra numa rodada — alternativa que já está em outro lugar não é
+    troca, é duplicata.
+
+    Exclusividade é o alvo, não a promessa: `MIN_IMAGE_OPTIONS` fotos para cada
+    um dos 12 slides possíveis são 72 fotos distintas, e o acervo pode não ter
+    tanto. Esgotadas as rodadas, a última passagem completa as galerias curtas
+    com o que houver — aí sim repetindo entre slides, inclusive a foto que está
+    noutro. Galeria vazia é pior que galeria compartilhada, e num acervo desse
+    tamanho o usuário precisa ver tudo o que existe.
     """
     ranked = [
         img.image_id
@@ -501,11 +525,26 @@ def _top_up_options(
         )
         if img.image_id
     ]
-    for slot in options:
-        if len(slot) >= MIN_IMAGE_OPTIONS:
-            continue
+    # A ordem de preferência de cada slide: a categoria dele primeiro, o resto
+    # do acervo depois.
+    preference = [
+        list(dict.fromkeys(_image_ids(pool) + ranked)) for pool in slot_pools
+    ]
+    dealt = {image_id for slot in options for image_id in slot}
+
+    for _ in range(MIN_IMAGE_ALTERNATIVES):
+        for slot, preferred in zip(options, preference):
+            if len(slot) >= MIN_IMAGE_OPTIONS:
+                continue
+            pick = next((image_id for image_id in preferred if image_id not in dealt), "")
+            if not pick:
+                continue
+            slot.append(pick)
+            dealt.add(pick)
+
+    for slot, preferred in zip(options, preference):
         present = set(slot)
-        for image_id in ranked:
+        for image_id in preferred:
             if len(slot) >= MIN_IMAGE_OPTIONS:
                 break
             if image_id in present:

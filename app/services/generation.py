@@ -66,11 +66,11 @@ class GenerationOutcome:
 class GenerationService:
     """Ponto único de orquestração do carrossel."""
 
-    # Quantas fotos buscar por categoria. Cada pool precisa cobrir a cota
-    # pedida **mais** as alternativas da galeria (`MIN_IMAGE_OPTIONS`): buscar
-    # só o que entra no carrossel deixava a prévia sem troca real, que era o
-    # sintoma de "as imagens estão escassas". Nem toda foto da query de retrato
-    # traz alguém em cena, então o piso é maior que o mínimo da galeria.
+    # Piso de fotos por categoria. Cada pool precisa cobrir a cota pedida
+    # **mais** as alternativas da galeria: buscar só o que entra no carrossel
+    # deixava a prévia sem troca real, que era o sintoma de "as imagens estão
+    # escassas". Nem toda foto da query de retrato traz alguém em cena, então o
+    # piso é maior que o mínimo da galeria.
     HOOK_POOL_SIZE = 14
     FOOD_POOL_SIZE = 14
     SCENE_POOL_SIZE = 14
@@ -374,13 +374,24 @@ class GenerationService:
                     "A pessoa fixada precisa do casting ligado (HOOK_SUBJECT) — "
                     "opção ignorada."
                 )
-            return self._search_pool(query, max(slides_count, 6), "", warnings)
+            # Sem casting há uma busca só, então ela carrega o carrossel e a
+            # galeria inteira: `slides × MIN_IMAGE_OPTIONS` fotos distintas.
+            return self._search_pool(
+                query,
+                max(max(slides_count, 1) * MIN_IMAGE_OPTIONS, 6),
+                "",
+                warnings,
+            )
 
         person_images_count = min(max(person_images_count, 1), slides_count)
         food_images_count = min(
             max(food_images_count, 0),
             max(slides_count - person_images_count, 0),
         )
+        general_count = max(slides_count - person_images_count - food_images_count, 0)
+        # Quantas buscas esta geração vai fazer. O total de fotos distintas que
+        # a galeria precisa é repartido entre elas.
+        active_pools = 1 + bool(food_images_count) + bool(general_count)
 
         hook_images: list[PinterestImage] = []
         if use_pinned_person:
@@ -388,7 +399,9 @@ class GenerationService:
         if not hook_images:
             hook_images = self._search_pool(
                 f"{query} {self._settings.hook_query_hints}".strip(),
-                max(self.HOOK_POOL_SIZE, person_images_count + MIN_IMAGE_OPTIONS),
+                self._pool_size(
+                    self.HOOK_POOL_SIZE, person_images_count, slides_count, active_pools
+                ),
                 POOL_HOOK,
                 warnings,
             )
@@ -396,16 +409,19 @@ class GenerationService:
         if food_images_count:
             food_images = self._search_pool(
                 f"{query} {self.FOOD_QUERY_HINTS}".strip(),
-                max(self.FOOD_POOL_SIZE, food_images_count + MIN_IMAGE_OPTIONS),
+                self._pool_size(
+                    self.FOOD_POOL_SIZE, food_images_count, slides_count, active_pools
+                ),
                 POOL_FOOD,
                 warnings,
             )
-        general_count = max(slides_count - person_images_count - food_images_count, 0)
         scene_images: list[PinterestImage] = []
         if general_count:
             scene_images = self._search_pool(
                 f"{query} {self._settings.scene_query_hints}".strip(),
-                max(self.SCENE_POOL_SIZE, general_count + MIN_IMAGE_OPTIONS),
+                self._pool_size(
+                    self.SCENE_POOL_SIZE, general_count, slides_count, active_pools
+                ),
                 POOL_SCENE,
                 warnings,
             )
@@ -431,6 +447,27 @@ class GenerationService:
         elif any(is_mock_image(img) for img in images):
             self._warn_mock_images(warnings)
         return images
+
+    @staticmethod
+    def _pool_size(
+        floor: int, quota: int, slides_count: int, active_pools: int = 1
+    ) -> int:
+        """Quantas fotos pedir a uma das buscas do casting.
+
+        A cota é o que entra no carrossel; o resto é a galeria. Como
+        `_deal_options` reparte as alternativas entre os slides em vez de dar o
+        mesmo pool a todos, o acervo inteiro precisa de `slides ×
+        MIN_IMAGE_OPTIONS` fotos distintas — 36 num carrossel de 6, 72 num de
+        12. `active_pools` divide esse total entre as buscas que vão rodar.
+
+        O piso continua valendo para o caso oposto: uma cota de 1 foto num
+        carrossel curto ainda pede pool suficiente para a busca ter o que
+        sortear e não repetir a geração anterior.
+        """
+        pools = max(int(active_pools or 0), 1)
+        wanted = max(int(slides_count or 0), 1) * MIN_IMAGE_OPTIONS
+        share = -(-wanted // pools)
+        return max(int(floor), max(int(quota or 0), 0) + share)
 
     def _search_pool(
         self,

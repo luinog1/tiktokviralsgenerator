@@ -419,3 +419,48 @@ def test_text_without_labels_still_goes_through_the_composer():
     outcome = _run(client, _service(client), raw_text=RAW)
 
     assert outcome.project.carousel["provider"] == "mock"
+
+
+# ---------- a busca dimensionada para as alternativas ----------
+
+
+def test_the_pool_covers_the_gallery_of_every_slide():
+    """`_deal_options` reparte o acervo para que cada imagem ofereça cinco
+    alternativas que os outros slides não oferecem. Isso só é possível se a
+    busca trouxer `slides × MIN_IMAGE_OPTIONS` fotos distintas — dimensionar o
+    pool só pela cota do carrossel deixava a prévia sem troca real."""
+    from app.services.casting import MIN_IMAGE_OPTIONS
+    from app.services.generation import GenerationService
+
+    for slides_count, food in ((3, 0), (6, 0), (6, 2), (12, 0)):
+        pessoas = 1
+        cenario = slides_count - pessoas - food
+        pools = 1 + bool(food) + bool(cenario)
+        total = GenerationService._pool_size(  # noqa: SLF001
+            GenerationService.HOOK_POOL_SIZE, pessoas, slides_count, pools
+        )
+        if food:
+            total += GenerationService._pool_size(  # noqa: SLF001
+                GenerationService.FOOD_POOL_SIZE, food, slides_count, pools
+            )
+        if cenario:
+            total += GenerationService._pool_size(  # noqa: SLF001
+                GenerationService.SCENE_POOL_SIZE, cenario, slides_count, pools
+            )
+        assert total >= slides_count * MIN_IMAGE_OPTIONS, (
+            f"{slides_count} slides com {food} de comida pedem {total} fotos, "
+            f"menos que as {slides_count * MIN_IMAGE_OPTIONS} da galeria"
+        )
+
+
+def test_the_pool_floor_still_holds_for_a_short_carousel():
+    """Cota de uma foto num carrossel curto ainda precisa de pool para sortear
+    e não repetir a geração anterior."""
+    from app.services.generation import GenerationService
+
+    assert (
+        GenerationService._pool_size(  # noqa: SLF001
+            GenerationService.HOOK_POOL_SIZE, 1, 1, 3
+        )
+        == GenerationService.HOOK_POOL_SIZE
+    )

@@ -2,9 +2,33 @@
 
 Aplicação Flask que transforma uma ideia em um roteiro de hooks e scripts e em um carrossel visual pronto para publicar — usando um endpoint LLM OpenAI-compatible, fotos do Pinterest ou do Instagram (busca **sem token**) ou do Unsplash, e renderização estilo **TikTok photo post** (1080×1350, 4:5). Painéis antigos do goviral.ai continuam podendo ser importados, mas não são necessários.
 
-> **Status:** MVP v0.22 — sem repetição entre gerações + 5 alternativas por imagem
+> **Status:** MVP v0.23 — busca com cursor (zero repetição medida) + alternativas exclusivas por imagem
 > **Stack:** Python 3.11 · Flask 3 · Jinja2 · WTForms · Pillow · Docker
 > **Idioma inicial:** Português (pt-BR)
+
+---
+
+## 🎯 O que mudou na v0.23
+
+- 🐛 **A busca era determinística, e nenhum sorteio consertava isso** — a v0.22 atacou o sintoma pelo lado errado. Medido em 2026-08-24 com `pinterest-dl` e a query `morning routine aesthetic`, duas chamadas seguidas devolvem os **mesmos 50 pins, na mesma ordem** (`overlap 50/50`, `ordem idêntica: True`); o Unsplash faz o mesmo com `order_by=relevant`. Sortear um recorte de um pool idêntico não resolve por dois motivos somados: dois sorteios de 14 num pool de ~40 se sobrepõem por aritmética, e o **ranking reordena os dois recortes pelo mesmo critério**, então as fotos do topo voltam ao carrossel toda vez. A correção é não pedir a mesma página: o `/resource/BaseSearchResource/` do Pinterest pagina por `bookmarks`, e guardar o bookmark da última página faz a geração seguinte continuar de onde a anterior parou — **as páginas puladas não são baixadas de novo**, então material novo custa o mesmo que material repetido custava. Medido no mesmo dia: página 1 e página 2 têm overlap **zero**, e o bookmark funciona numa instância nova de `Api`, ou seja, sobrevive ao fim da requisição HTTP.
+- ✅ **`instance/search_cursors.json` — onde cada busca parou** — o irmão do `recent_media.json`: por fonte (`pinterest_search`, `pinterest_related`, `unsplash_search`) e por query normalizada (sem acento, sem caixa, sem ordem), guarda o `bookmarks` do Pinterest ou o `page` do Unsplash. Chegando ao fim do acervo (`-end-`), o cursor **volta ao começo** — acervo esgotado tem que continuar devolvendo carrossel, e a essa altura o topo já não sai há muitas gerações. Cursor com mais de 14 dias é descartado (o acervo daquela query mudou nesse tempo). Bookmark que não responde mais recomeça do topo, e paginação indisponível cai no `search()` de sempre: carrossel repetido ainda é melhor que carrossel de gradiente.
+- ✅ **O Unsplash anda em sequência em vez de sortear a página** — sortear em 1..N repete a página anterior uma vez em cada N, e uma vez em cada N basta para o usuário ver a mesma foto em duas gerações seguidas. Agora a página avança a cada busca (janela de 8, cursor por query) e a janela inteira é gasta antes de qualquer repetição.
+- 🐛 **O Instagram não tinha memória nenhuma do que já saiu** — era a outra metade do "sempre o mesmo material", e ela nunca havia sido tocada: `_cut_pool` era chamado **sem** o `avoid`, o `InstagramScrapeClient` nem aceitava a memória, e a cota exata da Apify pedia exatamente as fotos que iam para os slides — de um dataset que devolve os posts mais recentes do alvo, sempre na mesma ordem. Ou seja: pedir 2 fotos devolvia as 2 mesmas fotos, para sempre. Agora a memória chega ao Instagram e a cota exata leva uma folga de 8 itens para haver o que sortear (bem menos que o pool antigo de 3×, com piso de 12, que a cota exata tinha vindo cortar).
+- 🐛 **Um termo que é um perfil do Instagram não achava nada** — buscar `bellebres` no site devolve o **perfil** de mesmo nome e os posts dele; `#bellebres` não existe. O app transformava a query em uma hashtag e só nisso, recebia zero e caía no gradiente, embora o termo tivesse resultado na plataforma. Agora a query vira **alvos**, na ordem em que o próprio site os mostra: um termo de uma palavra é tentado como perfil **e** como hashtag; um tema com espaços vira a hashtag colada (`rotinamatinal`) e as palavras soltas; `@perfil` ou `#hashtag` explícitos ficam sozinhos, porque quem escreveu disse qual alvo quer. Na Apify todos os alvos vão no **mesmo run** (`directUrls` aceita vários e o `maxItems` limita a cobrança do run inteiro, não de cada URL — então dois alvos custam o mesmo que um). Sem token, a tentativa é sequencial e o perfil vem primeiro, porque o endpoint de hashtag anônimo está atrás do muro de login de qualquer forma. Alvo que não existe (404) não encerra mais a busca, e o motivo na prévia diz quais alvos foram tentados.
+- 🐛 **As "5 alternativas" eram a mesma lista para todos os slides** — a galeria de um slide *era o pool inteiro da categoria dele*. Num carrossel com quatro slides de cenário, os quatro abriam a mesma lista, na mesma ordem: trocar a foto do slide 3 oferecia exatamente as opções do slide 4. Agora as alternativas são **repartidas em rodadas** — cada rodada dá uma foto a cada slide, tirada primeiro do pool da categoria dele (para a primeira alternativa continuar sendo do mesmo tipo da escolhida) e depois do acervo inteiro por score. Foto entregue sai da mesa: nem outro slide a recebe, nem a foto já escolhida em outro slide aparece como alternativa, porque alternativa que já está em outro lugar não é troca, é duplicata.
+- ✅ **A busca é dimensionada para essa repartição** — `slides × 6` fotos distintas (36 num carrossel de 6, 72 num de 12), divididas entre as buscas que a geração vai fazer de fato. Dividir sempre por três deixava o acervo curto justamente na configuração comum, em que a cota de comida é zero e só duas buscas rodam. O laço de paginação para no número de pins **acima do piso de resolução**, não num número de pins brutos: era o piso que virava o gargalo quando ele deixou de ceder.
+
+### Medição ponta a ponta (Pinterest real, 2026-08-24)
+
+Três gerações seguidas, query idêntica `morning routine aesthetic`, 19 fotos por geração:
+
+| | Fotos | Overlap com as outras gerações |
+| --- | --- | --- |
+| Geração 1 | 19 | — |
+| Geração 2 | 19 | **0** |
+| Geração 3 | 19 | **0** |
+
+**57 fotos distintas em 57 slots.** Uma geração completa (as duas buscas do casting, 42 fotos distintas para os 36 slots de galeria de um carrossel de 6) custou **8,1s** — a mesma ordem de grandeza dos 120 pins da v0.22, porque as páginas puladas não são rebaixadas.
 
 ---
 
@@ -27,15 +51,15 @@ Três camadas, e nenhuma delas sozinha resolvia:
 
 | Camada | O que faz | Por que não bastava sozinha |
 | --- | --- | --- |
-| **Pool de 120** | Triplica o acervo bruto por query. | Sem sorteio, um pool maior devolve os mesmos primeiros N. |
+| **`search_cursors.json`** (v0.23) | Retoma a busca de onde a geração anterior parou (bookmark do Pinterest, página do Unsplash). | Sozinha ela basta para o Pinterest, e é a única camada que ataca a causa: a busca é determinística. |
 | **Piso por ampliação** | Aproveita 71 dos 120 pins em vez de 40. | Um pool grande e um piso que reprova 2/3 dele dá no mesmo pool curto. |
-| **Amostra aleatória** | Sorteia quais pins entram, em vez de deslizar uma janela contígua. | Sorteio sem memória ainda repete por acaso: ~2,8 de 10. |
+| **Amostra aleatória** | Sorteia quais pins entram, em vez de deslizar uma janela contígua. | Sorteia dentro de um pool **idêntico** entre gerações — e o ranking depois reordena os dois recortes pelo mesmo critério, devolvendo o topo. |
 | **Query que acha algo** | Normaliza e encurta até a busca devolver fotos. | Query que não acha nada cai no mock, e o mock é determinístico por query — a repetição fica **perfeita**. |
-| **`recent_media.json`** | Manda para o fim do sorteio o que já saiu nos slides anteriores. | Sem pool fundo, a memória satura em uma rodada e vira sorteio puro. |
+| **`recent_media.json`** | Manda para o fim do sorteio o que já saiu nos slides anteriores. | Sem pool fundo, a memória satura em uma rodada e vira sorteio puro. Cobre o Instagram, onde não há cursor de página. |
 
-O arquivo fica no `instance/` (que está no `.gitignore`), como a pessoa fixada — os projetos vivem em memória com TTL e a memória precisa sobreviver ao restart. Apagá-lo zera o histórico e não quebra nada.
+Os arquivos ficam no `instance/` (que está no `.gitignore`), como a pessoa fixada — os projetos vivem em memória com TTL e a memória precisa sobreviver ao restart. Apagá-los zera o histórico e não quebra nada: sem cursor a busca recomeça do topo, sem memória o sorteio segue valendo.
 
-Medido ponta a ponta com a query do log de produção (hashtags, `@perfil` e 12 termos), três gerações seguidas de 6 slides: **18 fotos distintas em 18 slots**, zero gradiente mock, e no mínimo 5 alternativas por imagem.
+Medido ponta a ponta no Pinterest real (2026-08-24), três gerações seguidas com a query idêntica: **57 fotos distintas em 57 slots, overlap zero entre as três**.
 
 ---
 
@@ -577,6 +601,7 @@ curl -s http://localhost:5000/health | python -m json.tool
 │   │   ├── generation.py      # Orquestração do carrossel
 │   │   ├── casting.py         # Cotas por slide (pessoa, comida, cenário)
 │   │   ├── recent_media.py    # Fotos já usadas — não repetir na próxima geração
+│   │   ├── search_cursor.py   # Onde cada busca parou — a próxima pede a página seguinte
 │   │   ├── session_store.py   # Persistência leve (TTL)
 │   │   └── slide_renderer.py  # Pillow — overlay de texto em imagem
 │   └── routes/
