@@ -2,9 +2,32 @@
 
 Aplicação Flask que transforma uma ideia em um roteiro de hooks e scripts e em um carrossel visual pronto para publicar — usando um endpoint LLM OpenAI-compatible, fotos do Pinterest ou do Instagram (busca **sem token**) ou do Unsplash, e renderização estilo **TikTok photo post** (1080×1350, 4:5). Painéis antigos do goviral.ai continuam podendo ser importados, mas não são necessários.
 
-> **Status:** MVP v0.23 — busca com cursor (zero repetição medida) + alternativas exclusivas por imagem
+> **Status:** MVP v0.24 — a legenda que faltava (cotas de pessoa/comida respeitadas) + busca on-spot por @
 > **Stack:** Python 3.11 · Flask 3 · Jinja2 · WTForms · Pillow · Docker
 > **Idioma inicial:** Português (pt-BR)
+
+---
+
+## 🎯 O que mudou na v0.24
+
+- 🐛 **As cotas de pessoa e de comida não eram aplicadas porque o app quase não via legenda** — e sem legenda o `casting` não tem o que ler. O `pinterest-dl` copia só o `auto_alt_text` do pin para o campo que o casting consulta, e esse campo é raro: medido em 2026-08-25, ele existe em **23 de 50** pins de `morning routine aesthetic` e em **12 de 47** de `rotina matinal`. Os outros 54%–74% chegavam ao `_scene_affinity` sem sinal nenhum, caíam no ramo "sem foco detectado" e entravam num slide de cenário — fosse um close de smoothie ou um retrato de modelo. Ou seja: **mais da metade do acervo passava sem filtro**, e a restrição que o usuário escolheu no formulário valia só para a minoria com legenda. O payload cru do pin traz mais campos, e o `seo_alt_text` cobre **48/50** e **47/47**; `_enrich_captions` devolve esse texto aos pins que o parser da biblioteca deixa mudos. No mesmo lote de 50, a detecção sobe de **4 pessoa / 5 comida** para **17 pessoa / 13 comida**.
+- ✅ **Menção numa pilha de tags exclui, mas não qualifica** — o Pinterest devolve legenda em duas formas no mesmo campo. Uma é prosa ("a woman is doing yoga on a mat"), e nela a ORDEM diz o que está em primeiro plano — é o que as três regras da v0.22 leem. A outra é uma pilha de tags de SEO ("Chic Bedroom, Fitness Inspo, Fall Outfits"), onde a ordem não quer dizer nada: quem escreveu empilhou termos para ser achado. Aplicar "vence quem vem antes" a uma pilha é ler sentido onde não há. Agora a menção numa pilha vale como sinal **fraco**: tira a foto dos slides de cenário (a cota pedida é respeitada) mas não a usa para *preencher* a cota de pessoa ou de comida — chamar de "a foto de comida do carrossel" o que se sabe por uma tag solta erraria para o outro lado.
+- 🐛 **Uma mão no fim da frase anulava o retrato** — a regra "um pedaço do corpo não é um retrato" (v0.21) media a frase **inteira**: bastava um `hands` em qualquer posição para a foto deixar de contar como pessoa. Com isso "a woman sitting on a kitchen counter holding a juice **in her hands**" virava cenário confirmado e ia para um slide de b-roll — era o vazamento que sobrava depois de a legenda passar a chegar, e o que fazia "pedi 1 modelo e vieram várias". O que separa esse caso de "woman's hands holding a cup", que a regra acerta, é a **distância**: no possessivo a parte do corpo vem colada em quem a possui; dez palavras depois ela é só um detalhe da cena. O veto agora só vale nas duas palavras seguintes.
+- 🐛 **O `@perfil` zerava a busca do Pinterest, e o nome era justamente o melhor termo** — medido no site real: `bellebres` devolve **50 pins**, `@bellebres` devolve **0**. O Pinterest indexa o handle como palavra (o texto de um dos pins começa em "@ bellebres"), mas não entende o sigilo. O app apagava o token inteiro em dois pontos (`_plain_terms` e `_query_without_instagram_target`), então a busca combinada mandava ao Pinterest o resto da query e nenhuma pista de quem era a pessoa. Agora só o `@` sai e o nome fica — **para o Pinterest**. No Unsplash ele continua saindo: nome de perfil não existe em acervo de banco de imagens e ainda gastaria uma das poucas vagas que uma busca por palavra-chave aguenta.
+- ✅ **Busca on-spot: mais fotos do mesmo @, sem gerar outro carrossel** — quando nenhuma das seis fotos da galeria do hook serve, a única saída era gerar tudo de novo, texto e casting inclusive. A imagem 1 agora tem um campo de `@` e um botão que traz até **5 alternativas** daquele perfil, direto na galeria. Duas fontes, nesta ordem: o **Instagram** (Apify, os posts do próprio perfil — a resposta certa para "mais fotos desta modelo", e paga por item, por isso só roda no clique) e o **Pinterest** como reserva de graça, onde o handle sem arroba acha re-pins sobre aquela pessoa. As fotos entram no acervo do projeto e no `image_options` do `carousel` — esse detalhe importa: `to_edited_slides` valida a foto escolhida contra essa lista e devolveria a antiga em silêncio se a alternativa só existisse na tela. Foto do Instagram já volta apontando para o `/image-proxy`, senão o CDN deles a recusa no navegador e ela sai branca com a URL viva.
+
+### O que a legenda mudou, medido
+
+Mesma query (`morning routine aesthetic`), mesmos 50 pins:
+
+| | Pins com legenda | Detectado pessoa | Detectado comida |
+| --- | --- | --- | --- |
+| Antes (`auto_alt_text`) | 23/50 | 4 | 5 |
+| Depois (`+ seo_alt_text`) | **48/50** | **17** | **13** |
+
+Num carrossel de 6 slides com a cota padrão (1 pessoa, 0 comida), a verificação ponta a ponta no Pinterest real passou a devolver **0 fotos de pessoa e 0 de comida além da cota** — o hook com a pessoa e os cinco slides restantes com b-roll de verdade (mesa, laptop, cama, janela). O acervo de cenário que sobra depois do filtro estrito é de 18/50 e 34/47 por página, e o pager já anda até 300 pins — folga suficiente para as `slides × 6` fotos distintas que a galeria pede.
+
+> **Onde o metadado ainda não alcança:** uma pilha de tags como `Face Care Aesthetic, Skincare Ugc` quase sempre é foto de pessoa, e nenhuma palavra da lista aparece nela. Vocabulário não resolve isso sem inventar falso positivo (`skincare` também é flat-lay de produto). Quem decide esse caso é o VLM — com `VISION_ENABLED=true` a leitura da foto vence as três camadas de texto.
 
 ---
 
@@ -67,7 +90,7 @@ Medido ponta a ponta no Pinterest real (2026-08-24), três gerações seguidas c
 
 - ✅ **Quantidade de pessoas/modelos e comida por carrossel** — os formulários `/goviral` e `/create` ganharam **"Fotos com pessoas/modelos"** (1 a 12, incluindo o hook) e **"Fotos de comida"** (0 a 12). A soma é limitada ao número real de slides; o restante fica para cenário geral. Não há variável nova no Render: a escolha é feita em cada geração, como a cota do Instagram.
 - ✅ **Três buscas para reduzir repetição** — pessoa, comida e cenário usam pools e queries separados. O pool de comida inclui refeições, smoothie, frutas e bebidas; imagens repetidas entre pools são deduplicadas e o casting intercala as categorias, usando cada foto uma vez antes de repetir. O Qwen-VL configurado agora distingue `food` de `scene`; seu veredicto vence metadados e o pool de origem.
-- ✅ **Alta resolução virou requisito, não preferência** — Pinterest e Instagram só aceitam origens que cubram `SLIDE_WIDTH`×`SLIDE_HEIGHT` (1080×1350 por padrão). O piso não cai mais quando o acervo é fraco; a fonte devolve menos fotos ou fallback com aviso em vez de ampliar arquivo pequeno. No Unsplash, o CDN recebe `w=1080`, `h=1350`, `fit=crop` e `q=85` para entregar a imagem final no tamanho do slide.
+- ✅ **Alta resolução virou requisito, não preferência** — Pinterest e Instagram só aceitam origens que cubram `SLIDE_WIDTH`×`SLIDE_HEIGHT` (1080×1350 por padrão). O piso não cai mais quando o acervo é fraco; a fonte devolve menos fotos ou fallback com aviso em vez de ampliar arquivo pequeno. No Unsplash, o CDN recebe `w=1080`, `h=1350`, `fit=crop` e `fm=png`, evitando a recompressão JPEG `q=85` antes do render.
 
 ---
 
@@ -461,7 +484,7 @@ Reaproveitar essa sessão no servidor significaria repassar seus cookies, ou sej
 - Reposicionamento e tamanho de **cada caixa de texto** por arraste/controle na prévia (estilo `sticker`), refletidos no PNG exportado.
 - Galeria miniatura por slide para troca de imagem.
 - Exportação em três formatos:
-  - **ZIP** — todos os slides PNG + Markdown anexo.
+- **ZIP** — todos os slides PNG lossless + `carrossel.md` + `metadata.json` separado, com roteiro, dimensões e atribuições.
   - **PNG** — slide único (primeiro).
   - **Markdown** — texto plano com hashtags e atribuição.
 - Health check sem expor segredos.
@@ -507,7 +530,7 @@ python run.py
 8. Clique em "Gerar carrossel". Com o Qwen-VL configurado, a classificação visual confirma pessoa, comida e cenário; sem ele, o app usa metadados e o pool da busca.
 9. Na prévia, cada slide mostra seu papel e de onde veio a foto do hook (visão, metadado ou busca). Edite os textos e troque a imagem pela galeria.
 10. No estilo `sticker`, **arraste cada caixa** sobre a foto para reposicionar (duplo clique volta ao padrão) e use o controle de tamanho de cada caixa se quiser texto maior. Clique em "Salvar edições" para gravar.
-11. Exporte: **ZIP** (carrossel completo) ou **PNG** (slide único) ou **Markdown** (texto).
+11. Exporte: **ZIP** (carrossel completo, PNGs lossless + metadados) ou **PNG** (slide único) ou **Markdown** (texto).
 
 ---
 
@@ -559,7 +582,7 @@ No modo `instagram_pinterest`, o campo **Fotos do Instagram no modo combinado** 
 
 Os campos **Fotos com pessoas/modelos** e **Fotos de comida** também valem por geração e independem da fonte escolhida. O padrão continua sendo `1` pessoa (o hook) e `0` comida. Quando comida é pedida, a busca ganha um pool próprio com termos de refeições, smoothie, frutas e bebidas; o cenário geral deixa de pedir `food` por padrão. A soma das duas cotas nunca ultrapassa o número real de slides.
 
-O piso de qualidade é o tamanho final do slide. Pinterest e Instagram descartam qualquer origem comprovadamente menor que `SLIDE_WIDTH`×`SLIDE_HEIGHT`; medida ausente também não passa. O Unsplash entrega uma transformação do CDN no tamanho final, com qualidade `85`. Assim o renderer não precisa ampliar uma foto pequena para chegar a 1080×1350.
+O piso de qualidade é o tamanho final do slide. Pinterest e Instagram descartam qualquer origem comprovadamente menor que `SLIDE_WIDTH`×`SLIDE_HEIGHT`; medida ausente também não passa. O Unsplash entrega uma transformação PNG do CDN no tamanho final (`fm=png`), e o renderer faz apenas o cover final com LANCZOS. Assim não há recompressão JPEG no caminho até 1080×1350.
 
 **Por que a mesma query devolve fotos diferentes agora:** o `/search/photos` do Unsplash ordena por relevância e essa ordem é estável — a página 1 de "café da manhã" é sempre a mesma. Não havia cache no app; era determinismo da API. Cada busca agora sorteia uma página entre 1 e 5 (`UnsplashClient._PAGE_WINDOW`), o que renova o resultado sem cair em fotos irrelevantes. A página escolhida aparece no log `INFO`. Se a query tem acervo curto e a página sorteada vem vazia, a busca reentra dentro do `total_pages` em vez de cair no gradiente mock.
 
@@ -685,6 +708,7 @@ Cobertura (511 testes):
 | POST | `/pin-person` | Fixa a pessoa da foto do hook (guarda o pin para os próximos carrosséis) |
 | POST | `/pin-person/clear` | Esquece a pessoa fixada |
 | GET | `/preview/<id>` | Exibe carrossel com slides editáveis |
+| POST | `/preview/<id>/hook-alternatives` | Busca on-spot: até 5 fotos de hook de um `@` (Instagram, com Pinterest de reserva) |
 | POST | `/preview/<id>/edit` | Atualiza slides editados |
 | POST | `/preview/<id>/export` | Baixa ZIP / PNG / Markdown |
 | GET | `/health` | Health check JSON |

@@ -22,6 +22,7 @@ from app.adapters.pinterest_client import (
     UnsplashClient,
     _pinimg_thumb,
     _covers_slide,
+    _enrich_captions,
     _query_attempts,
     build_pinterest_client,
     is_mock_image,
@@ -720,15 +721,48 @@ def test_no_floor_configured_accepts_anything():
     assert _covers_slide(_Res(10, 10), (0, 0))
 
 
+def test_unsplash_requests_a_lossless_final_variant():
+    from urllib.parse import parse_qs, urlsplit
+
+    from app.adapters.pinterest_client import _sized_unsplash_url
+
+    url = _sized_unsplash_url(
+        "https://images.unsplash.com/photo-test?ixid=abc&q=85&auto=format",
+        (1080, 1350),
+    )
+    query = parse_qs(urlsplit(url).query)
+
+    assert query["w"] == ["1080"]
+    assert query["h"] == ["1350"]
+    assert query["fit"] == ["crop"]
+    assert query["fm"] == ["png"]
+    assert "q" not in query
+    assert "auto" not in query
+
+
 # ---------- a query que não achava nada ----------
 
 
 def test_hashtags_and_profile_handles_leave_the_keyword_search():
-    """`#praia` vira token desconhecido e `@perfil` é alvo do Instagram — os
-    dois chegam aqui porque o mesmo formulário alimenta as três fontes."""
+    """`#praia` vira token desconhecido e `@perfil` não existe num banco de
+    imagens — os dois chegam aqui porque o mesmo formulário alimenta as três
+    fontes. É o padrão, que serve ao Unsplash."""
     attempts = _query_attempts("praia #verao @bellebres sol")
 
     assert attempts[0] == "praia verao sol"
+
+
+def test_the_profile_handle_stays_as_a_word_when_the_caller_asks():
+    """No Pinterest o nome do perfil acha pins; o `@` é que não.
+
+    Medido no site real em 2026-08-25: `bellebres` devolve 50 pins e
+    `@bellebres` devolve zero. Por isso a busca do Pinterest pede
+    `keep_handles=True` e a do Unsplash não — lá o nome não existe em acervo
+    nenhum e só gastaria uma das poucas vagas da query.
+    """
+    attempts = _query_attempts("praia #verao @bellebres sol", keep_handles=True)
+
+    assert attempts[0] == "praia verao bellebres sol"
 
 
 def test_a_repeated_term_does_not_take_two_slots():
@@ -954,3 +988,64 @@ def test_the_search_cursor_and_the_related_cursor_are_separate(install_pager):
     client.related(_PIN_URL, limit=6)
 
     assert calls[0]["bookmarks"] == []
+
+
+# ---------- a legenda que o parser da biblioteca joga fora ----------
+
+
+def test_the_caption_comes_from_seo_alt_text_when_auto_alt_text_is_empty():
+    """`auto_alt_text` existe em menos da metade dos pins — medido em
+    2026-08-25, 23 de 50 em `morning routine aesthetic` e 12 de 47 em `rotina
+    matinal`. `seo_alt_text` cobre 48/50 e 47/47.
+
+    Sem legenda, `casting._focus` não tem o que ler e a foto entra num slide de
+    cenário mesmo sendo um close de comida ou um retrato: era esse buraco que
+    furava as cotas de pessoa e de comida.
+    """
+    media = _FakeMedia(id=7, src="https://i.pinimg.com/originals/a/b/c/p.jpg")
+    media.alt = ""
+
+    _enrich_captions([media], [{
+        "id": "7",
+        "auto_alt_text": "",
+        "seo_alt_text": "a woman doing yoga on a mat",
+    }])
+
+    assert media.alt == "a woman doing yoga on a mat"
+
+
+def test_the_caption_the_library_already_found_is_kept():
+    media = _FakeMedia(id=7, src="https://x/p.jpg", alt="a bright bedroom")
+
+    _enrich_captions([media], [{
+        "id": "7",
+        "auto_alt_text": "a bright bedroom",
+        "seo_alt_text": "Bedroom Decor, Cozy Interior, Neutral Aesthetic",
+    }])
+
+    assert media.alt == "a bright bedroom"
+
+
+def test_the_short_title_is_kept_apart_from_the_caption():
+    """O `title` é da prévia e o `alt` é do casting — o pin traz os dois, e o
+    título escrito por gente ("Early Mornings") lê melhor na galeria que a
+    pilha de tags que serve de legenda."""
+    media = _FakeMedia(id=7, src="https://x/p.jpg")
+    media.alt = ""
+
+    _enrich_captions([media], [{
+        "id": "7",
+        "grid_title": "Early Mornings",
+        "seo_alt_text": "Morning Routine Ideas, Cozy Aesthetic, Slow Living",
+    }])
+
+    assert media.grid_title == "Early Mornings"
+    assert media.alt == "Morning Routine Ideas, Cozy Aesthetic, Slow Living"
+
+
+def test_a_pin_the_raw_payload_does_not_describe_is_left_alone():
+    media = _FakeMedia(id=7, src="https://x/p.jpg", alt="a bright bedroom")
+
+    _enrich_captions([media], [{"id": "outro", "seo_alt_text": "outra coisa"}])
+
+    assert media.alt == "a bright bedroom"

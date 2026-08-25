@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import re
 import zipfile
 
@@ -363,6 +364,15 @@ def test_full_flow_with_preview_and_export(client):
     # Deve conter 3 PNGs + 1 MD
     assert sum(1 for n in names if n.endswith(".png")) == 3
     assert any(n.endswith(".md") for n in names)
+    assert "metadata.json" in names
+    metadata = json.loads(zf.read("metadata.json"))
+    assert metadata["canvas"] == {
+        "width": 1080,
+        "height": 1350,
+        "format": "PNG",
+        "compression": "lossless",
+    }
+    assert len(metadata["slides"]) == 3
     # Markdown deve conter a headline do primeiro slide
     md_content = next(zf.read(n) for n in names if n.endswith(".md")).decode("utf-8")
     assert "Slide" in md_content
@@ -815,3 +825,201 @@ def test_preview_page_sends_instagram_images_through_the_proxy(client):
     assert "/image-proxy?u=https://scontent-waw2-1.cdninstagram.com" in body
     assert 'src="https://scontent' not in body
     assert "background-image: url('https://scontent" not in body
+
+
+# ---------- busca on-spot: mais fotos do mesmo @, direto da prévia ----------
+
+
+def _hook_project(options=("person-1",)):
+    """Um projeto pronto na prévia, com a imagem 1 no papel de hook."""
+    images = [{
+        "image_id": "person-1",
+        "image_url": "https://img/person-1.jpg",
+        "source_url": "https://source",
+        "title": "retrato",
+        "description": "",
+        "attribution_text": "Teste",
+        "pool": "hook",
+    }]
+    slides = [
+        {
+            "headline": "Hook",
+            "role": "hook",
+            "image_id": "person-1",
+            "image_category": "person",
+            "image_options": list(options),
+        },
+        {
+            "headline": "Cena",
+            "role": "cta",
+            "image_id": "person-1",
+            "image_category": "scene",
+            "image_options": ["person-1"],
+        },
+    ]
+    return get_store().create(
+        briefing={"theme": "teste"},
+        carousel={"slides": slides, "hashtags": [], "caption": ""},
+        images=images,
+        ranking=[],
+        style="quote",
+        slides_count=2,
+        raw_text="teste",
+    )
+
+
+def _found(*ids):
+    from app.adapters.pinterest_client import PinterestImage
+
+    return [
+        PinterestImage(
+            image_id=image_id,
+            image_url=f"https://img/{image_id}.jpg",
+            source_url="https://source",
+            title=image_id,
+        )
+        for image_id in ids
+    ]
+
+
+def test_the_on_spot_search_adds_the_photos_to_the_hook_gallery(client, monkeypatch):
+    project = _hook_project()
+    monkeypatch.setattr(
+        "app.routes.preview.search_by_handle",
+        lambda *a, **k: (_found("ig-1", "ig-2"), "instagram", ""),
+    )
+
+    response = client.post(
+        f"/preview/{project.project_id}/hook-alternatives",
+        json={"handle": "@bellebres"},
+    )
+
+    data = response.get_json()
+    assert data["ok"] is True
+    assert data["source"] == "instagram"
+    assert [img["image_id"] for img in data["images"]] == ["ig-1", "ig-2"]
+
+    stored = get_store().get(project.project_id)
+    assert [img["image_id"] for img in stored.images] == ["person-1", "ig-1", "ig-2"]
+
+
+def test_the_new_photos_land_in_the_canonical_image_options(client, monkeypatch):
+    """`to_edited_slides` valida a foto escolhida contra o `image_options` do
+    `carousel` e devolve a antiga quando ela não está lá.
+
+    Se a alternativa nova só existisse na tela, escolher e salvar descartaria a
+    escolha em silêncio — o usuário veria a foto voltar sozinha.
+    """
+    project = _hook_project()
+    monkeypatch.setattr(
+        "app.routes.preview.search_by_handle",
+        lambda *a, **k: (_found("ig-1"), "instagram", ""),
+    )
+
+    client.post(
+        f"/preview/{project.project_id}/hook-alternatives",
+        json={"handle": "bellebres"},
+    )
+
+    stored = get_store().get(project.project_id)
+    assert stored.carousel["slides"][0]["image_options"] == ["person-1", "ig-1"]
+
+
+def test_a_photo_found_on_the_spot_survives_saving_the_edit(client, monkeypatch):
+    """A prova de ponta a ponta: buscar, escolher a nova e salvar."""
+    project = _hook_project()
+    monkeypatch.setattr(
+        "app.routes.preview.search_by_handle",
+        lambda *a, **k: (_found("ig-1"), "instagram", ""),
+    )
+    client.post(
+        f"/preview/{project.project_id}/hook-alternatives",
+        json={"handle": "bellebres"},
+    )
+
+    client.post(
+        f"/preview/{project.project_id}/edit",
+        data={
+            "headlines-0": "Hook", "headlines-1": "Cena",
+            "bodies-0": "", "bodies-1": "corpo",
+            "ctas-0": "", "ctas-1": "cta",
+            "selected_image_ids-0": "ig-1",
+            "selected_image_ids-1": "person-1",
+            "text_positions-0": "", "text_positions-1": "",
+            "box_positions-0": "", "box_positions-1": "",
+            "box_scales-0": "", "box_scales-1": "",
+        },
+    )
+
+    stored = get_store().get(project.project_id)
+    assert stored.edited_slides[0]["image_id"] == "ig-1"
+
+
+def test_the_on_spot_search_explains_itself_when_it_finds_nothing(client, monkeypatch):
+    project = _hook_project()
+    monkeypatch.setattr(
+        "app.routes.preview.search_by_handle",
+        lambda *a, **k: ([], "", "Sem APIFY_TOKEN, o Instagram não responde por perfil."),
+    )
+
+    response = client.post(
+        f"/preview/{project.project_id}/hook-alternatives",
+        json={"handle": "bellebres"},
+    )
+
+    data = response.get_json()
+    assert data["ok"] is False
+    assert "APIFY_TOKEN" in data["reason"]
+
+
+def test_the_on_spot_search_needs_a_handle(client):
+    project = _hook_project()
+
+    response = client.post(
+        f"/preview/{project.project_id}/hook-alternatives", json={"handle": "  @  "}
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["ok"] is False
+
+
+def test_the_on_spot_search_on_an_expired_project_says_so(client):
+    response = client.post(
+        "/preview/does-not-exist/hook-alternatives", json={"handle": "bellebres"}
+    )
+
+    assert response.status_code == 404
+
+
+def test_an_instagram_photo_comes_back_already_proxied(client, monkeypatch):
+    """O CDN do Instagram manda `Cross-Origin-Resource-Policy: same-origin`.
+
+    A URL responde, mas o navegador recusa pintar a imagem na prévia — a foto
+    sai branca com a URL viva, que é o jeito mais confuso possível de falhar.
+    O Instagram é a fonte principal desta busca, então a resposta já sai
+    apontando para o `/image-proxy`.
+    """
+    project = _hook_project()
+    from app.adapters.pinterest_client import PinterestImage
+
+    monkeypatch.setattr(
+        "app.routes.preview.search_by_handle",
+        lambda *a, **k: (
+            [PinterestImage(
+                image_id="ig-1",
+                image_url="https://scontent-lhr8-1.cdninstagram.com/v/t51.jpg",
+                source_url="https://instagram.com/p/x",
+                title="post",
+            )],
+            "instagram",
+            "",
+        ),
+    )
+
+    response = client.post(
+        f"/preview/{project.project_id}/hook-alternatives",
+        json={"handle": "bellebres"},
+    )
+
+    url = response.get_json()["images"][0]["url"]
+    assert url.startswith("/image-proxy?u=")

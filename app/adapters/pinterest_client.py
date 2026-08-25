@@ -101,17 +101,27 @@ _HANDLE_RE = re.compile(r"(?<!\w)@[\w.]+")
 _HASHTAG_RE = re.compile(r"#(\w+)")
 
 
-def _plain_terms(query: str) -> list[str]:
+def _plain_terms(query: str, keep_handles: bool = False) -> list[str]:
     """Os termos da query como uma busca por palavra-chave os entende.
 
-    Tira `@perfil`, desembrulha `#hashtag` para a palavra e remove repetição —
-    o mesmo termo costuma chegar duas vezes porque o tema e as dicas de casting
+    Desembrulha `#hashtag` para a palavra e remove repetição — o mesmo termo
+    costuma chegar duas vezes porque o tema e as dicas de casting
     se sobrepõem ("lifestyle cozy … aesthetic lifestyle travel" tinha
     *lifestyle* e *aesthetic* duplicados no log de produção). Termo repetido não
     melhora a relevância e ainda gasta uma das poucas vagas que uma busca por
     palavra-chave aguenta antes de não devolver nada.
+
+    O `@perfil` sai ou vira palavra conforme `keep_handles`, porque as duas
+    fontes discordam sobre ele. Medido em 2026-08-25 no Pinterest real:
+    `bellebres` devolve **50 pins** e `@bellebres` devolve **0** — o site indexa
+    o handle como palavra (o texto de um dos pins começa em "@ bellebres"), mas
+    não entende o sigilo. Apagar o token inteiro, que era o que se fazia aqui,
+    jogava fora justamente o termo mais específico da query. Num banco de
+    imagens o nome não existe em acervo nenhum e ainda gastaria uma vaga, então
+    para o Unsplash ele continua saindo.
     """
-    cleaned = _HASHTAG_RE.sub(r"\1", _HANDLE_RE.sub(" ", str(query or "")))
+    handle_sub = (lambda m: m.group(0)[1:]) if keep_handles else " "
+    cleaned = _HASHTAG_RE.sub(r"\1", _HANDLE_RE.sub(handle_sub, str(query or "")))
     seen: set[str] = set()
     terms: list[str] = []
     for word in cleaned.split():
@@ -135,7 +145,7 @@ def _plain_terms(query: str) -> list[str]:
 _HINT_TAIL = 4
 
 
-def _query_attempts(query: str) -> list[str]:
+def _query_attempts(query: str, keep_handles: bool = False) -> list[str]:
     """A mesma busca, da mais específica para a mais genérica.
 
     Uma busca por palavra-chave devolve **zero** quando a query tem termos
@@ -149,7 +159,7 @@ def _query_attempts(query: str) -> list[str]:
     reconhece no resultado) e as dicas do fim (que fazem o casting funcionar).
     O último passo é só o tema — se nem ele achar nada, não havia o que achar.
     """
-    terms = _plain_terms(query)
+    terms = _plain_terms(query, keep_handles=keep_handles)
     if not terms:
         return []
     attempts = [terms]
@@ -447,19 +457,30 @@ class UnsplashClient:
 
 
 def _sized_unsplash_url(url: str, target_size: tuple[int, int]) -> str:
-    """Pede ao CDN uma imagem final que já cobre o slide em alta qualidade."""
+    """Pede ao CDN uma imagem final que já cobre o slide sem recompressão JPEG.
+
+    O renderer sempre grava PNG lossless. Se o CDN entregasse JPEG `q=85`
+    antes da composição, porém, o detalhe já teria sido perdido antes de o
+    PNG existir. `fm=png` mantém a origem fotográfica em uma etapa lossless e
+    o crop continua limitado ao tamanho real do slide para não baixar pixels
+    que serão descartados.
+    """
     if not url:
         return ""
     width, height = target_size
     parts = urlsplit(url)
     query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    # `urls.raw` normalmente já traz `q=...&auto=format`. Manter esses
+    # parâmetros junto de `fm=png` deixa o contrato ambíguo e permite que a
+    # transformação herdada continue escolhendo um formato com perdas.
+    query.pop("q", None)
+    query.pop("auto", None)
     query.update({
         "w": str(max(int(width), 1)),
         "h": str(max(int(height), 1)),
         "fit": "crop",
         "crop": "entropy",
-        "q": "85",
-        "auto": "format",
+        "fm": "png",
     })
     return urlunsplit(
         (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
@@ -698,6 +719,54 @@ def _pinterest_search_url(query: str) -> str:
     return f"https://www.pinterest.com/search/pins/?q={quote(query)}&rs=typed"
 
 
+# Os campos de texto do pin cru, do mais descritivo ao menos. O `pinterest-dl`
+# só copia `auto_alt_text` para `PinterestMedia.alt`, e esse campo vem vazio na
+# maioria dos pins — medido em 2026-08-25, `auto_alt_text` existe em **23 de
+# 50** pins de `morning routine aesthetic` e em **12 de 47** de `rotina
+# matinal`, enquanto `seo_alt_text` cobre **48/50** e **47/47**.
+#
+# Era esse buraco que furava as cotas de pessoa e de comida: sem legenda,
+# `casting._focus` não tem o que ler, a foto cai no ramo "sem sinal" de
+# `_scene_affinity` e entra num slide de cenário mesmo sendo um close de café
+# ou um retrato. Ou seja, mais da metade do acervo passava sem filtro nenhum.
+# Com `seo_alt_text` a detecção no mesmo lote sobe de 4 pessoa/5 comida para
+# 17 pessoa/13 comida.
+_PIN_CAPTION_FIELDS = ("auto_alt_text", "seo_alt_text", "description")
+
+# Título curto para a prévia. Não serve de legenda para o casting: `title` é
+# escrito pelo autor do pin ("Early Mornings") e fala do board, não da foto.
+_PIN_TITLE_FIELDS = ("grid_title", "title")
+
+
+def _pin_text(item: dict[str, Any], fields: tuple[str, ...]) -> str:
+    for field in fields:
+        value = item.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _enrich_captions(medias: list[Any], data: list[Any]) -> None:
+    """Devolve aos pins o texto que o parser da biblioteca descarta.
+
+    `PinterestMedia` carrega um campo de texto só (`alt`), preenchido com
+    `auto_alt_text`. O payload cru traz mais quatro, e é neles que está a
+    legenda da maioria dos pins — ver :data:`_PIN_CAPTION_FIELDS`.
+    """
+    raw = {
+        str(item.get("id") or ""): item
+        for item in data
+        if isinstance(item, dict) and item.get("id")
+    }
+    for media in medias:
+        item = raw.get(str(getattr(media, "id", "") or ""))
+        if not item:
+            continue
+        if not str(getattr(media, "alt", "") or "").strip():
+            media.alt = _pin_text(item, _PIN_CAPTION_FIELDS)
+        media.grid_title = _pin_text(item, _PIN_TITLE_FIELDS)
+
+
 class _PinterestPager:
     """Páginas da busca do Pinterest, retomando de onde a última geração parou.
 
@@ -814,12 +883,14 @@ class _PinterestPager:
         if not isinstance(data, list) or not data:
             return []
         try:
-            return list(self._parser_cls.from_responses(data, (0, 0)))
+            medias = list(self._parser_cls.from_responses(data, (0, 0)))
         except Exception as exc:
             logger.info(
                 "Pinterest: página não pôde ser lida (%s).", type(exc).__name__
             )
             return []
+        _enrich_captions(medias, data)
+        return medias
 
     @staticmethod
     def _bookmarks(response: Any) -> list[str]:
@@ -941,7 +1012,7 @@ class PinterestScrapeClient:
         no site e não achava nada aqui só por causa da companhia. Os degraus
         vêm de `_query_attempts`.
         """
-        for attempt, texto in enumerate(_query_attempts(query)):
+        for attempt, texto in enumerate(_query_attempts(query, keep_handles=True)):
             medias = self._paged_or_top(texto, limit)
             if medias:
                 if attempt:
@@ -1094,7 +1165,13 @@ class PinterestScrapeClient:
         # `alt` é a descrição que o Pinterest guarda do pin ("a woman sitting
         # on a couch…") — a mesma forma do `alt_description` do Unsplash, que é
         # onde o casting procura por pessoa quando não há VLM configurado.
+        # `_enrich_captions` já completou o campo quando o `auto_alt_text` do
+        # pin veio vazio, que é o caso na maioria deles.
         alt = str(getattr(media, "alt", "") or "").strip()
+        # O título é da prévia, não do casting: quando o pin tem um título
+        # curto e escrito por gente ("Early Mornings"), ele lê melhor que a
+        # legenda inteira — que às vezes é uma pilha de tags de SEO.
+        grid_title = str(getattr(media, "grid_title", "") or "").strip()
         media_id = str(getattr(media, "id", "") or "")
         src = str(getattr(media, "src", "") or "")
         return PinterestImage(
@@ -1105,7 +1182,7 @@ class PinterestScrapeClient:
                 str(getattr(media, "origin", "") or "")
                 or f"https://www.pinterest.com/pin/{media_id}/"
             ),
-            title=(alt or query)[:200],
+            title=(grid_title or alt or query)[:200],
             description="",
             alt=alt[:200],
             attribution_text="Pin do Pinterest",
@@ -2060,8 +2137,15 @@ class InstagramScrapeClient:
 
 
 def _query_without_instagram_target(query: str) -> str:
-    """Remove @perfil e conserva #hashtag como termo para a outra fonte."""
-    cleaned = re.sub(r"(?<!\w)@[\w.]+", " ", str(query or ""))
+    """Tira o `@` e o `#`, conservando as duas palavras para a outra fonte.
+
+    A outra fonte aqui é sempre o Pinterest — só o modo `instagram_pinterest`
+    chama isto —, e lá o handle **sem arroba** é um termo de busca legítimo:
+    `bellebres` devolve 50 pins, `@bellebres` devolve zero. Apagar o nome
+    deixava o Pinterest com o resto da query e nenhuma pista de quem era a
+    pessoa, que é justamente o que a busca combinada quer preservar.
+    """
+    cleaned = re.sub(r"(?<!\w)@([\w.]+)", r"\1", str(query or ""))
     cleaned = re.sub(r"#([\w]+)", r"\1", cleaned)
     return " ".join(cleaned.split()) or "lifestyle aesthetic"
 

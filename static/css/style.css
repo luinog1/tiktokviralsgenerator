@@ -1187,3 +1187,20 @@ a:hover { text-decoration: underline; }
   flex-wrap: wrap;
   margin: 8px 0 0;
 }
+
+/* Busca on-spot de mais fotos do mesmo @ — mesma linha do botao de fixar. */
+.hook-search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px 0 0;
+}
+
+/* O campo divide a linha com o botao, entao ele nao ocupa a largura toda. */
+.input-sm {
+  flex: 0 1 190px;
+  min-width: 140px;
+  padding: 6px 10px;
+  font-size: 0.85rem;
+}

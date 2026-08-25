@@ -224,9 +224,7 @@ class SlideRenderer:
                 box_scales=slide.box_scales,
                 outline=style == "sticker_outline",
             )
-            buffer = io.BytesIO()
-            canvas.save(buffer, format="PNG", optimize=True)
-            return buffer.getvalue()
+            return _encode_lossless_png(canvas)
         if style == "list":
             self._draw_list_layout(draw, headline, body, cta, fonts, text_color, accent_color)
         elif style == "tutorial":
@@ -256,9 +254,7 @@ class SlideRenderer:
         )
 
         # 5. Exportar PNG
-        buffer = io.BytesIO()
-        canvas.save(buffer, format="PNG", optimize=True)
-        return buffer.getvalue()
+        return _encode_lossless_png(canvas)
 
     # ---------- layouts ----------
 
@@ -847,10 +843,26 @@ class SlideRenderer:
             new_h = int(src_w / target_ratio)
             top = (src_h - new_h) // 2
             img = img.crop((0, top, new_w, top + new_h))
-        return img.resize((target_w, target_h), Image.LANCZOS)
+        # LANCZOS + reducing_gap preserva mais detalhe quando uma origem grande
+        # precisa cair para os 1080x1350 finais. A conversão para RGB também
+        # normaliza JPEG CMYK/PNG paletizado antes de colar no canvas sRGB.
+        return img.convert("RGB").resize(
+            (target_w, target_h),
+            Image.Resampling.LANCZOS,
+            reducing_gap=3.0,
+        )
 
     def _fetch_image(self, url: str):
-        from PIL import Image
+        from PIL import Image, ImageOps
+
+        def decoded(source):
+            with Image.open(source) as opened:
+                opened.load()
+                # Fotos de celular costumam guardar a rotação no EXIF. Se o
+                # EXIF for descartado sem aplicar a rotação, o cover recorta a
+                # orientação errada e desperdiça resolução útil.
+                return ImageOps.exif_transpose(opened).convert("RGB")
+
         if not url:
             return None
         # Print do GoViral app: a URL é relativa (servida pelo Flask) e o
@@ -860,7 +872,7 @@ class SlideRenderer:
             if not path:
                 return None
             try:
-                return Image.open(path)
+                return decoded(path)
             except Exception as exc:
                 logger.warning("Não foi possível abrir asset local: %s", type(exc).__name__)
                 return None
@@ -871,13 +883,23 @@ class SlideRenderer:
             try:
                 import base64
                 header, b64 = url.split(",", 1)
-                return Image.open(io.BytesIO(base64.b64decode(b64)))
+                return decoded(io.BytesIO(base64.b64decode(b64)))
             except Exception:
                 return None
         try:
-            response = requests.get(url, timeout=10)
+            response = requests.get(
+                url,
+                timeout=10,
+                headers={
+                    # Não anunciar AVIF/WebP aqui: alguns CDNs escolheriam uma
+                    # variante com perdas mesmo quando a URL aponta para a
+                    # origem grande. Pinterest/Unsplash já entregam JPEG/PNG.
+                    "Accept": "image/png,image/jpeg",
+                    "User-Agent": "ViralPostStudio/1.0",
+                },
+            )
             response.raise_for_status()
-            return Image.open(io.BytesIO(response.content))
+            return decoded(io.BytesIO(response.content))
         except Exception as exc:
             logger.warning("Não foi possível baixar imagem: %s", type(exc).__name__)
             return None
@@ -891,6 +913,24 @@ class SlideRenderer:
 
 
 # ---------- helpers de módulo ----------
+
+
+def _encode_lossless_png(canvas) -> bytes:
+    """Serializa o canvas sem uma etapa JPEG/WebP ou redução de dimensão.
+
+    PNG é lossless; `optimize`/`compress_level` só alteram o tamanho do
+    arquivo, não os pixels. Deixar a política num helper único evita que um
+    estilo futuro reintroduza uma conversão com perdas por acidente.
+    """
+    buffer = io.BytesIO()
+    canvas.save(
+        buffer,
+        format="PNG",
+        optimize=True,
+        compress_level=9,
+        dpi=(72, 72),
+    )
+    return buffer.getvalue()
 
 
 # Ordem de preferência de fontes. A primeira que existir no sistema vence.

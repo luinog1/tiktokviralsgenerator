@@ -100,6 +100,8 @@ class SessionStore:
         *,
         edited_slides: list[dict[str, Any]] | None = None,
         selected_image_ids: list[str] | None = None,
+        images: list[dict[str, Any]] | None = None,
+        carousel: dict[str, Any] | None = None,
     ) -> StoredProject | None:
         with self._lock:
             project = self._projects.get(project_id)
@@ -109,6 +111,15 @@ class SessionStore:
                 project.edited_slides = list(edited_slides)
             if selected_image_ids is not None:
                 project.selected_image_ids = list(selected_image_ids)
+            # A busca on-spot da prévia acrescenta fotos ao acervo do projeto e
+            # ids à galeria do hook. As duas coisas têm que entrar aqui, sob a
+            # mesma trava: `to_edited_slides` valida a foto escolhida contra o
+            # `image_options` do `carousel`, então uma alternativa que só
+            # existisse em `edited_slides` seria descartada ao salvar.
+            if images is not None:
+                project.images = list(images)
+            if carousel is not None:
+                project.carousel = dict(carousel)
             project.updated_at = time.time()
             return project
 

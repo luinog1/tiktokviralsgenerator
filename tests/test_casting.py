@@ -680,3 +680,110 @@ def test_a_short_pool_shares_instead_of_leaving_a_gallery_empty():
     for options in casting.image_options:
         assert options, "galeria vazia"
         assert len(set(options)) == len(options), "foto repetida na mesma galeria"
+
+
+# --------------------------------- pilha de tags: menção sem ordem confiável
+def test_a_tag_pile_that_mentions_a_model_stays_out_of_a_scene_slide():
+    """O Pinterest manda legenda em duas formas, e uma delas não é prosa.
+
+    "Off Duty Outfits, Personal Style Inspiration, Model Street Style" é uma
+    pilha de tags de SEO: a ordem não diz o que está em primeiro plano, então
+    as regras de prosa (vence quem vem antes, depois de "with" é fundo) não se
+    aplicam. Antes isso passava batido e a foto de modelo entrava num slide de
+    cenário — era o que furava a cota de pessoa: pedir 1 modelo e receber
+    vários.
+    """
+    images = [
+        _image("pessoa", POOL_HOOK, alt="a woman waking up"),
+        _image(
+            "modelo",
+            POOL_SCENE,
+            alt="Off Duty Outfits, Personal Style Inspiration, Model Street Style",
+        ),
+        _image("janela", POOL_SCENE, alt="morning light through a window"),
+        _image("mesa", POOL_SCENE, alt="an open notebook on a desk"),
+    ]
+
+    casting = cast_carousel(_slides("hook", "value", "value", "cta"), images)
+
+    assert casting.image_ids[0] == "pessoa"
+    assert "modelo" not in casting.image_ids[1:]
+
+
+def test_a_tag_pile_that_mentions_food_stays_out_of_a_scene_slide():
+    """A mesma trava para a cota de comida, que é a que o usuário zera.
+
+    Um close de smoothie com legenda em pilha de tags entrava como cenário
+    mesmo com a cota de comida em zero — a restrição existia e não era
+    aplicada, porque o texto não passava por regra nenhuma.
+    """
+    images = [
+        _image("pessoa", POOL_HOOK, alt="a woman waking up"),
+        _image(
+            "smoothie",
+            POOL_SCENE,
+            alt="Smoothie Bowl Recipe, Healthy Breakfast Ideas, Fruit Bowl",
+        ),
+        _image("janela", POOL_SCENE, alt="morning light through a window"),
+        _image("mesa", POOL_SCENE, alt="an open notebook on a desk"),
+    ]
+
+    casting = cast_carousel(
+        _slides("hook", "value", "value", "cta"), images, food_images_count=0
+    )
+
+    assert "smoothie" not in casting.image_ids[1:]
+
+
+def test_a_tag_pile_without_people_or_food_is_still_scene():
+    """A pilha de tags não é suspeita por si só — só quando cita o que a cota
+    limita. Vetar todas esvaziaria o acervo de cenário no Pinterest, onde essa
+    é a forma mais comum de legenda."""
+    images = [
+        _image("pessoa", POOL_HOOK, alt="a woman waking up"),
+        _image(
+            "quarto",
+            POOL_SCENE,
+            alt="Chic Bedroom Decor, Cozy Interior Ideas, Neutral Aesthetic",
+        ),
+        _image("janela", POOL_SCENE, alt="morning light through a window"),
+    ]
+
+    casting = cast_carousel(_slides("hook", "value", "cta"), images)
+
+    assert set(casting.image_ids[1:]) == {"quarto", "janela"}
+    assert not casting.warnings
+
+
+def test_a_hand_late_in_the_sentence_does_not_cancel_the_portrait():
+    """A regra do pedaço do corpo media a frase inteira, e isso vazava.
+
+    "a woman sitting on a kitchen counter holding a juice in her hands" tem a
+    mulher como assunto e a mão como detalhe — mas bastava o "hands" aparecer
+    em qualquer posição para o retrato ser anulado, e a foto entrava num slide
+    de cenário como se fosse b-roll. Era o vazamento que sobrava depois de a
+    legenda passar a chegar: pedir uma foto de modelo e receber várias.
+    """
+    images = [
+        _image("retrato", POOL_HOOK, alt="a woman waking up"),
+        _image(
+            "modelo",
+            POOL_SCENE,
+            alt="a woman sitting on a kitchen counter holding a juice in her hands",
+        ),
+        _image("janela", POOL_SCENE, alt="morning light through a window"),
+        _image("mesa", POOL_SCENE, alt="an open notebook on a desk"),
+    ]
+
+    casting = cast_carousel(_slides("hook", "value", "value", "cta"), images)
+
+    assert "modelo" not in casting.image_ids[1:]
+
+
+def test_the_possessive_body_part_is_still_b_roll():
+    """O outro lado do mesmo corte, que a regra original acertava: colada na
+    pessoa, a parte do corpo É o assunto."""
+    from app.services.casting import _focus_of
+
+    assert _focus_of("woman's hands holding a cup") == ""
+    assert _focus_of("a woman sitting on a bed") == "person"

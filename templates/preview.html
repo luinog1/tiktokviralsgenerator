@@ -186,6 +186,20 @@
             </button>
             <span class="small muted" id="js-pin-person-status" role="status" aria-live="polite"></span>
           </p>
+          {# Busca on-spot: mais fotos de hook de um @ do Instagram, sem gerar
+             outro carrossel. As alternativas entram nesta galeria e no acervo
+             do projeto, então dá para escolher e salvar como qualquer outra. #}
+          <p class="hook-search-row">
+            <input type="text" id="js-hook-handle" class="input input-sm"
+                   placeholder="@perfil do Instagram"
+                   aria-label="Perfil do Instagram para buscar mais fotos de hook" />
+            <button type="button" class="btn btn-ghost btn-sm" id="js-hook-search"
+                    data-project-id="{{ project.project_id }}"
+                    title="Busca até 5 fotos de hook desse perfil no Instagram; sem token ou sem resultado, cai no Pinterest.">
+              🔎 Mais fotos deste @
+            </button>
+            <span class="small muted" id="js-hook-search-status" role="status" aria-live="polite"></span>
+          </p>
           {% endif %}
         </div>
       </article>
@@ -236,16 +250,28 @@
       const headlineInput = card ? card.querySelector('input[name$="-headlines"]') : null;
 
       gallery.querySelectorAll(".mini-thumb").forEach((btn) => {
-        btn.addEventListener("click", () => {
-          gallery.querySelectorAll(".mini-thumb").forEach((b) => b.classList.remove("selected"));
-          btn.classList.add("selected");
-          if (hidden) hidden.value = btn.dataset.imageId;
-          if (visual && btn.dataset.imageUrl) {
-            visual.style.backgroundImage = `url("${btn.dataset.imageUrl}")`;
-          }
-        });
+        btn.addEventListener("click", () => selectThumb(gallery, hidden, visual, btn));
+      });
+
+      // A busca on-spot acrescenta miniaturas DEPOIS deste ponto, e um
+      // listener preso a cada botão não alcançaria as novas — por isso a
+      // galeria também escuta por delegação.
+      gallery.addEventListener("click", (event) => {
+        const btn = event.target.closest(".mini-thumb");
+        if (btn && btn.dataset.wired === "on") {
+          selectThumb(gallery, hidden, visual, btn);
+        }
       });
     });
+
+    function selectThumb(gallery, hidden, visual, btn) {
+      gallery.querySelectorAll(".mini-thumb").forEach((b) => b.classList.remove("selected"));
+      btn.classList.add("selected");
+      if (hidden) hidden.value = btn.dataset.imageId;
+      if (visual && btn.dataset.imageUrl) {
+        visual.style.backgroundImage = `url("${btn.dataset.imageUrl}")`;
+      }
+    }
 
     // Edição ao vivo no preview visual
     document.querySelectorAll(".slide-card").forEach((card) => {
@@ -539,6 +565,76 @@
         if (status) status.textContent = "Não foi possível fixar esta foto.";
       } finally {
         pinBtn.disabled = false;
+      }
+    });
+
+    // Busca on-spot: mais fotos de hook de um @, direto da prévia. As fotos
+    // novas entram na galeria da imagem 1 e no acervo do projeto no servidor —
+    // escolher uma e salvar a edição funciona como com as fotos da geração.
+    const hookBtn = document.getElementById("js-hook-search");
+    const hookInput = document.getElementById("js-hook-handle");
+    const hookStatus = document.getElementById("js-hook-search-status");
+
+    async function searchHookAlternatives() {
+      const handle = (hookInput?.value || "").trim();
+      if (!handle) {
+        if (hookStatus) hookStatus.textContent = "Escreva o @ do perfil.";
+        return;
+      }
+      const csrf = document.querySelector('input[name="csrf_token"]')?.value || "";
+      const gallery = document.querySelector('.mini-gallery[data-slide="{{ hook_index }}"]');
+      hookBtn.disabled = true;
+      if (hookStatus) hookStatus.textContent = "Buscando…";
+      try {
+        const response = await fetch(
+          "{{ url_for('preview.hook_alternatives', project_id=project.project_id) }}",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-CSRFToken": csrf },
+            body: JSON.stringify({ handle }),
+          }
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!data.ok) {
+          if (hookStatus) {
+            hookStatus.textContent = data.reason || "Nenhuma foto nova encontrada.";
+          }
+          return;
+        }
+        (data.images || []).forEach((img) => {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "mini-thumb";
+          btn.dataset.imageId = img.image_id;
+          btn.dataset.imageUrl = img.url;
+          btn.dataset.wired = "on";
+          btn.title = img.title || "";
+          const el = document.createElement("img");
+          el.src = img.url;
+          el.alt = img.title || "";
+          el.loading = "lazy";
+          btn.appendChild(el);
+          gallery?.appendChild(btn);
+        });
+        const origem = data.source === "instagram" ? "Instagram" : "Pinterest";
+        if (hookStatus) {
+          hookStatus.textContent =
+            `${data.images.length} foto(s) de @${data.handle} via ${origem} — no fim da galeria.`;
+        }
+      } catch (err) {
+        if (hookStatus) hookStatus.textContent = "A busca falhou.";
+      } finally {
+        hookBtn.disabled = false;
+      }
+    }
+
+    hookBtn?.addEventListener("click", searchHookAlternatives);
+    // O campo mora dentro do form de edição: sem isto, Enter salvaria o
+    // carrossel em vez de buscar.
+    hookInput?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        searchHookAlternatives();
       }
     });
   });

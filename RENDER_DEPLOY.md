@@ -116,7 +116,10 @@ Instagram e deixa os outros slides para o Pinterest, guiado por tema e
 palavras-chave.
 
 Para um perfil específico, escreva `@usuario` no tema ou nas palavras-chave. O
-handle é enviado à Apify, mas removido da query do Pinterest. A Apify recebe a
+handle é enviado à Apify com a arroba e ao Pinterest **sem** ela — lá o nome do
+perfil é um termo de busca legítimo (`bellebres` devolve 50 pins, `@bellebres`
+devolve zero), e até a v0.23 ele era apagado, deixando o Pinterest sem nenhuma
+pista de quem era a pessoa. A Apify recebe a
 cota escolhida **mais 8 itens de folga** em `resultsLimit`, `maxItems` e
 `limit` — a folga é o que dá material para o sorteio não devolver o mesmo
 carrossel, já que o dataset do actor vem sempre na mesma ordem. Ainda é menos
@@ -139,7 +142,10 @@ queries separadas, com menor precisão.
 Pinterest e Instagram agora só aceitam fotos que cubram `SLIDE_WIDTH` ×
 `SLIDE_HEIGHT` (1080×1350 por padrão). O piso não é relaxado: se a fonte só
 trouxer arquivos menores, ela cai no fallback e o motivo aparece na prévia. O
-Unsplash pede ao CDN a imagem já em 1080×1350, `fit=crop`, qualidade 85.
+Unsplash pede ao CDN a imagem já em 1080×1350, `fit=crop` e `fm=png`. O
+renderer grava os slides em PNG lossless e o ZIP inclui `metadata.json`
+separado do roteiro/atribuições, sem que esses dados sejam re-renderizados
+na imagem.
 
 ### Repetição entre gerações e alternativas por imagem
 
@@ -214,6 +220,39 @@ Depois do deploy, confirme em `/health`:
 ```json
 "images_diagnostic": {"apify_token_set": true}
 ```
+
+### Mais fotos do mesmo @ pela própria prévia
+
+Sem variável nova. Na prévia, a imagem 1 tem um campo de `@` e o botão
+**Mais fotos deste @**: ele traz até 5 alternativas daquele perfil para a
+galeria do hook, sem gerar outro carrossel.
+
+A ordem das fontes é Instagram e depois Pinterest, e a diferença entre elas
+é de fidelidade e de custo:
+
+| Fonte | O que devolve | Custo |
+|-------|---------------|-------|
+| Instagram (Apify) | Os posts do próprio perfil | ~5 itens pagos por clique; exige `APIFY_TOKEN` |
+| Pinterest (reserva) | Re-pins **sobre** aquela pessoa, achados pelo nome sem arroba | Zero |
+
+Sem `APIFY_TOKEN` o Instagram nem é tentado — o endpoint de perfil anônimo
+está atrás do muro de login — e o botão cai direto no Pinterest, que continua
+respondendo. A busca só roda no clique, então ela não encarece a geração
+normal do carrossel.
+
+### Cotas de pessoa e comida: o que mudou na v0.24
+
+Também sem variável nova, mas o comportamento muda bastante. Até a v0.23 a
+restrição escolhida no formulário valia só para as fotos que tinham legenda, e
+no Pinterest isso era menos da metade do acervo — o resto entrava nos slides
+de cenário sem passar por filtro nenhum, close de comida e retrato de modelo
+inclusive. O app agora lê também o `seo_alt_text` do pin (cobertura de 23/50
+para 48/50) e a cota passa a ser respeitada de fato.
+
+A consequência prática é que **o acervo de cenário usável fica menor**, porque
+fotos que antes passavam agora são barradas. Medido, sobram 18 de 50 pins por
+página, e o pager anda até 300 — folga suficiente. Se mesmo assim faltar foto,
+o aviso amarelo da prévia diz qual cota não foi atendida, como sempre.
 
 ### Geração automática de hooks e scripts
 

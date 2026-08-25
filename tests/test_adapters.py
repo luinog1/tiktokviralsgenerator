@@ -470,7 +470,9 @@ def test_unsplash_requests_the_final_slide_size_at_high_quality(monkeypatch):
     assert params["w"] == ["1080"]
     assert params["h"] == ["1350"]
     assert params["fit"] == ["crop"]
-    assert params["q"] == ["85"]
+    assert params["fm"] == ["png"]
+    assert "q" not in params
+    assert "auto" not in params
 
 
 # ---------- a regra do slide 1: o hook sozinho, numa caixa ----------

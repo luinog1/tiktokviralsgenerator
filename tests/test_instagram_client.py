@@ -792,7 +792,14 @@ def test_combined_quota_reserves_one_instagram_photo_for_the_hook():
     assert all("cafe" in query and "#cafe" not in query for query, _ in pinterest.queries)
 
 
-def test_combined_uses_a_generic_pinterest_query_when_only_a_profile_was_given():
+def test_combined_sends_the_profile_name_to_pinterest_without_the_at():
+    """O nome do perfil é o termo mais específico da query — o `@` é que atrapalha.
+
+    Medido no Pinterest real (2026-08-25): `bellebres` devolve 50 pins e
+    `@bellebres` devolve zero. Antes o handle era apagado inteiro e o Pinterest
+    caía na query genérica, ou seja, buscava sem nenhuma pista de quem era a
+    pessoa que o usuário tinha pedido.
+    """
     instagram = _StubClient("instagram_scrape", [_img("ig-1")])
     pinterest = _StubClient("pinterest_scrape", [_img("p-1")])
     combined = CombinedImageClient(
@@ -800,6 +807,19 @@ def test_combined_uses_a_generic_pinterest_query_when_only_a_profile_was_given()
     )
 
     combined.search("@fulana", limit=2)
+
+    assert pinterest.queries == [("fulana", 2)]
+    assert instagram.queries[0][0] == "@fulana"
+
+
+def test_combined_uses_a_generic_pinterest_query_when_nothing_is_left():
+    instagram = _StubClient("instagram_scrape", [_img("ig-1")])
+    pinterest = _StubClient("pinterest_scrape", [_img("p-1")])
+    combined = CombinedImageClient(
+        [instagram, pinterest], name="instagram_pinterest"
+    )
+
+    combined.search("   ", limit=2)
 
     assert pinterest.queries == [("lifestyle aesthetic", 2)]
 

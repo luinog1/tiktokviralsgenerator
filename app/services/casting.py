@@ -109,6 +109,43 @@ def _focus(image: PinterestImage) -> str:
     return _focus_of(image.alt) or _focus_of(image.description)
 
 
+def _is_tag_pile(text: str) -> bool:
+    """A legenda é uma pilha de tags de SEO, não uma frase.
+
+    O Pinterest devolve as duas formas no mesmo campo. Uma é prosa — "a woman
+    is doing yoga on a mat outside" —, e nela a ORDEM das palavras diz o que
+    está em primeiro plano. A outra é uma lista de tags separadas por vírgula
+    — "Chic Bedroom, Fitness Inspo, Fall Outfits" —, e nela a ordem não diz
+    nada: quem escreveu empilhou termos para ser achado, não para descrever a
+    cena. As três regras de :func:`_focus_of` (vence quem vem antes, depois de
+    "with" é fundo) pressupõem prosa e não valem aqui.
+    """
+    return text.count(",") >= 2
+
+
+def _mentions(text: str, words: frozenset[str]) -> bool:
+    return bool(set(_WORD_RE.findall(text.lower())) & words)
+
+
+def _weak_focus(image: PinterestImage) -> str:
+    """Menção a pessoa/comida numa pilha de tags — sinal fraco, mas sinal.
+
+    Numa pilha de tags não dá para saber se a pessoa é o assunto ou se está de
+    passagem. Por isso este sinal só é consultado por :func:`_scene_affinity`,
+    para **excluir**: a foto fica fora dos slides de cenário e a cota pedida é
+    respeitada. Quem decide o que *preenche* a cota de pessoa ou de comida
+    continua sendo :func:`_focus`, e ele não mudou.
+    """
+    for text in (image.alt, image.description):
+        if not text or not _is_tag_pile(text):
+            continue
+        if _mentions(text, _PERSON_WORDS):
+            return "person"
+        if _mentions(text, _FOOD_WORDS):
+            return "food"
+    return ""
+
+
 def _focus_of(text: str) -> str:
     """Primeiro assunto citado em primeiro plano — e só ele.
 
@@ -122,20 +159,45 @@ def _focus_of(text: str) -> str:
       plano não consome cota. Era exatamente isso que zerava o acervo de
       cenário num tema como "rotina matinal", onde há café em quase toda foto.
     * **Um pedaço do corpo não é um retrato.** "woman's hands holding a cup"
-      é foto de xícara; serve de b-roll, não de hook.
+      é foto de xícara; serve de b-roll, não de hook. Vale só quando a parte
+      do corpo vem COLADA na palavra de pessoa — ver :func:`_partial_head`.
     """
     words = _WORD_RE.findall(text.lower())
-    partial = bool(set(words) & _PARTIAL_WORDS)
-    for word in words:
+    for index, word in enumerate(words):
         if word in _BACKGROUND_WORDS:
             break
         if word in _PERSON_WORDS:
-            if partial:
+            if _partial_head(words, index):
                 continue
             return "person"
         if word in _FOOD_WORDS:
             return "food"
     return ""
+
+
+# Quantas palavras depois do termo de pessoa ainda contam como o possessivo
+# dela. Duas cobrem "woman's hands" (o apóstrofo vira um token `s`) e
+# "woman hands".
+_PARTIAL_REACH = 2
+
+
+def _partial_head(words: list[str], index: int) -> bool:
+    """A parte do corpo é o assunto da frase, não a pessoa.
+
+    A regra existe para "woman's hands holding a cup", que é foto da xícara.
+    Mas ela media a frase INTEIRA: bastava um "hands" em qualquer posição para
+    anular o retrato, e aí "a woman sitting on a kitchen counter holding a
+    juice **in her hands**" deixava de ser foto de pessoa — passava a valer
+    como cenário confirmado e ia para um slide de b-roll. Medido no Pinterest
+    real, era o vazamento que sobrava depois da legenda: o usuário pedia uma
+    foto de modelo e recebia várias.
+
+    O que separa os dois casos é a distância: no possessivo a parte do corpo
+    vem imediatamente depois de quem a possui; dez palavras depois ela é só um
+    detalhe da cena.
+    """
+    nearby = words[index + 1 : index + 1 + _PARTIAL_REACH]
+    return any(word in _PARTIAL_WORDS for word in nearby)
 
 
 @dataclass
@@ -605,7 +667,8 @@ def _scene_affinity(image: PinterestImage, subjects: dict[str, str]) -> int:
       3  a foto tem legenda própria e ela não é sobre pessoa nem sobre comida
       2  a foto veio do pool de cenário — vale a busca, não a foto
       1  nenhum sinal (busca única, sem pool)
-      0  é foto de pessoa/comida, por visão ou pelo foco da legenda
+      0  é foto de pessoa/comida, por visão, pelo foco da legenda ou por
+         menção numa pilha de tags
 
     A assimetria com pessoa/comida é de propósito. Lá a palavra presente é o
     sinal ("woman" prova que há alguém) e a ausência não prova nada, então uma
@@ -614,13 +677,18 @@ def _scene_affinity(image: PinterestImage, subjects: dict[str, str]) -> int:
     — e por isso o pool de retrato/comida só veta quem não trouxe legenda
     nenhuma. Com legenda, vale a regra do módulo: o metadado descreve *esta*
     foto e ganha da busca que a trouxe.
+
+    A menção fraca (:func:`_weak_focus`) veta aqui e só aqui. É o que faz a
+    cota ser respeitada quando a legenda é uma pilha de tags: sem ela, um
+    close de café ou um retrato entravam num slide de cenário porque nenhuma
+    das regras de prosa se aplicava ao texto que o Pinterest tinha mandado.
     """
     if image.image_id in subjects:
         subject = subjects[image.image_id]
         return 4 if subject == SCENE_SUBJECT else 0
     if subjects:
         return 0
-    if _focus(image):
+    if _focus(image) or _weak_focus(image):
         return 0
     if image.alt.strip() or image.description.strip():
         return 3

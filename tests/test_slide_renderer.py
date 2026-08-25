@@ -199,6 +199,19 @@ def test_sticker_renders_expected_dimensions(renderer):
     assert img.size == (1080, 1350)
 
 
+def test_png_export_is_lossless_and_declares_canvas_density(renderer):
+    """O arquivo final não passa por JPEG/WebP nem perde a dimensão do canvas."""
+    slide = SlideContent(headline="qualidade", role="hook", order=0)
+    out = renderer.render_single(slide, None, style="sticker", index=0)
+    img = _open(out.png_bytes)
+    assert img.format == "PNG"
+    assert img.size == (1080, 1350)
+    dpi = img.info.get("dpi")
+    assert dpi is not None
+    assert dpi[0] == pytest.approx(72, abs=0.02)
+    assert dpi[1] == pytest.approx(72, abs=0.02)
+
+
 def test_sticker_draws_white_boxes(renderer):
     """A marca do estilo: caixas brancas puras atrás do texto."""
     slide = SlideContent(headline="caixa branca aqui", role="hook", order=0)
@@ -703,4 +716,3 @@ def test_safe_text_keeps_accents_and_punctuation():
 
 def test_safe_text_strips_control_characters():
     assert _safe_text("linha\x00com\x07controle") == "linhacomcontrole"
-

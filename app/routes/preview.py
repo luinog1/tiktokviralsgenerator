@@ -6,6 +6,7 @@ Exporta: PNG (slide único), ZIP (carrossel completo), Markdown (texto).
 from __future__ import annotations
 
 import io
+import json
 import logging
 import zipfile
 from urllib.parse import urlsplit
@@ -17,6 +18,7 @@ from flask import (
     abort,
     current_app,
     flash,
+    jsonify,
     redirect,
     render_template,
     request,
@@ -25,9 +27,12 @@ from flask import (
 )
 
 from app.adapters import PinterestImage
+from app.adapters.pinterest_client import media_identity
 from app.adapters.text_composer import SlideContent
 from app.forms import SlideEditForm
+from app.services.casting import POOL_HOOK
 from app.services.generation import GenerationService
+from app.services.hook_search import normalize_handle, search_by_handle
 from app.services.slide_renderer import SlideRenderer
 
 bp = Blueprint("preview", __name__)
@@ -253,6 +258,11 @@ def preview(project_id: str):
         role_labels=ROLE_LABELS,
         subject_labels=_subject_labels(project),
         casting_enabled=current_app.config["SETTINGS"].casting_enabled,
+        # Onde a galeria do hook está na página — a busca on-spot acrescenta as
+        # miniaturas nela, e o índice não é sempre 0 (o papel é que manda).
+        hook_index=next(
+            (i for i, s in enumerate(slides) if str(s.get("role") or "") == "hook"), 0
+        ),
     )
 
 
@@ -271,6 +281,82 @@ def _subject_labels(project) -> dict[str, str]:
         if label and entry.get("image_id"):
             labels[str(entry["image_id"])] = label
     return labels
+
+
+@bp.route("/preview/<project_id>/hook-alternatives", methods=["POST"])
+def hook_alternatives(project_id: str):
+    """Mais fotos de hook do mesmo @, sem gerar outro carrossel.
+
+    As fotos novas entram no acervo do projeto e na galeria do slide de hook.
+    O `image_options` do `carousel` é o que precisa receber os ids: é contra
+    ele que `SlideEditForm.to_edited_slides` valida a foto escolhida, então uma
+    alternativa que só existisse na tela seria descartada ao salvar a edição.
+    """
+    svc = _get_service()
+    project = svc.store().get(project_id)
+    if not project:
+        return jsonify({"ok": False, "reason": "Projeto não encontrado ou expirado."}), 404
+
+    payload = request.get_json(silent=True) or {}
+    handle = normalize_handle(payload.get("handle"))
+    if not handle:
+        return jsonify({"ok": False, "reason": "Escreva o @ do perfil."}), 400
+
+    settings = current_app.config["SETTINGS"]
+    slides = project.carousel.get("slides") or []
+    if not slides:
+        return jsonify({"ok": False, "reason": "O carrossel não tem slides."}), 200
+    hook_index = next(
+        (i for i, s in enumerate(slides) if str(s.get("role") or "") == "hook"), 0
+    )
+
+    images = list(project.images or [])
+    found, source, reason = search_by_handle(
+        settings,
+        handle,
+        avoid_ids={str(img.get("image_id") or "") for img in images},
+        avoid_media={
+            media_identity(str(img.get("image_url") or "")) for img in images
+        },
+    )
+    if not found:
+        return jsonify({"ok": False, "reason": reason}), 200
+
+    added = [image.to_dict() for image in found]
+    for image in added:
+        image["pool"] = POOL_HOOK
+    images.extend(added)
+
+    carousel = dict(project.carousel)
+    carousel["slides"] = [dict(slide) for slide in slides]
+    new_ids = [str(image.get("image_id") or "") for image in added]
+    for target in (carousel["slides"], project.edited_slides):
+        if hook_index >= len(target):
+            continue
+        slide = dict(target[hook_index])
+        options = [str(o) for o in (slide.get("image_options") or [])]
+        slide["image_options"] = options + [i for i in new_ids if i not in options]
+        target[hook_index] = slide
+
+    svc.store().update(
+        project_id,
+        images=images,
+        carousel=carousel,
+        edited_slides=project.edited_slides or None,
+    )
+    return jsonify({
+        "ok": True,
+        "source": source,
+        "handle": handle,
+        "images": [
+            {
+                "image_id": image.image_id,
+                "url": browser_src(image.image_url),
+                "title": image.title,
+            }
+            for image in found
+        ],
+    })
 
 
 @bp.route("/preview/<project_id>/edit", methods=["POST"])
@@ -366,7 +452,10 @@ def _build_slides_and_images(slides_data, images):
                     source_url=img["source_url"],
                     title=img.get("title", ""),
                     description=img.get("description", ""),
+                    alt=img.get("alt", ""),
                     attribution_text=img.get("attribution_text", ""),
+                    thumb_url=img.get("thumb_url", ""),
+                    pool=img.get("pool", ""),
                 )
             )
         else:
@@ -415,6 +504,42 @@ def _render_zip(project, slides_data, images, style) -> bytes:
             md_lines.append("")
             md_lines.append(f"**Legenda:** {project.carousel['caption']}")
         zf.writestr("carrossel.md", "\n".join(md_lines).encode("utf-8"))
+
+        # O roteiro e a atribuição ficam disponíveis como dados estruturados,
+        # sem serem embutidos ou re-renderizados nos PNGs. Consumidores podem
+        # editar o script mantendo os pixels intactos.
+        metadata = {
+            "format": "viralpost-carousel",
+            "version": 1,
+            "canvas": {
+                "width": settings.slide_width,
+                "height": settings.slide_height,
+                "format": "PNG",
+                "compression": "lossless",
+            },
+            "project_id": project.project_id,
+            "style": style,
+            "theme": project.briefing.get("theme", ""),
+            "caption": project.carousel.get("caption", ""),
+            "hashtags": project.carousel.get("hashtags", []),
+            "slides": [
+                {
+                    "index": r.slide_index + 1,
+                    "role": slides_data[r.slide_index].get("role", "value"),
+                    "headline": r.headline,
+                    "body": r.body,
+                    "call_to_action": r.call_to_action,
+                    "image_id": r.image_id,
+                    "image_source_url": r.image_source_url,
+                    "attribution_text": r.attribution_text,
+                }
+                for r in rendered
+            ],
+        }
+        zf.writestr(
+            "metadata.json",
+            json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
     buffer.seek(0)
     return buffer.getvalue()
 
