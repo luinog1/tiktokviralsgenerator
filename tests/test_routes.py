@@ -1023,3 +1023,57 @@ def test_an_instagram_photo_comes_back_already_proxied(client, monkeypatch):
 
     url = response.get_json()["images"][0]["url"]
     assert url.startswith("/image-proxy?u=")
+
+
+def test_image_alternative_search_adds_results_to_the_requested_slide(client, monkeypatch):
+    project = _hook_project()
+    monkeypatch.setattr(
+        "app.routes.preview.search_by_query",
+        lambda *a, **k: (_found("scene-new-1", "scene-new-2"), "unsplash", ""),
+    )
+
+    response = client.post(
+        f"/preview/{project.project_id}/image-alternatives",
+        json={"slide_index": 1, "query": "mesa com cafe"},
+    )
+
+    data = response.get_json()
+    assert data["ok"] is True
+    assert data["slide_index"] == 1
+    stored = get_store().get(project.project_id)
+    assert [img["image_id"] for img in stored.images] == [
+        "person-1", "scene-new-1", "scene-new-2"
+    ]
+    assert stored.carousel["slides"][1]["image_options"] == [
+        "person-1", "scene-new-1", "scene-new-2"
+    ]
+
+
+def test_image_alternative_search_does_not_touch_the_offline_promo_slide(
+    client, monkeypatch
+):
+    project = _hook_project()
+    promo = dict(project.carousel["slides"][-1])
+    promo.update({"image_category": "promo", "image_id": "goviral-screen"})
+    project.carousel["slides"][-1] = promo
+    project.images.append({
+        "image_id": "goviral-screen",
+        "image_url": "/goviral-assets/screen.png",
+        "source_url": "https://content.goviralai.app/",
+        "title": "GoViral app",
+        "pool": "goviral",
+    })
+    calls = []
+    monkeypatch.setattr(
+        "app.routes.preview.search_by_query",
+        lambda *a, **k: calls.append((a, k)),
+    )
+
+    response = client.post(
+        f"/preview/{project.project_id}/image-alternatives",
+        json={"slide_index": 1, "query": "qualquer coisa"},
+    )
+
+    assert response.get_json()["ok"] is False
+    assert "offline" in response.get_json()["reason"]
+    assert calls == []

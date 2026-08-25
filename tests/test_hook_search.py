@@ -13,7 +13,7 @@ import pytest
 from app.adapters.pinterest_client import PinterestImage
 from app.config import Settings
 from app.services import hook_search
-from app.services.hook_search import normalize_handle, search_by_handle
+from app.services.hook_search import normalize_handle, search_by_handle, search_by_query
 
 
 def _settings(**over) -> Settings:
@@ -36,6 +36,8 @@ def _img(image_id: str) -> PinterestImage:
 
 
 class _FakeClient:
+    name = "fake"
+
     def __init__(self, images, reason=""):
         self._images = list(images)
         self.last_fallback_reason = reason
@@ -200,3 +202,30 @@ def test_a_source_that_raises_does_not_take_the_other_down(sources):
 
     assert [img.image_id for img in found] == ["pin-1"]
     assert source == "pinterest"
+
+
+def test_query_search_uses_the_configured_source_and_filters_existing_media(monkeypatch):
+    client = _FakeClient([_img("old"), _img("new")])
+    monkeypatch.setattr(hook_search, "build_pinterest_client", lambda *a, **k: client)
+
+    found, source, reason = search_by_query(
+        _settings(),
+        "  mulher lendo  ",
+        image_source="unsplash",
+        avoid_ids={"old"},
+    )
+
+    assert [img.image_id for img in found] == ["new"]
+    assert source == "fake"
+    assert not reason
+    assert client.queries == [("mulher lendo", 5)]
+
+
+def test_query_search_explains_empty_query():
+    found, source, reason = search_by_query(
+        _settings(), " ", avoid_ids=set()
+    )
+
+    assert not found
+    assert not source
+    assert "Escreva" in reason

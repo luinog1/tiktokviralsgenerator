@@ -49,6 +49,7 @@
            Os campos continuam no formulário (a FieldList é posicional — sumir
            com o índice 0 deslocaria todos os outros), mas em leitura apenas. #}
         {% set is_hook = slide.role == 'hook' %}
+        {% set is_offline_promo = i in offline_promo_indices %}
         <header class="slide-card-head">
           <span class="slide-number">Imagem {{ i + 1 }}</span>
           {% if slide.role %}
@@ -164,6 +165,20 @@
             </button>
             {% endfor %}
           </div>
+          {% if not is_offline_promo %}
+          <p class="image-search-row">
+            <input type="text" class="input input-sm js-image-search-query"
+                   data-slide="{{ i }}"
+                   placeholder="Ex.: mulher lendo no quarto"
+                   aria-label="Buscar imagens alternativas para a imagem {{ i + 1 }}" />
+            <button type="button" class="btn btn-ghost btn-sm js-image-search"
+                    data-slide="{{ i }}"
+                    title="Busca até 5 alternativas para esta imagem, sem gerar outro carrossel.">
+              🔎 Buscar alternativas
+            </button>
+            <span class="small muted js-image-search-status" role="status" aria-live="polite"></span>
+          </p>
+          {% endif %}
           {% if image_for_slide[i] %}
             <p class="small muted">
               Fonte:
@@ -636,6 +651,75 @@
         event.preventDefault();
         searchHookAlternatives();
       }
+    });
+
+    // Busca on-spot por consulta: cada slide tem seu próprio campo e sua
+    // galeria. O último slide promocional não renderiza esse controle.
+    document.querySelectorAll(".js-image-search").forEach((button) => {
+      const slideIndex = button.dataset.slide;
+      const card = button.closest(".slide-card");
+      const queryInput = card?.querySelector(".js-image-search-query");
+      const status = card?.querySelector(".js-image-search-status");
+      const gallery = card?.querySelector(".mini-gallery");
+      const hidden = card?.querySelector(".js-slide-image-id");
+      const visual = card?.querySelector(".slide-visual");
+
+      const searchAlternatives = async () => {
+        const query = (queryInput?.value || "").trim();
+        if (!query) {
+          if (status) status.textContent = "Escreva o que a imagem deve mostrar.";
+          return;
+        }
+        const csrf = document.querySelector('input[name="csrf_token"]')?.value || "";
+        button.disabled = true;
+        if (status) status.textContent = "Buscando…";
+        try {
+          const response = await fetch(
+            "{{ url_for('preview.image_alternatives', project_id=project.project_id) }}",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-CSRFToken": csrf },
+              body: JSON.stringify({ slide_index: Number(slideIndex), query }),
+            }
+          );
+          const data = await response.json().catch(() => ({}));
+          if (!data.ok) {
+            if (status) status.textContent = data.reason || "Nenhuma alternativa encontrada.";
+            return;
+          }
+          (data.images || []).forEach((img) => {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "mini-thumb";
+            btn.dataset.imageId = img.image_id;
+            btn.dataset.imageUrl = img.url;
+            btn.dataset.wired = "on";
+            btn.title = img.title || "";
+            const el = document.createElement("img");
+            el.src = img.url;
+            el.alt = img.title || "";
+            el.loading = "lazy";
+            btn.appendChild(el);
+            gallery?.appendChild(btn);
+          });
+          if (status) {
+            const origem = data.source === "mock" ? "mock" : (data.source || "fonte configurada");
+            status.textContent = `${data.images.length} alternativa(s) via ${origem}.`;
+          }
+        } catch (err) {
+          if (status) status.textContent = "A busca falhou.";
+        } finally {
+          button.disabled = false;
+        }
+      };
+
+      button.addEventListener("click", searchAlternatives);
+      queryInput?.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          searchAlternatives();
+        }
+      });
     });
   });
 </script>

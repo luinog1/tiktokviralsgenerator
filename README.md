@@ -2,7 +2,7 @@
 
 Aplicação Flask que transforma uma ideia em um roteiro de hooks e scripts e em um carrossel visual pronto para publicar — usando um endpoint LLM OpenAI-compatible, fotos do Pinterest ou do Instagram (busca **sem token**) ou do Unsplash, e renderização estilo **TikTok photo post** (1080×1350, 4:5). Painéis antigos do goviral.ai continuam podendo ser importados, mas não são necessários.
 
-> **Status:** MVP v0.24 — a legenda que faltava (cotas de pessoa/comida respeitadas) + busca on-spot por @
+> **Status:** MVP v0.25 — busca on-spot por @ e alternativas especificas por imagem
 > **Stack:** Python 3.11 · Flask 3 · Jinja2 · WTForms · Pillow · Docker
 > **Idioma inicial:** Português (pt-BR)
 
@@ -15,6 +15,7 @@ Aplicação Flask que transforma uma ideia em um roteiro de hooks e scripts e em
 - 🐛 **Uma mão no fim da frase anulava o retrato** — a regra "um pedaço do corpo não é um retrato" (v0.21) media a frase **inteira**: bastava um `hands` em qualquer posição para a foto deixar de contar como pessoa. Com isso "a woman sitting on a kitchen counter holding a juice **in her hands**" virava cenário confirmado e ia para um slide de b-roll — era o vazamento que sobrava depois de a legenda passar a chegar, e o que fazia "pedi 1 modelo e vieram várias". O que separa esse caso de "woman's hands holding a cup", que a regra acerta, é a **distância**: no possessivo a parte do corpo vem colada em quem a possui; dez palavras depois ela é só um detalhe da cena. O veto agora só vale nas duas palavras seguintes.
 - 🐛 **O `@perfil` zerava a busca do Pinterest, e o nome era justamente o melhor termo** — medido no site real: `bellebres` devolve **50 pins**, `@bellebres` devolve **0**. O Pinterest indexa o handle como palavra (o texto de um dos pins começa em "@ bellebres"), mas não entende o sigilo. O app apagava o token inteiro em dois pontos (`_plain_terms` e `_query_without_instagram_target`), então a busca combinada mandava ao Pinterest o resto da query e nenhuma pista de quem era a pessoa. Agora só o `@` sai e o nome fica — **para o Pinterest**. No Unsplash ele continua saindo: nome de perfil não existe em acervo de banco de imagens e ainda gastaria uma das poucas vagas que uma busca por palavra-chave aguenta.
 - ✅ **Busca on-spot: mais fotos do mesmo @, sem gerar outro carrossel** — quando nenhuma das seis fotos da galeria do hook serve, a única saída era gerar tudo de novo, texto e casting inclusive. A imagem 1 agora tem um campo de `@` e um botão que traz até **5 alternativas** daquele perfil, direto na galeria. Duas fontes, nesta ordem: o **Instagram** (Apify, os posts do próprio perfil — a resposta certa para "mais fotos desta modelo", e paga por item, por isso só roda no clique) e o **Pinterest** como reserva de graça, onde o handle sem arroba acha re-pins sobre aquela pessoa. As fotos entram no acervo do projeto e no `image_options` do `carousel` — esse detalhe importa: `to_edited_slides` valida a foto escolhida contra essa lista e devolveria a antiga em silêncio se a alternativa só existisse na tela. Foto do Instagram já volta apontando para o `/image-proxy`, senão o CDN deles a recusa no navegador e ela sai branca com a URL viva.
+- ✅ **Alternativas especificas por imagem, depois da geracao** — cada slide, exceto o ultimo quando ele recebeu o print offline do Viral App, tem um campo opcional para descrever a imagem desejada e buscar ate **5 alternativas** sem gerar o carrossel novamente. Os resultados entram apenas na galeria daquele slide, sao persistidos no projeto e continuam validos ao salvar a edicao. A busca usa a fonte escolhida na geracao (ou a fonte do ambiente em projetos antigos), respeita o filtro de imagens ja presentes e nao cria nenhuma variavel nova no Render.
 
 ### O que a legenda mudou, medido
 
@@ -709,6 +710,7 @@ Cobertura (511 testes):
 | POST | `/pin-person/clear` | Esquece a pessoa fixada |
 | GET | `/preview/<id>` | Exibe carrossel com slides editáveis |
 | POST | `/preview/<id>/hook-alternatives` | Busca on-spot: até 5 fotos de hook de um `@` (Instagram, com Pinterest de reserva) |
+| POST | `/preview/<id>/image-alternatives` | Busca on-spot: até 5 alternativas por consulta para um slide (exceto o promo offline) |
 | POST | `/preview/<id>/edit` | Atualiza slides editados |
 | POST | `/preview/<id>/export` | Baixa ZIP / PNG / Markdown |
 | GET | `/health` | Health check JSON |

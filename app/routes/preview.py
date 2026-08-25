@@ -32,7 +32,12 @@ from app.adapters.text_composer import SlideContent
 from app.forms import SlideEditForm
 from app.services.casting import POOL_HOOK
 from app.services.generation import GenerationService
-from app.services.hook_search import normalize_handle, search_by_handle
+from app.services.hook_search import (
+    MAX_QUERY_ALTERNATIVES,
+    normalize_handle,
+    search_by_handle,
+    search_by_query,
+)
 from app.services.slide_renderer import SlideRenderer
 
 bp = Blueprint("preview", __name__)
@@ -62,6 +67,15 @@ SUBJECT_LABELS = {
 def _get_service() -> GenerationService:
     settings = current_app.config["SETTINGS"]
     return GenerationService(settings)
+
+
+def _is_offline_promo_slide(slide: dict, index: int, total: int) -> bool:
+    """O print local do Viral App e o unico slide sem busca on-spot."""
+    image_id = str(slide.get("image_id") or "")
+    return index == total - 1 and (
+        str(slide.get("image_category") or "") == "promo"
+        or image_id.startswith("goviral-")
+    )
 
 
 def _position_field(slide: dict) -> str:
@@ -258,6 +272,10 @@ def preview(project_id: str):
         role_labels=ROLE_LABELS,
         subject_labels=_subject_labels(project),
         casting_enabled=current_app.config["SETTINGS"].casting_enabled,
+        offline_promo_indices=[
+            i for i, slide in enumerate(slides)
+            if _is_offline_promo_slide(slide, i, len(slides))
+        ],
         # Onde a galeria do hook está na página — a busca on-spot acrescenta as
         # miniaturas nela, e o índice não é sempre 0 (o papel é que manda).
         hook_index=next(
@@ -309,6 +327,11 @@ def hook_alternatives(project_id: str):
     hook_index = next(
         (i for i, s in enumerate(slides) if str(s.get("role") or "") == "hook"), 0
     )
+    if _is_offline_promo_slide(slides[hook_index], hook_index, len(slides)):
+        return jsonify({
+            "ok": False,
+            "reason": "O ultimo slide e reservado para o visual offline do Viral App.",
+        }), 200
 
     images = list(project.images or [])
     found, source, reason = search_by_handle(
@@ -348,6 +371,85 @@ def hook_alternatives(project_id: str):
         "ok": True,
         "source": source,
         "handle": handle,
+        "images": [
+            {
+                "image_id": image.image_id,
+                "url": browser_src(image.image_url),
+                "title": image.title,
+            }
+            for image in found
+        ],
+    })
+
+
+@bp.route("/preview/<project_id>/image-alternatives", methods=["POST"])
+def image_alternatives(project_id: str):
+    """Busca alternativas por consulta para um slide específico."""
+    svc = _get_service()
+    project = svc.store().get(project_id)
+    if not project:
+        return jsonify({"ok": False, "reason": "Projeto não encontrado ou expirado."}), 404
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        slide_index = int(payload.get("slide_index"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "reason": "Informe o slide que deseja buscar."}), 400
+
+    slides = list(project.carousel.get("slides") or [])
+    if slide_index < 0 or slide_index >= len(slides):
+        return jsonify({"ok": False, "reason": "Slide inválido."}), 400
+    if _is_offline_promo_slide(slides[slide_index], slide_index, len(slides)):
+        return jsonify({
+            "ok": False,
+            "reason": "O ultimo slide e reservado para o visual offline do Viral App.",
+        }), 200
+
+    query = str(payload.get("query") or "").strip()
+    images = list(project.images or [])
+    found, source, reason = search_by_query(
+        current_app.config["SETTINGS"],
+        query,
+        image_source=str(project.briefing.get("image_source") or ""),
+        avoid_ids={str(img.get("image_id") or "") for img in images},
+        avoid_media={
+            media_identity(str(img.get("image_url") or "")) for img in images
+        },
+        limit=MAX_QUERY_ALTERNATIVES,
+    )
+    if not found:
+        return jsonify({"ok": False, "reason": reason}), 200
+
+    added = [image.to_dict() for image in found]
+    category = str(slides[slide_index].get("image_category") or "")
+    for image in added:
+        if category and not image.get("pool"):
+            image["pool"] = category
+    images.extend(added)
+    new_ids = [str(image.get("image_id") or "") for image in added]
+
+    carousel = dict(project.carousel)
+    carousel["slides"] = [dict(slide) for slide in slides]
+    for target in (carousel["slides"], project.edited_slides):
+        if slide_index >= len(target):
+            continue
+        slide = dict(target[slide_index])
+        options = [str(option) for option in (slide.get("image_options") or [])]
+        slide["image_options"] = options + [
+            image_id for image_id in new_ids if image_id not in options
+        ]
+        target[slide_index] = slide
+
+    svc.store().update(
+        project_id,
+        images=images,
+        carousel=carousel,
+        edited_slides=project.edited_slides or None,
+    )
+    return jsonify({
+        "ok": True,
+        "source": source,
+        "slide_index": slide_index,
         "images": [
             {
                 "image_id": image.image_id,

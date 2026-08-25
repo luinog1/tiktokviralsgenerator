@@ -240,6 +240,20 @@ está atrás do muro de login — e o botão cai direto no Pinterest, que contin
 respondendo. A busca só roda no clique, então ela não encarece a geração
 normal do carrossel.
 
+### Alternativas especificas por imagem
+
+Na mesma previa, cada slide elegivel tem um campo opcional para descrever outra
+imagem (por exemplo, `mulher lendo no quarto`) e o botao **Buscar alternativas**.
+O app faz uma busca sob demanda, traz ate 5 resultados usando a fonte escolhida
+na geracao e adiciona as fotos apenas a galeria daquele slide. A escolha continua
+passando pelo formulario de edicao e fica persistida em `image_options`, portanto
+nao volta para a foto anterior ao salvar.
+
+O ultimo slide que recebeu um asset `goviral-*`/categoria `promo` nao mostra o
+campo e a rota tambem o recusa. Esse slide permanece reservado ao print offline
+do Viral App. Nao ha variavel nova no Render; a busca usa as credenciais e o
+provider ja configurados para o carrossel.
+
 ### Cotas de pessoa e comida: o que mudou na v0.24
 
 Também sem variável nova, mas o comportamento muda bastante. Até a v0.23 a

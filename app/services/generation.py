@@ -83,6 +83,7 @@ class GenerationService:
         instagram_images_count: int | None = None,
     ):
         self._settings = settings
+        self._image_source = (image_source or "").strip()
         self._instagram_images_count = instagram_images_count
         self._composer: TextComposer = build_text_composer(settings)
         # `image_source` é a escolha da UI (o seletor de fonte): vale para esta
@@ -249,6 +250,7 @@ class GenerationService:
             "raw_text": raw_text[:600],
             "style": style,
             "slides_count": slides_count,
+            "image_source": self._image_source,
             "instagram_images_count": self._instagram_images_count,
             "person_images_count": person_images_count,
             "food_images_count": food_images_count,

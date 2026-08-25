@@ -24,9 +24,11 @@ import re
 
 from app.adapters.pinterest_client import (
     PinterestImage,
+    build_pinterest_client,
     _instagram_scrape_client,
     _pinterest_scrape_client,
     is_mock_image,
+    media_identity,
 )
 from app.config import Settings
 
@@ -36,6 +38,9 @@ logger = logging.getLogger(__name__)
 # `casting.MIN_IMAGE_ALTERNATIVES` promete na geração, e no Instagram cada uma
 # é um item pago da Apify — subir isso é subir a conta.
 MAX_HANDLE_ALTERNATIVES = 5
+# Busca por clique continua pequena: é uma troca de galeria, não uma nova
+# geração do carrossel.
+MAX_QUERY_ALTERNATIVES = 5
 
 _HANDLE_CLEAN_RE = re.compile(r"[^a-z0-9._]")
 
@@ -97,6 +102,66 @@ def search_by_handle(
     return [], "", " ".join(reasons) or f"Nenhuma foto nova encontrada para @{handle}."
 
 
+def search_by_query(
+    settings: Settings,
+    query: str,
+    *,
+    avoid_ids: set[str],
+    avoid_media: set[str] = frozenset(),
+    image_source: str = "",
+    limit: int = MAX_QUERY_ALTERNATIVES,
+) -> tuple[list[PinterestImage], str, str]:
+    """Busca alternativas para um slide usando a fonte da geração.
+
+    A busca só acontece quando o usuário clica. As fotos já presentes no
+    projeto sao filtradas por id e por URL normalizada, porque providers podem
+    devolver o mesmo arquivo com ids diferentes.
+    """
+    clean_query = " ".join(str(query or "").split())[:240]
+    if not clean_query:
+        return [], "", "Escreva o que a imagem deve mostrar."
+    target_limit = min(max(int(limit or MAX_QUERY_ALTERNATIVES), 1), MAX_QUERY_ALTERNATIVES)
+    try:
+        client = build_pinterest_client(
+            settings,
+            override=image_source,
+            avoid_media=avoid_media,
+        )
+        images = client.search(clean_query, limit=target_limit)
+    except Exception as exc:  # pragma: no cover - defensivo
+        logger.warning("Busca de alternativas falhou (%s).", type(exc).__name__)
+        return [], "", "A busca de imagens falhou."
+
+    # O modo mock é válido localmente. Um provider real que caiu no mock não
+    # deve poluir a galeria com gradientes sem explicar a falha.
+    if getattr(client, "name", "") != "mock" and images and all(
+        is_mock_image(image) for image in images
+    ):
+        reason = getattr(client, "last_fallback_reason", "")
+        return [], "", reason or "A fonte de imagens não retornou fotos reais."
+
+    fresh: list[PinterestImage] = []
+    for image in images:
+        media_key = media_identity(image.image_url)
+        if image.image_id in avoid_ids or (media_key and media_key in avoid_media):
+            continue
+        if any(
+            image.image_id == candidate.image_id
+            or (
+                media_key
+                and media_key == media_identity(candidate.image_url)
+            )
+            for candidate in fresh
+        ):
+            continue
+        fresh.append(image)
+        if len(fresh) >= target_limit:
+            break
+    if not fresh:
+        return [], "", "Nenhuma imagem nova encontrada para essa busca."
+    return fresh, getattr(client, "name", ""), ""
+
+
 def _from_instagram(
     settings: Settings, handle: str, avoid_media: set[str], limit: int
 ) -> tuple[list[PinterestImage], str]:
@@ -124,4 +189,10 @@ def _from_pinterest(
     return real, ""
 
 
-__all__ = ["MAX_HANDLE_ALTERNATIVES", "normalize_handle", "search_by_handle"]
+__all__ = [
+    "MAX_HANDLE_ALTERNATIVES",
+    "MAX_QUERY_ALTERNATIVES",
+    "normalize_handle",
+    "search_by_handle",
+    "search_by_query",
+]
